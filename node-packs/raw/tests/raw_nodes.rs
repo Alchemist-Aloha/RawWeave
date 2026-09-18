@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use rawweave_color::{DisplayRGB, SceneLinearRGB, WorkingSpace};
 use rawweave_node_api::{EvaluationContext, Inputs, NodePack, NodeRegistry, Parameters, Value};
-use rawweave_raw::{DeterministicCorpus, DeterministicDecoder, RawDecoder};
+use rawweave_raw::{
+    CameraProfile, DeterministicCorpus, DeterministicDecoder, LensProfile, RawDecoder,
+};
 use rawweave_raw_nodes::{RawNodePack, register_nodes_with_decoder};
 
 fn deterministic_registry() -> NodeRegistry {
@@ -113,6 +115,25 @@ fn decode_is_deterministic_and_returns_frame_mosaic_and_metadata() {
     assert!(matches!(
         first.outputs.get("exif"),
         Some(Value::ExifMetadata(_))
+    ));
+}
+
+#[test]
+fn decode_can_consume_source_bytes_from_the_evaluation_context() {
+    let registry = deterministic_registry();
+    let result = registry
+        .instantiate("raw.decode")
+        .unwrap()
+        .evaluate(
+            &Inputs::new(),
+            &Parameters::new(),
+            &EvaluationContext::default().with_source_bytes(vec![1, 2, 3]),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        result.outputs.get("frame"),
+        Some(Value::RawFrame(_))
     ));
 }
 
@@ -234,6 +255,103 @@ fn lens_correction_defaults_to_a_scene_preserving_pass_through() {
         result.outputs.get("scene"),
         Some(&Value::SceneLinearRGB(scene))
     );
+}
+
+#[test]
+fn camera_transform_applies_profile_matrix_and_keeps_identity_profiles_identity() {
+    let registry = deterministic_registry();
+    let scene = SceneLinearRGB::new(
+        rawweave_image::Dimensions::new(1, 1),
+        vec![[1.0, 2.0, 3.0]],
+        WorkingSpace::CameraNative,
+    )
+    .unwrap();
+
+    let identity = CameraProfile::identity("Test", "Identity");
+    let identity_result = evaluate(
+        &registry,
+        "raw.camera-transform",
+        [
+            ("scene".to_owned(), Value::SceneLinearRGB(scene.clone())),
+            ("camera_profile".to_owned(), Value::CameraProfile(identity)),
+        ]
+        .into_iter()
+        .collect(),
+        [("working_space".to_owned(), "sRGB".into())]
+            .into_iter()
+            .collect(),
+    );
+    let Value::SceneLinearRGB(identity_scene) = identity_result.outputs["scene"].clone() else {
+        panic!("expected scene-linear output")
+    };
+    assert_eq!(identity_scene.pixels(), scene.pixels());
+    assert_eq!(identity_scene.working_space(), WorkingSpace::Srgb);
+
+    let mut profile = CameraProfile::identity("Test", "Matrix");
+    profile.xyz_to_camera = [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]];
+    let transformed = evaluate(
+        &registry,
+        "raw.camera-transform",
+        [
+            ("scene".to_owned(), Value::SceneLinearRGB(scene)),
+            ("camera_profile".to_owned(), Value::CameraProfile(profile)),
+        ]
+        .into_iter()
+        .collect(),
+        [("working_space".to_owned(), "sRGB".into())]
+            .into_iter()
+            .collect(),
+    );
+    let Value::SceneLinearRGB(transformed) = transformed.outputs["scene"].clone() else {
+        panic!("expected scene-linear output")
+    };
+    assert_ne!(transformed.pixel(0, 0), Some([1.0, 2.0, 3.0]));
+}
+
+#[test]
+fn lens_correction_applies_distortion_and_vignette_but_identity_is_exact() {
+    let registry = deterministic_registry();
+    let scene = SceneLinearRGB::new(
+        rawweave_image::Dimensions::new(5, 5),
+        (0..25).map(|index| [index as f32, 1.0, 2.0]).collect(),
+        WorkingSpace::Srgb,
+    )
+    .unwrap();
+
+    let identity = evaluate(
+        &registry,
+        "raw.lens-correction",
+        [
+            ("scene".to_owned(), Value::SceneLinearRGB(scene.clone())),
+            (
+                "lens_profile".to_owned(),
+                Value::LensProfile(LensProfile::identity("Identity")),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        Parameters::new(),
+    );
+    assert_eq!(
+        identity.outputs["scene"],
+        Value::SceneLinearRGB(scene.clone())
+    );
+
+    let mut profile = LensProfile::identity("Distorted");
+    profile.radial_distortion = [0.35, 0.0, 0.0];
+    profile.vignette = [0.25, 0.0, 0.0];
+    let corrected = evaluate(
+        &registry,
+        "raw.lens-correction",
+        [
+            ("scene".to_owned(), Value::SceneLinearRGB(scene)),
+            ("lens_profile".to_owned(), Value::LensProfile(profile)),
+        ]
+        .into_iter()
+        .collect(),
+        Parameters::new(),
+    );
+    assert_ne!(corrected.outputs["scene"], identity.outputs["scene"]);
 }
 
 #[test]

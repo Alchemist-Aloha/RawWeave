@@ -455,10 +455,7 @@ impl Graph {
         let mut inputs = Inputs::new();
         let mut upstream_hasher = DefaultHasher::new();
         backend_identity(&execution_context).hash(&mut upstream_hasher);
-        if let Some(source_image) = execution_context.source_image.as_ref() {
-            0_u8.hash(&mut upstream_hasher);
-            hash_image(source_image, &mut upstream_hasher);
-        }
+        hash_evaluation_context(&execution_context, &mut upstream_hasher);
         for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
             let upstream =
                 self.evaluate_node(&edge.from_node, &execution_context, memo, visiting)?;
@@ -567,6 +564,40 @@ impl Graph {
     }
 }
 
+fn hash_evaluation_context(context: &EvaluationContext, hasher: &mut impl Hasher) {
+    match context.source_image.as_ref() {
+        Some(source_image) => {
+            0_u8.hash(hasher);
+            hash_image(source_image, hasher);
+        }
+        None => 1_u8.hash(hasher),
+    }
+    match context.source_bytes.as_ref() {
+        Some(source_bytes) => {
+            2_u8.hash(hasher);
+            source_bytes.hash(hasher);
+        }
+        None => 3_u8.hash(hasher),
+    }
+    match context.source_path.as_ref() {
+        Some(source_path) => {
+            4_u8.hash(hasher);
+            source_path.as_os_str().hash(hasher);
+        }
+        None => 5_u8.hash(hasher),
+    }
+    6_u8.hash(hasher);
+    for (id, value) in &context.external_inputs {
+        id.hash(hasher);
+        hash_value(value, hasher);
+    }
+    7_u8.hash(hasher);
+    for (id, bytes) in &context.assets {
+        id.hash(hasher);
+        bytes.hash(hasher);
+    }
+}
+
 fn backend_identity(context: &EvaluationContext) -> BackendIdentity {
     match context.render_context() {
         None => BackendIdentity::NoRenderContext,
@@ -605,7 +636,9 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
             | Value::SceneLinearRGB(_)
             | Value::DisplayRGB(_)
             | Value::CameraMetadata(_)
-            | Value::ExifMetadata(_) => None,
+            | Value::ExifMetadata(_)
+            | Value::CameraProfile(_)
+            | Value::LensProfile(_) => None,
         })
 }
 
@@ -691,6 +724,36 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
                 value.hash(hasher);
             }
         }
+        Value::CameraProfile(profile) => {
+            9_u8.hash(hasher);
+            hash_camera_profile(profile, hasher);
+        }
+        Value::LensProfile(profile) => {
+            10_u8.hash(hasher);
+            hash_lens_profile(profile, hasher);
+        }
+    }
+}
+
+fn hash_camera_profile(profile: &rawweave_raw::CameraProfile, hasher: &mut impl Hasher) {
+    profile.make.hash(hasher);
+    profile.model.hash(hasher);
+    for row in &profile.xyz_to_camera {
+        for value in row {
+            value.to_bits().hash(hasher);
+        }
+    }
+}
+
+fn hash_lens_profile(profile: &rawweave_raw::LensProfile, hasher: &mut impl Hasher) {
+    profile.name.hash(hasher);
+    for value in profile
+        .radial_distortion
+        .iter()
+        .chain(profile.tangential_distortion.iter())
+        .chain(profile.vignette.iter())
+    {
+        value.to_bits().hash(hasher);
     }
 }
 
@@ -700,24 +763,11 @@ fn hash_raw_frame(frame: &rawweave_raw::RawFrame, hasher: &mut impl Hasher) {
         level.to_bits().hash(hasher);
     }
     hash_camera_metadata(frame.camera(), hasher);
-    frame.profile().make.hash(hasher);
-    frame.profile().model.hash(hasher);
-    for row in &frame.profile().xyz_to_camera {
-        for value in row {
-            value.to_bits().hash(hasher);
-        }
-    }
+    hash_camera_profile(frame.profile(), hasher);
     match frame.lens_profile() {
         Some(profile) => {
             true.hash(hasher);
-            profile.name.hash(hasher);
-            for value in profile
-                .radial_distortion
-                .iter()
-                .chain(profile.tangential_distortion.iter())
-            {
-                value.to_bits().hash(hasher);
-            }
+            hash_lens_profile(profile, hasher);
         }
         None => false.hash(hasher),
     }
@@ -778,12 +828,13 @@ fn hash_display(display: &rawweave_color::DisplayRGB, hasher: &mut impl Hasher) 
 
 fn hash_working_space(space: &rawweave_color::WorkingSpace, hasher: &mut impl Hasher) {
     match space {
-        rawweave_color::WorkingSpace::Srgb => 0_u8.hash(hasher),
-        rawweave_color::WorkingSpace::DisplayP3 => 1_u8.hash(hasher),
-        rawweave_color::WorkingSpace::ProPhoto => 2_u8.hash(hasher),
-        rawweave_color::WorkingSpace::Rec2020 => 3_u8.hash(hasher),
+        rawweave_color::WorkingSpace::CameraNative => 0_u8.hash(hasher),
+        rawweave_color::WorkingSpace::Srgb => 1_u8.hash(hasher),
+        rawweave_color::WorkingSpace::DisplayP3 => 2_u8.hash(hasher),
+        rawweave_color::WorkingSpace::ProPhoto => 3_u8.hash(hasher),
+        rawweave_color::WorkingSpace::Rec2020 => 4_u8.hash(hasher),
         rawweave_color::WorkingSpace::Custom(name) => {
-            4_u8.hash(hasher);
+            5_u8.hash(hasher);
             name.hash(hasher);
         }
     }

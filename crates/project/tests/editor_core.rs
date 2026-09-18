@@ -190,6 +190,54 @@ fn editor_core_round_trips_a_raw_pipeline_and_executes_it_with_a_test_decoder() 
     ));
 }
 
+#[test]
+fn reloaded_raw_workflow_evaluates_from_context_bytes_end_to_end() {
+    let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
+    let mut editor = EditorCore::new_with_raw_decoder(decoder.clone());
+    for (node_id, type_id) in [
+        ("decode", "raw.decode"),
+        ("black", "raw.black-level"),
+        ("white-balance", "raw.white-balance"),
+        ("highlight", "raw.highlight-reconstruction"),
+        ("demosaic", "raw.demosaic"),
+        ("camera", "raw.camera-transform"),
+        ("lens", "raw.lens-correction"),
+        ("display", "raw.display-transform"),
+    ] {
+        editor.add_node(node_id, type_id).unwrap();
+    }
+    editor.connect("decode", "frame", "black", "frame").unwrap();
+    editor
+        .connect("black", "mosaic", "white-balance", "mosaic")
+        .unwrap();
+    editor
+        .connect("white-balance", "mosaic", "highlight", "mosaic")
+        .unwrap();
+    editor
+        .connect("highlight", "mosaic", "demosaic", "mosaic")
+        .unwrap();
+    editor
+        .connect("demosaic", "scene", "camera", "scene")
+        .unwrap();
+    editor
+        .connect("decode", "camera_profile", "camera", "camera_profile")
+        .unwrap();
+    editor.connect("camera", "scene", "lens", "scene").unwrap();
+    editor
+        .connect("decode", "lens_profile", "lens", "lens_profile")
+        .unwrap();
+    editor.connect("lens", "scene", "display", "scene").unwrap();
+
+    let saved = editor.save_workflow().unwrap();
+    let mut reloaded = EditorCore::new_with_raw_decoder(decoder);
+    reloaded.load_workflow(&saved).unwrap();
+    let result = reloaded
+        .evaluate_raw_workflow_with_bytes("display", "display", vec![1, 2, 3])
+        .unwrap();
+
+    assert!(matches!(result, Value::DisplayRGB(_)));
+}
+
 fn deterministic_registry() -> NodeRegistry {
     let mut registry = NodeRegistry::default();
     RawNodePack::with_decoder(DeterministicDecoder::new(

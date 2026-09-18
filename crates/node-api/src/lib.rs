@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rawweave_color::{DisplayRGB, SceneLinearRGB};
@@ -145,6 +146,21 @@ impl ParameterDescriptor {
             max,
         }
     }
+
+    pub fn string(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        default: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            parameter_type: ParameterType::String,
+            default: ParameterValue::String(default.into()),
+            min: None,
+            max: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -249,6 +265,8 @@ pub enum Value {
     DisplayRGB(DisplayRGB),
     CameraMetadata(CameraMetadata),
     ExifMetadata(ExifMetadata),
+    CameraProfile(rawweave_raw::CameraProfile),
+    LensProfile(rawweave_raw::LensProfile),
 }
 
 impl Value {
@@ -263,6 +281,8 @@ impl Value {
             Self::DisplayRGB(_) => "color.DisplayRGB",
             Self::CameraMetadata(_) => "raw.CameraMetadata",
             Self::ExifMetadata(_) => "raw.ExifMetadata",
+            Self::CameraProfile(_) => "raw.CameraProfile",
+            Self::LensProfile(_) => "raw.LensProfile",
         }
     }
 }
@@ -285,6 +305,10 @@ impl NodeResult {
 #[derive(Clone, Debug, Default)]
 pub struct EvaluationContext {
     pub source_image: Option<Image>,
+    pub source_bytes: Option<Vec<u8>>,
+    pub source_path: Option<PathBuf>,
+    pub external_inputs: BTreeMap<String, Value>,
+    pub assets: BTreeMap<String, Vec<u8>>,
     pub requested_region: Option<Region>,
     pub render_context: Option<RenderContext>,
     pub tile: TileCoord,
@@ -298,6 +322,46 @@ impl EvaluationContext {
             source_image: Some(source_image),
             ..Self::default()
         }
+    }
+
+    pub fn with_source_bytes(mut self, source_bytes: Vec<u8>) -> Self {
+        self.source_bytes = Some(source_bytes);
+        self
+    }
+
+    pub fn with_source_path(mut self, source_path: impl AsRef<std::path::Path>) -> Self {
+        self.source_path = Some(source_path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_external_input(mut self, id: impl Into<String>, value: Value) -> Self {
+        self.external_inputs.insert(id.into(), value);
+        self
+    }
+
+    pub fn with_external_inputs<I, K>(mut self, inputs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Value)>,
+        K: Into<String>,
+    {
+        self.external_inputs
+            .extend(inputs.into_iter().map(|(id, value)| (id.into(), value)));
+        self
+    }
+
+    pub fn with_asset(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.assets.insert(id.into(), bytes);
+        self
+    }
+
+    pub fn with_assets<I, K>(mut self, assets: I) -> Self
+    where
+        I: IntoIterator<Item = (K, Vec<u8>)>,
+        K: Into<String>,
+    {
+        self.assets
+            .extend(assets.into_iter().map(|(id, bytes)| (id.into(), bytes)));
+        self
     }
 
     pub fn with_requested_region(mut self, requested_region: Region) -> Self {

@@ -10,7 +10,9 @@ use rawweave_node_api::{
     NodePack, NodeRegistry, NodeResult, ParameterDescriptor, ParameterValue, Parameters,
     PortDescriptor, Value,
 };
-use rawweave_raw::{CfaColor, Mosaic, RawDecoder, RawError, RawFrame, RawloaderDecoder};
+use rawweave_raw::{
+    CfaColor, LensProfile, Mosaic, RawDecoder, RawError, RawFrame, RawloaderDecoder,
+};
 
 const DECODE: &str = "raw.decode";
 const BLACK_LEVEL: &str = "raw.black-level";
@@ -32,7 +34,7 @@ pub fn raw_decode_descriptor() -> NodeDescriptor {
         "bytes",
         "RAW Bytes",
         "core.Bytes",
-        true,
+        false,
     ));
     descriptor
         .outputs
@@ -44,6 +46,16 @@ pub fn raw_decode_descriptor() -> NodeDescriptor {
         "camera",
         "Camera Metadata",
         "raw.CameraMetadata",
+    ));
+    descriptor.outputs.push(PortDescriptor::output(
+        "camera_profile",
+        "Camera Profile",
+        "raw.CameraProfile",
+    ));
+    descriptor.outputs.push(PortDescriptor::output(
+        "lens_profile",
+        "Lens Profile",
+        "raw.LensProfile",
     ));
     descriptor.outputs.push(PortDescriptor::output(
         "exif",
@@ -169,6 +181,17 @@ pub fn camera_transform_descriptor() -> NodeDescriptor {
         "color.SceneLinearRGB",
         true,
     ));
+    descriptor.inputs.push(PortDescriptor::input(
+        "camera_profile",
+        "Camera Profile",
+        "raw.CameraProfile",
+        false,
+    ));
+    descriptor.parameters.push(ParameterDescriptor::string(
+        "working_space",
+        "Working Space",
+        "sRGB",
+    ));
     descriptor.outputs.push(PortDescriptor::output(
         "scene",
         "Scene Linear RGB",
@@ -186,6 +209,12 @@ pub fn lens_correction_descriptor() -> NodeDescriptor {
         "Scene Linear RGB",
         "color.SceneLinearRGB",
         true,
+    ));
+    descriptor.inputs.push(PortDescriptor::input(
+        "lens_profile",
+        "Lens Profile",
+        "raw.LensProfile",
+        false,
     ));
     descriptor.outputs.push(PortDescriptor::output(
         "scene",
@@ -230,22 +259,33 @@ impl NodeInstance for RawDecode {
         &self,
         inputs: &Inputs,
         _parameters: &Parameters,
-        _context: &EvaluationContext,
+        context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
-        let bytes = match required_input(inputs, "bytes")? {
-            Value::Bytes(bytes) => bytes,
-            Value::Image(_)
-            | Value::Float(_)
-            | Value::RawFrame(_)
-            | Value::Mosaic(_)
-            | Value::SceneLinearRGB(_)
-            | Value::DisplayRGB(_)
-            | Value::CameraMetadata(_)
-            | Value::ExifMetadata(_) => {
-                return Err(NodeError::InvalidParameter("bytes".to_owned()));
+        let frame = match inputs.get("bytes") {
+            Some(Value::Bytes(bytes)) => self.decoder.decode(bytes).map_err(raw_error)?,
+            Some(_) => return Err(NodeError::InvalidParameter("bytes".to_owned())),
+            None => {
+                if let Some(bytes) = context.source_bytes.as_deref() {
+                    self.decoder.decode(bytes).map_err(raw_error)?
+                } else if let Some(path) = context.source_path.as_deref() {
+                    let bytes = std::fs::read(path).map_err(|error| {
+                        NodeError::Message(format!("failed to read RAW source: {error}"))
+                    })?;
+                    self.decoder.decode(&bytes).map_err(raw_error)?
+                } else {
+                    return Err(NodeError::MissingInput("bytes".to_owned()));
+                }
             }
         };
-        let frame = self.decoder.decode(bytes).map_err(raw_error)?;
+        let lens_profile = frame.lens_profile().cloned().unwrap_or_else(|| {
+            LensProfile::identity(
+                frame
+                    .camera()
+                    .lens
+                    .clone()
+                    .unwrap_or_else(|| "Unknown lens".to_owned()),
+            )
+        });
         Ok(NodeResult::new(
             [
                 ("frame".to_owned(), Value::RawFrame(frame.clone())),
@@ -254,6 +294,11 @@ impl NodeInstance for RawDecode {
                     "camera".to_owned(),
                     Value::CameraMetadata(frame.camera().clone()),
                 ),
+                (
+                    "camera_profile".to_owned(),
+                    Value::CameraProfile(frame.profile().clone()),
+                ),
+                ("lens_profile".to_owned(), Value::LensProfile(lens_profile)),
                 ("exif".to_owned(), Value::ExifMetadata(frame.exif().clone())),
                 (
                     "preview".to_owned(),
@@ -371,7 +416,7 @@ impl NodeInstance for Demosaic {
                 ]);
             }
         }
-        let scene = SceneLinearRGB::new(dimensions, pixels, WorkingSpace::Srgb)
+        let scene = SceneLinearRGB::new(dimensions, pixels, WorkingSpace::CameraNative)
             .map_err(|error| NodeError::Message(error.to_string()))?;
         Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene)))
     }
@@ -383,11 +428,33 @@ impl NodeInstance for CameraTransform {
     fn evaluate(
         &self,
         inputs: &Inputs,
-        _parameters: &Parameters,
+        parameters: &Parameters,
         _context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let scene = scene_input(inputs, "scene")?;
-        Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene)))
+        let working_space = working_space_parameter(parameters)?;
+        let profile = match inputs.get("camera_profile") {
+            None => None,
+            Some(Value::CameraProfile(profile)) => Some(profile),
+            Some(_) => return Err(NodeError::InvalidParameter("camera_profile".to_owned())),
+        };
+        let transformed = match profile {
+            Some(profile) => scene
+                .map_pixels(|pixel| {
+                    [
+                        dot(profile.xyz_to_camera[0], pixel),
+                        dot(profile.xyz_to_camera[1], pixel),
+                        dot(profile.xyz_to_camera[2], pixel),
+                    ]
+                })
+                .map_err(|error| NodeError::Message(error.to_string()))?,
+            None => scene,
+        }
+        .with_working_space(working_space);
+        Ok(NodeResult::single(
+            "scene",
+            Value::SceneLinearRGB(transformed),
+        ))
     }
 }
 
@@ -401,7 +468,58 @@ impl NodeInstance for LensCorrection {
         _context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let scene = scene_input(inputs, "scene")?;
-        Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene)))
+        let profile = match inputs.get("lens_profile") {
+            None => return Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene))),
+            Some(Value::LensProfile(profile)) => profile,
+            Some(_) => return Err(NodeError::InvalidParameter("lens_profile".to_owned())),
+        };
+        if profile.is_identity() {
+            return Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene)));
+        }
+
+        let dimensions = scene.dimensions();
+        let width = dimensions.width;
+        let height = dimensions.height;
+        let source = &scene;
+        let pixels = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let nx = normalized_coordinate(x, width);
+                    let ny = normalized_coordinate(y, height);
+                    let radius_squared = nx * nx + ny * ny;
+                    let radial = 1.0
+                        + profile.radial_distortion[0] * radius_squared
+                        + profile.radial_distortion[1] * radius_squared.powi(2)
+                        + profile.radial_distortion[2] * radius_squared.powi(3);
+                    let tangential_x = 2.0 * profile.tangential_distortion[0] * nx * ny
+                        + profile.tangential_distortion[1] * (radius_squared + 2.0 * nx * nx);
+                    let tangential_y = profile.tangential_distortion[0]
+                        * (radius_squared + 2.0 * ny * ny)
+                        + 2.0 * profile.tangential_distortion[1] * nx * ny;
+                    let source_x = denormalize_coordinate(
+                        (nx * radial + tangential_x).clamp(-1.0, 1.0),
+                        width,
+                    );
+                    let source_y = denormalize_coordinate(
+                        (ny * radial + tangential_y).clamp(-1.0, 1.0),
+                        height,
+                    );
+                    let mut pixel = bilinear_sample(source, source_x, source_y);
+                    let vignette = 1.0
+                        + profile.vignette[0] * radius_squared
+                        + profile.vignette[1] * radius_squared.powi(2)
+                        + profile.vignette[2] * radius_squared.powi(3);
+                    pixel.iter_mut().for_each(|channel| *channel *= vignette);
+                    pixel
+                })
+            })
+            .collect();
+        let corrected = SceneLinearRGB::new(dimensions, pixels, scene.working_space())
+            .map_err(|error| NodeError::Message(error.to_string()))?;
+        Ok(NodeResult::single(
+            "scene",
+            Value::SceneLinearRGB(corrected),
+        ))
     }
 }
 
@@ -438,7 +556,9 @@ fn raw_frame_input(inputs: &Inputs, port: &str) -> Result<RawFrame, NodeError> {
         | Value::SceneLinearRGB(_)
         | Value::DisplayRGB(_)
         | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::ExifMetadata(_)
+        | Value::CameraProfile(_)
+        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
@@ -452,7 +572,9 @@ fn mosaic_input(inputs: &Inputs, port: &str) -> Result<Mosaic, NodeError> {
         | Value::SceneLinearRGB(_)
         | Value::DisplayRGB(_)
         | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::ExifMetadata(_)
+        | Value::CameraProfile(_)
+        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
@@ -466,8 +588,74 @@ fn scene_input(inputs: &Inputs, port: &str) -> Result<SceneLinearRGB, NodeError>
         | Value::Mosaic(_)
         | Value::DisplayRGB(_)
         | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::ExifMetadata(_)
+        | Value::CameraProfile(_)
+        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
+}
+
+fn dot(matrix_row: [f32; 3], pixel: [f32; 3]) -> f32 {
+    matrix_row[0] * pixel[0] + matrix_row[1] * pixel[1] + matrix_row[2] * pixel[2]
+}
+
+fn working_space_parameter(parameters: &Parameters) -> Result<WorkingSpace, NodeError> {
+    let Some(value) = parameters.get("working_space") else {
+        return Ok(WorkingSpace::Srgb);
+    };
+    let ParameterValue::String(value) = value else {
+        return Err(NodeError::InvalidParameter("working_space".to_owned()));
+    };
+    match value.as_str() {
+        "sRGB" | "sRGB-linear" | "Srgb" => Ok(WorkingSpace::Srgb),
+        "CameraNative" | "camera-native" => Ok(WorkingSpace::CameraNative),
+        "DisplayP3" | "display-p3" => Ok(WorkingSpace::DisplayP3),
+        "ProPhoto" | "prophoto" => Ok(WorkingSpace::ProPhoto),
+        "Rec2020" | "rec2020" => Ok(WorkingSpace::Rec2020),
+        value if value.starts_with("custom:") => Ok(WorkingSpace::Custom(value[7..].to_owned())),
+        _ => Err(NodeError::InvalidParameter("working_space".to_owned())),
+    }
+}
+
+fn normalized_coordinate(index: u32, size: u32) -> f32 {
+    if size <= 1 {
+        0.0
+    } else {
+        (index as f32 / (size - 1) as f32) * 2.0 - 1.0
+    }
+}
+
+fn denormalize_coordinate(value: f32, size: u32) -> f32 {
+    if size <= 1 {
+        0.0
+    } else {
+        (value + 1.0) * (size - 1) as f32 * 0.5
+    }
+}
+
+fn bilinear_sample(scene: &SceneLinearRGB, x: f32, y: f32) -> [f32; 3] {
+    let max_x = scene.dimensions().width.saturating_sub(1) as f32;
+    let max_y = scene.dimensions().height.saturating_sub(1) as f32;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = x0
+        .saturating_add(1)
+        .min(scene.dimensions().width.saturating_sub(1));
+    let y1 = y0
+        .saturating_add(1)
+        .min(scene.dimensions().height.saturating_sub(1));
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let p00 = scene.pixel(x0, y0).unwrap_or([0.0; 3]);
+    let p10 = scene.pixel(x1, y0).unwrap_or(p00);
+    let p01 = scene.pixel(x0, y1).unwrap_or(p00);
+    let p11 = scene.pixel(x1, y1).unwrap_or(p01);
+    std::array::from_fn(|channel| {
+        let top = p00[channel] + (p10[channel] - p00[channel]) * tx;
+        let bottom = p01[channel] + (p11[channel] - p01[channel]) * tx;
+        top + (bottom - top) * ty
+    })
 }
 
 fn cfa_channel(color: CfaColor) -> usize {

@@ -11,6 +11,8 @@ use thiserror::Error;
 /// Named working spaces supported by the initial color boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WorkingSpace {
+    /// Linear RGB values expressed in the camera sensor's native primaries.
+    CameraNative,
     /// Linearized sRGB primaries.
     #[default]
     Srgb,

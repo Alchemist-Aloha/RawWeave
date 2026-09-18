@@ -11,6 +11,7 @@ rawweave-core-values.workspace = true
 rawweave-graph.workspace = true
 rawweave-image.workspace = true
 rawweave-node-api.workspace = true
+rawweave-raw.workspace = true
 rawweave-raw-nodes.workspace = true
 thiserror.workspace = true
 

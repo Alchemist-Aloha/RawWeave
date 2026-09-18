@@ -328,6 +328,9 @@ pub struct LensProfile {
     pub radial_distortion: [f32; 3],
     /// Tangential distortion coefficients, if known.
     pub tangential_distortion: [f32; 2],
+    /// Radial vignette correction coefficients.
+    #[serde(default)]
+    pub vignette: [f32; 3],
 }
 
 impl LensProfile {
@@ -337,12 +340,15 @@ impl LensProfile {
             name: name.into(),
             radial_distortion: [0.0; 3],
             tangential_distortion: [0.0; 2],
+            vignette: [0.0; 3],
         }
     }
 
     /// Whether this profile would change image coordinates.
     pub fn is_identity(&self) -> bool {
-        self.radial_distortion == [0.0; 3] && self.tangential_distortion == [0.0; 2]
+        self.radial_distortion == [0.0; 3]
+            && self.tangential_distortion == [0.0; 2]
+            && self.vignette == [0.0; 3]
     }
 }
 

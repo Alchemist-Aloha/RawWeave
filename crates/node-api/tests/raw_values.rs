@@ -1,6 +1,6 @@
 use rawweave_color::SceneLinearRGB;
 use rawweave_node_api::Value;
-use rawweave_raw::DeterministicCorpus;
+use rawweave_raw::{CameraProfile, DeterministicCorpus, LensProfile};
 
 #[test]
 fn raw_and_color_values_have_stable_graph_type_ids() {
@@ -16,4 +16,12 @@ fn raw_and_color_values_have_stable_graph_type_ids() {
         "color.SceneLinearRGB"
     );
     assert_eq!(Value::Bytes(vec![1, 2]).data_type(), "core.Bytes");
+    assert_eq!(
+        Value::CameraProfile(CameraProfile::identity("Make", "Model")).data_type(),
+        "raw.CameraProfile"
+    );
+    assert_eq!(
+        Value::LensProfile(LensProfile::identity("Lens")).data_type(),
+        "raw.LensProfile"
+    );
 }
