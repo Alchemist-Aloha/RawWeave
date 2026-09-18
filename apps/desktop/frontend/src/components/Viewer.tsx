@@ -33,7 +33,28 @@ function Pane({ viewer, pane, options, controller }: {
   controller: ViewerController;
 }) {
   const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const selectedKey = pane.target ? targetKey(pane.target) : '';
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const updateViewport = (width: number, height: number) => {
+      controller.setViewport(viewer, { width, height });
+    };
+    const measure = () => updateViewport(stage.clientWidth, stage.clientHeight);
+    measure();
+
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width ?? stage.clientWidth;
+      const height = entry?.contentRect.height ?? stage.clientHeight;
+      updateViewport(width, height);
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [controller, viewer]);
 
   return (
     <article className="viewer-pane" aria-label={`Viewer ${viewer}`}>
@@ -61,6 +82,7 @@ function Pane({ viewer, pane, options, controller }: {
       </div>
       <div
         className="viewer-pane__stage"
+        ref={stageRef}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           dragStart.current = {

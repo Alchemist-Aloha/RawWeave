@@ -167,9 +167,32 @@ async fn request_preview(
 }
 
 #[tauri::command]
+fn open_image(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<preview::OpenImageMetadata, String> {
+    let image = preview::decode_image_file(&path)?;
+    let metadata = preview::OpenImageMetadata {
+        width: image.width(),
+        height: image.height(),
+        revision: image.revision(),
+    };
+    *state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())? = Some(image);
+    Ok(metadata)
+}
+
+#[tauri::command]
 fn cancel_preview(state: State<'_, AppState>, request_id: String) -> Result<(), String> {
     state.preview.cancel(&request_id);
     Ok(())
+}
+
+#[tauri::command]
+fn release_preview(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    state.preview.release(&url)
 }
 
 pub fn run() {
@@ -193,8 +216,10 @@ pub fn run() {
             set_node_parameter,
             save_workflow,
             load_workflow,
+            open_image,
             request_preview,
             cancel_preview,
+            release_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RawWeave");

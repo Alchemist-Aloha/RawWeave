@@ -32,9 +32,11 @@ function downloadWorkflow(contents: string): void {
 }
 
 export default function App() {
-  const [controller] = useState(() => new EditorController(createPlatform()));
+  const [platform] = useState(() => createPlatform());
+  const [controller] = useState(() => new EditorController(platform));
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
+  const [imageError, setImageError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -133,6 +135,18 @@ export default function App() {
     [controller],
   );
 
+  const openImage = useCallback(async () => {
+    const path = window.prompt('Image path');
+    if (!path) return;
+    try {
+      const image = await platform.openImage(path);
+      viewerController.setSourceDimensions(image);
+      setImageError(null);
+    } catch (error) {
+      setImageError(error instanceof Error ? error.message : String(error));
+    }
+  }, [platform, viewerController]);
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -144,8 +158,11 @@ export default function App() {
           </span>
         </div>
         <div className="topbar__actions">
+          <button className="button button--quiet" onClick={() => void openImage()} type="button">
+            Open image
+          </button>
           <button className="button button--quiet" onClick={() => fileInput.current?.click()} type="button">
-            Open
+            Open workflow
           </button>
           <button
             className="button button--primary"
@@ -228,6 +245,15 @@ export default function App() {
           <strong>Command failed</strong>
           <span>{controller.state.error}</span>
           <button onClick={() => controller.selectNode(controller.state.selectedNodeId)} type="button">
+            ×
+          </button>
+        </div>
+      )}
+      {imageError && (
+        <div className="error-toast" role="alert">
+          <strong>Image open failed</strong>
+          <span>{imageError}</span>
+          <button onClick={() => setImageError(null)} type="button">
             ×
           </button>
         </div>

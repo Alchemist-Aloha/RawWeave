@@ -10,12 +10,32 @@ export interface PreviewTarget {
   outputName: string;
 }
 
+export interface PreviewRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PreviewTile {
+  x: number;
+  y: number;
+}
+
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
 export interface PreviewRequest {
   requestId: string;
   revision: number;
   nodeId: string;
   outputPort: string;
   quality: PreviewQuality;
+  region: PreviewRegion;
+  tile: PreviewTile;
+  mip: number;
 }
 
 export interface PreviewResult {
@@ -24,6 +44,8 @@ export interface PreviewResult {
   url: string;
   width: number;
   height: number;
+  fullWidth: number;
+  fullHeight: number;
   mimeType: string;
 }
 

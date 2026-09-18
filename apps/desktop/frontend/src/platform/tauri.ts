@@ -3,6 +3,7 @@ import type {
   EditorPlatform,
   ExecutionCapability,
   NodeDescriptor,
+  OpenImageResult,
   ParameterType,
   ParameterValue,
   PlatformSnapshot,
@@ -134,6 +135,13 @@ export function createTauriPlatform(): EditorPlatform {
       }
     },
     snapshot: readSnapshot,
+    async openImage(path) {
+      try {
+        return await invoke<OpenImageResult>('open_image', { path });
+      } catch (error) {
+        throw message(error);
+      }
+    },
     async addNode(nodeId, typeId) {
       try {
         await invoke('add_node', { nodeId, typeId });

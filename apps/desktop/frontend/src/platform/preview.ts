@@ -73,6 +73,9 @@ export function createTauriPreviewTransport(): PreviewTransport {
     async cancelPreview(requestId) {
       await invoke('cancel_preview', { requestId });
     },
+    async releasePreview(url) {
+      await invoke('release_preview', { url });
+    },
   };
 }
 
@@ -84,6 +87,10 @@ class BrowserPreviewTransport implements PreviewTransport {
 
   async cancelPreview(_requestId: string): Promise<void> {
     // Browser mode has no backend render job to cancel.
+  }
+
+  async releasePreview(_url: string): Promise<void> {
+    // Browser mode has no backend preview store to release.
   }
 }
 

@@ -48,9 +48,16 @@ export interface PlatformSnapshot {
   revision?: number;
 }
 
+export interface OpenImageResult {
+  width: number;
+  height: number;
+  revision: number;
+}
+
 export interface EditorPlatform {
   nodeDescriptors(): Promise<NodeDescriptor[]>;
   snapshot(): Promise<PlatformSnapshot>;
+  openImage(path: string): Promise<OpenImageResult>;
   addNode(nodeId: string, typeId: string): Promise<void>;
   removeNode(nodeId: string): Promise<void>;
   connect(fromNode: string, fromPort: string, toNode: string, toPort: string): Promise<void>;

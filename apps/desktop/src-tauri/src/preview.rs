@@ -1,15 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 
 use png::{BitDepth, ColorType, Encoder};
-use rawweave_image::Image;
+use rawweave_image::{Dimensions, Image, Region};
 use rawweave_node_api::{EvaluationContext, Value};
 use rawweave_project::EditorCore;
-use rawweave_rendering::PreviewQuality;
+use rawweave_rendering::{PreviewQuality, TileCoord, TileRequest};
 use serde::{Deserialize, Serialize};
 use tauri::http::{Request, Response};
 
@@ -33,6 +34,34 @@ impl From<PreviewQualityRequest> for PreviewQuality {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRegionRequest {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<PreviewRegionRequest> for Region {
+    fn from(value: PreviewRegionRequest) -> Self {
+        Self::new(value.x, value.y, value.width, value.height)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewTileRequest {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl From<PreviewTileRequest> for TileCoord {
+    fn from(value: PreviewTileRequest) -> Self {
+        Self::new(value.x, value.y)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRequest {
@@ -41,6 +70,9 @@ pub struct PreviewRequest {
     pub node_id: String,
     pub output_port: String,
     pub quality: PreviewQualityRequest,
+    pub region: PreviewRegionRequest,
+    pub tile: PreviewTileRequest,
+    pub mip: u8,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -51,7 +83,17 @@ pub struct PreviewMetadata {
     pub url: String,
     pub width: u32,
     pub height: u32,
+    pub full_width: u32,
+    pub full_height: u32,
     pub mime_type: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenImageMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -83,25 +125,98 @@ struct StoredPreview {
     bytes: Vec<u8>,
 }
 
-#[derive(Default)]
 pub struct PreviewStore {
     previews: Mutex<HashMap<String, StoredPreview>>,
+    order: Mutex<VecDeque<String>>,
+    max_entries: usize,
+    max_bytes: usize,
+    bytes: Mutex<usize>,
+}
+
+impl Default for PreviewStore {
+    fn default() -> Self {
+        Self::with_limits(32, 64 * 1024 * 1024)
+    }
 }
 
 impl PreviewStore {
+    pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            previews: Mutex::new(HashMap::new()),
+            order: Mutex::new(VecDeque::new()),
+            max_entries,
+            max_bytes,
+            bytes: Mutex::new(0),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.previews.lock().map(|previews| previews.len()).unwrap_or(0)
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.bytes.lock().map(|bytes| *bytes).unwrap_or(0)
+    }
+
     pub fn insert(&self, path: String, revision: u64, bytes: Vec<u8>) -> Result<(), String> {
-        self.previews
+        if self.max_entries == 0 || bytes.len() > self.max_bytes {
+            return Err("preview exceeds the configured store budget".to_owned());
+        }
+        let mut previews = self
+            .previews
             .lock()
-            .map_err(|_| "preview store is unavailable".to_owned())?
-            .insert(path, StoredPreview { revision, bytes });
+            .map_err(|_| "preview store is unavailable".to_owned())?;
+        let mut order = self
+            .order
+            .lock()
+            .map_err(|_| "preview store is unavailable".to_owned())?;
+        let mut total_bytes = self
+            .bytes
+            .lock()
+            .map_err(|_| "preview store is unavailable".to_owned())?;
+        if let Some(previous) = previews.remove(&path) {
+            *total_bytes = total_bytes.saturating_sub(previous.bytes.len());
+        }
+        order.retain(|candidate| candidate != &path);
+        *total_bytes = total_bytes.saturating_add(bytes.len());
+        previews.insert(path.clone(), StoredPreview { revision, bytes });
+        order.push_back(path);
+        while previews.len() > self.max_entries || *total_bytes > self.max_bytes {
+            let Some(oldest) = order.pop_front() else { break };
+            if let Some(previous) = previews.remove(&oldest) {
+                *total_bytes = total_bytes.saturating_sub(previous.bytes.len());
+            }
+        }
         Ok(())
     }
 
     pub fn get(&self, path: &str) -> Option<Vec<u8>> {
-        self.previews
+        let bytes = self
+            .previews
             .lock()
             .ok()
-            .and_then(|previews| previews.get(path).map(|preview| preview.bytes.clone()))
+            .and_then(|previews| previews.get(path).map(|preview| preview.bytes.clone()));
+        if bytes.is_some() {
+            self.touch(path);
+        }
+        bytes
+    }
+
+    pub fn take(&self, path: &str) -> Option<Vec<u8>> {
+        let bytes = self
+            .previews
+            .lock()
+            .ok()
+            .and_then(|mut previews| previews.remove(path).map(|preview| preview.bytes));
+        if let Some(ref bytes) = bytes {
+            if let Ok(mut total_bytes) = self.bytes.lock() {
+                *total_bytes = total_bytes.saturating_sub(bytes.len());
+            }
+            if let Ok(mut order) = self.order.lock() {
+                order.retain(|candidate| candidate != path);
+            }
+        }
+        bytes
     }
 
     pub fn revision(&self, path: &str) -> Option<u64> {
@@ -112,8 +227,13 @@ impl PreviewStore {
     }
 
     pub fn remove(&self, path: &str) {
-        if let Ok(mut previews) = self.previews.lock() {
-            previews.remove(path);
+        let _ = self.take(path);
+    }
+
+    fn touch(&self, path: &str) {
+        if let Ok(mut order) = self.order.lock() {
+            order.retain(|candidate| candidate != path);
+            order.push_back(path.to_owned());
         }
     }
 }
@@ -167,6 +287,17 @@ impl PreviewManager {
         self.store.remove(&preview_path(request_id));
     }
 
+    pub fn release(&self, url: &str) -> Result<(), String> {
+        let path = url
+            .strip_prefix("rawweave-preview://localhost")
+            .unwrap_or(url);
+        if !path.starts_with("/preview/") {
+            return Err("invalid preview URL".to_owned());
+        }
+        self.store.remove(path);
+        Ok(())
+    }
+
     pub fn finish_job(&self, request_id: &str) {
         if let Ok(mut jobs) = self.jobs.lock() {
             jobs.remove(request_id);
@@ -175,7 +306,7 @@ impl PreviewManager {
 
     pub fn response(&self, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         let path = request.uri().path();
-        match self.store.get(path) {
+        match self.store.take(path) {
             Some(bytes) => Response::builder()
                 .status(200)
                 .header("Content-Type", PREVIEW_MIME_TYPE)
@@ -189,6 +320,21 @@ impl PreviewManager {
                 .expect("valid missing preview response"),
         }
     }
+}
+
+pub fn decode_image_file(path: impl AsRef<Path>) -> Result<Image, String> {
+    let path = path.as_ref();
+    let decoded = image::ImageReader::open(path)
+        .map_err(|error| format!("could not open image '{}': {error}", path.display()))?
+        .decode()
+        .map_err(|error| format!("could not decode image '{}': {error}", path.display()))?;
+    let rgba = decoded.to_rgba32f();
+    Image::from_pixels(
+        rgba.width(),
+        rgba.height(),
+        rgba.pixels().map(|pixel| pixel.0).collect(),
+    )
+    .map_err(|error| format!("could not create rawweave image: {error}"))
 }
 
 pub fn preview_path(request_id: &str) -> String {
@@ -219,6 +365,40 @@ pub fn encode_png(image: &Image) -> Result<Vec<u8>, String> {
         .finish()
         .map_err(|error| format!("could not finish preview PNG: {error}"))?;
     Ok(bytes)
+}
+
+pub fn select_preview_image(
+    image: &Image,
+    requested_region: Region,
+    mip: u8,
+) -> Result<Image, String> {
+    let region = image
+        .global_region()
+        .intersection(requested_region)
+        .ok_or_else(|| "preview region is outside the evaluated image".to_owned())?;
+    let scale = 1_u32.checked_shl(u32::from(mip)).unwrap_or(u32::MAX);
+    let width = region.width.saturating_add(scale.saturating_sub(1)) / scale;
+    let height = region.height.saturating_add(scale.saturating_sub(1)) / scale;
+    let mut pixels = Vec::with_capacity((width as usize).saturating_mul(height as usize));
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = region.x + (x.saturating_mul(scale)).min(region.width - 1);
+            let source_y = region.y + (y.saturating_mul(scale)).min(region.height - 1);
+            pixels.push(
+                image
+                    .pixel_global(source_x, source_y)
+                    .ok_or_else(|| "preview region pixel is unavailable".to_owned())?,
+            );
+        }
+    }
+    Image::from_pixels_with_origin(
+        Dimensions::new(width, height),
+        (region.x, region.y),
+        pixels,
+        image.pixel_format(),
+        image.color_metadata(),
+    )
+    .map_err(|error| format!("could not create preview region: {error}"))
 }
 
 fn channel_to_byte(value: f32) -> u8 {
@@ -254,8 +434,14 @@ pub fn render_preview(
         let source_image = source_image.ok_or_else(|| {
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
-        let context =
-            EvaluationContext::with_source_image(source_image).with_quality(request.quality.into());
+        let context = EvaluationContext::with_source_image(source_image).with_tile_request(
+            TileRequest::new(
+                request.region.into(),
+                request.tile.into(),
+                request.mip,
+                request.quality.into(),
+            ),
+        );
         let value = editor
             .evaluate(&request.node_id, &request.output_port, context)
             .map_err(|error| format!("preview evaluation failed: {error}"))?;
@@ -268,6 +454,9 @@ pub fn render_preview(
                 request.node_id, request.output_port
             ));
         };
+        let full_width = image.width();
+        let full_height = image.height();
+        let image = select_preview_image(&image, request.region.into(), request.mip)?;
         let latest_revision = current_editor
             .lock()
             .map_err(|_| "editor state is unavailable".to_owned())?
@@ -296,6 +485,8 @@ pub fn render_preview(
             url: preview_url(&request.request_id),
             width: image.width(),
             height: image.height(),
+            full_width,
+            full_height,
             mime_type: PREVIEW_MIME_TYPE,
         })
     })();
@@ -345,6 +536,121 @@ mod tests {
         assert_eq!(store.get("/preview/request.png"), Some(vec![1, 2, 3]));
         store.remove("/preview/request.png");
         assert!(store.get("/preview/request.png").is_none());
+    }
+
+    #[test]
+    fn evicts_least_recently_used_previews_by_count_and_bytes() {
+        let store = PreviewStore::with_limits(2, 5);
+        store.insert("/preview/a.png".to_owned(), 1, vec![1, 2, 3]).unwrap();
+        store.insert("/preview/b.png".to_owned(), 1, vec![4, 5]).unwrap();
+        assert_eq!(store.get("/preview/a.png"), Some(vec![1, 2, 3]));
+
+        store.insert("/preview/c.png".to_owned(), 1, vec![6, 7]).unwrap();
+
+        assert!(store.get("/preview/b.png").is_none());
+        assert_eq!(store.get("/preview/a.png"), Some(vec![1, 2, 3]));
+        assert_eq!(store.get("/preview/c.png"), Some(vec![6, 7]));
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.byte_len(), 5);
+    }
+
+    #[test]
+    fn taking_a_preview_releases_its_bytes_without_cloning_them_for_protocol_reads() {
+        let store = PreviewStore::default();
+        store
+            .insert("/preview/request.png".to_owned(), 12, vec![1, 2, 3])
+            .unwrap();
+
+        assert_eq!(store.take("/preview/request.png"), Some(vec![1, 2, 3]));
+        assert!(store.get("/preview/request.png").is_none());
+        assert_eq!(store.byte_len(), 0);
+    }
+
+    #[test]
+    fn releasing_a_preview_url_removes_its_stored_bytes() {
+        let manager = PreviewManager::default();
+        let path = preview_path("request");
+        manager
+            .store
+            .insert(path.clone(), 12, vec![1, 2, 3])
+            .unwrap();
+
+        manager.release(&preview_url("request")).unwrap();
+
+        assert!(manager.store.get(&path).is_none());
+        assert_eq!(manager.store.byte_len(), 0);
+        assert!(manager.release("not-a-preview-url").is_err());
+    }
+
+    #[test]
+    fn selects_the_requested_region_and_mip_for_preview_encoding() {
+        let image = Image::new(4, 3).unwrap();
+
+        let region = select_preview_image(&image, rawweave_image::Region::new(1, 1, 2, 2), 1)
+            .unwrap();
+
+        assert_eq!(region.width(), 1);
+        assert_eq!(region.height(), 1);
+        assert_eq!(region.origin(), (1, 1));
+    }
+
+    #[test]
+    fn opens_a_generated_png_and_renders_it_through_the_image_graph() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-preview-open-render-{}.png",
+            std::process::id()
+        ));
+        let mut png_bytes = Vec::new();
+        let mut encoder = png::Encoder::new(Cursor::new(&mut png_bytes), 2, 2);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ])
+            .unwrap();
+        writer.finish().unwrap();
+        std::fs::write(&path, png_bytes).unwrap();
+
+        let source = decode_image_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((source.width(), source.height()), (2, 2));
+
+        let mut editor = EditorCore::default();
+        editor.add_node("input", "core.image-input").unwrap();
+        editor.add_node("output", "core.output").unwrap();
+        editor.connect("input", "image", "output", "image").unwrap();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let request = PreviewRequest {
+            request_id: "open-render".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+
+        let metadata = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(source),
+            request,
+        )
+        .unwrap();
+
+        assert_eq!((metadata.width, metadata.height), (2, 2));
+        assert_eq!((metadata.full_width, metadata.full_height), (2, 2));
+        assert!(manager.store.get(&preview_path("open-render")).is_some());
     }
 
     #[test]

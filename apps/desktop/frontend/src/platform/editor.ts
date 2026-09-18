@@ -170,6 +170,9 @@ export function createMemoryPlatform(): EditorPlatform {
     async snapshot() {
       return snapshot();
     },
+    async openImage(_path) {
+      throw new Error('opening images requires the desktop application');
+    },
     async addNode(nodeId, typeId) {
       if (!nodeId) throw new Error('node identifier cannot be empty');
       if (nodes.has(nodeId)) throw new Error(`node '${nodeId}' already exists`);

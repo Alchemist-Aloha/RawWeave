@@ -20,6 +20,7 @@ function deferred<T>() {
 class FakeTransport implements PreviewTransport {
   requests: PreviewRequest[] = [];
   cancellations: string[] = [];
+  releases: string[] = [];
   pending = new Map<string, ReturnType<typeof deferred<PreviewResult>>>();
 
   requestPreview(request: PreviewRequest, onProgress: (progress: number) => void): Promise<PreviewResult> {
@@ -33,6 +34,10 @@ class FakeTransport implements PreviewTransport {
   async cancelPreview(requestId: string): Promise<void> {
     this.cancellations.push(requestId);
   }
+
+  async releasePreview(url: string): Promise<void> {
+    this.releases.push(url);
+  }
 }
 
 function result(request: PreviewRequest, revision = request.revision): PreviewResult {
@@ -42,6 +47,8 @@ function result(request: PreviewRequest, revision = request.revision): PreviewRe
     url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
     width: 2,
     height: 2,
+    fullWidth: 2,
+    fullHeight: 2,
     mimeType: 'image/png',
   };
 }
@@ -108,6 +115,43 @@ describe('viewer controller', () => {
 
     expect(viewer.state.panes.A.status).toBe('loading');
     expect(viewer.state.panes.A.progress).toBe(0.25);
+  });
+
+  it('requests the visible region and a lower mip while navigating a large image', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.setTarget('A', target('output'));
+
+    expect(transport.requests[0]).toMatchObject({
+      region: { x: 150, y: 110, width: 100, height: 80 },
+      mip: 0,
+      tile: { x: 4, y: 3 },
+      quality: 'preview',
+    });
+
+    viewer.setZoom('A', 0.5);
+    const navigationRequest = transport.requests.at(-1)!;
+    expect(navigationRequest).toMatchObject({
+      region: { x: 100, y: 70, width: 200, height: 160 },
+      mip: 1,
+      tile: { x: 3, y: 2 },
+      quality: 'draft',
+    });
+  });
+
+  it('releases an old protocol URL when a pane replaces its preview', async () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setTarget('A', target('output'));
+    const request = transport.requests[0];
+    transport.pending.get(request.requestId)!.resolve(result(request));
+    await Promise.resolve();
+
+    const oldUrl = viewer.state.panes.A.imageUrl!;
+    viewer.setTarget('A', target('invert'));
+    expect(transport.releases).toEqual([oldUrl]);
   });
 
   it.each(['A', 'B'] as ViewerId[])('can cancel %s explicitly', async (pane) => {
