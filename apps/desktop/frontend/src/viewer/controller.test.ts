@@ -229,4 +229,18 @@ describe('viewer controller', () => {
     expect(transport.cancellations).toEqual([requestId]);
     expect(viewer.state.panes[pane].status).toBe('cancelled');
   });
+
+  it('clears both preview targets when the source workflow changes', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setRevision(4);
+    viewer.setTarget('A', target('raw-display'));
+    viewer.setTarget('B', target('raw-display'));
+
+    viewer.clearTargets();
+
+    expect(viewer.state.panes.A.target).toBeNull();
+    expect(viewer.state.panes.B.target).toBeNull();
+    expect(transport.cancellations).toHaveLength(2);
+  });
 });

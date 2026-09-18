@@ -216,11 +216,11 @@ export class EditorController {
       await this.refresh(positions);
       const rawWorkflow = this.state.nodes.some((node) => node.typeId.startsWith('raw.'));
       this.setState({
-        source: rawWorkflow ? null : this.state.source,
+        source: null,
         error: null,
         notification: rawWorkflow
           ? 'RAW workflow loaded; select the source RAW file again to render previews'
-          : 'Workflow loaded',
+          : 'Workflow loaded; select an image to render previews',
       });
     } catch (error) {
       this.setState({ error: errorMessage(error), notification: null });

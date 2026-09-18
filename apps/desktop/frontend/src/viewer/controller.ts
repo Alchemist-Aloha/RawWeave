@@ -231,6 +231,10 @@ export class ViewerController {
     if (target) this.startRequest(viewer, target);
   }
 
+  public clearTargets(): void {
+    for (const viewer of ['A', 'B'] as ViewerId[]) this.setTarget(viewer, null);
+  }
+
   private startRequest(viewer: ViewerId, target: PreviewTarget): void {
     const plan = this.requestPlan(viewer);
     const request: PreviewRequest = {

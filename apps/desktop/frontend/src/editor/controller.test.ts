@@ -169,4 +169,24 @@ describe('editor controller', () => {
     expect(editor.state.nodes).toHaveLength(8);
     expect(editor.state.notification).toMatch(/display transform is ready/i);
   });
+
+  it('opening an ordinary image resets the graph to the standard image workflow', async () => {
+    const editor = new EditorController(createMemoryPlatform());
+    await editor.initialize();
+
+    const rawEditor = await rawPlatform();
+    const rawController = new EditorController(rawEditor.platform);
+    await rawController.initialize();
+    await rawController.openImage('fixture.dng');
+
+    const ordinary = await editor.openImage('photo.png');
+
+    expect(ordinary.kind).toBe('ordinary');
+    expect(editor.state.nodes.map((node) => node.typeId)).toEqual([
+      'core.image-input',
+      'core.output',
+    ]);
+    expect(editor.state.nodes.every((node) => !node.typeId.startsWith('raw.'))).toBe(true);
+    expect(editor.state.edges).toHaveLength(1);
+  });
 });

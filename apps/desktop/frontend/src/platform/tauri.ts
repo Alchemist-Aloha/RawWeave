@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import type {
   EditorPlatform,
   ExecutionCapability,
@@ -42,6 +43,35 @@ interface RustOpenImageResult {
   revision: number;
   metadata: OpenImageResult['metadata'];
 }
+
+const RAW_EXTENSIONS = [
+  '3fr',
+  'arw',
+  'cr2',
+  'cr3',
+  'dcr',
+  'dng',
+  'erf',
+  'kdc',
+  'mrw',
+  'nef',
+  'nrw',
+  'orf',
+  'pef',
+  'raf',
+  'raw',
+  'rw2',
+  'rwl',
+  'srw',
+  'x3f',
+];
+
+const IMAGE_DIALOG_FILTERS = [
+  {
+    name: 'Images and RAW',
+    extensions: [...RAW_EXTENSIONS, 'png', 'jpg', 'jpeg'],
+  },
+];
 
 type RustValue = { Float: number } | { Boolean: boolean } | { String: string };
 
@@ -153,6 +183,19 @@ export function createTauriPlatform(): EditorPlatform {
       }
     },
     snapshot: readSnapshot,
+    async chooseImagePath() {
+      try {
+        const selected = await open({
+          directory: false,
+          multiple: false,
+          filters: IMAGE_DIALOG_FILTERS,
+        });
+        if (Array.isArray(selected)) return selected[0] ?? null;
+        return selected;
+      } catch (error) {
+        throw message(error);
+      }
+    },
     async openImage(path) {
       try {
         const result = await invoke<RustOpenImageResult>('open_image', { path });

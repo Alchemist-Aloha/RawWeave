@@ -112,6 +112,7 @@ export default function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
+  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
   useEffect(() => {
     const unsubscribe = controller.subscribe(() => setRevision((revision) => revision + 1));
@@ -227,13 +228,23 @@ export default function App() {
       const file = event.target.files?.[0];
       event.target.value = '';
       if (!file) return;
-      const path = (file as File & { path?: string }).path ?? window.prompt('Image path', file.name);
-      if (path) await openImagePath(path);
+      await openImagePath(file.name);
     },
     [openImagePath],
   );
 
-  const openImage = useCallback(() => imageInput.current?.click(), []);
+  const openImage = useCallback(async () => {
+    if (!isTauri) {
+      imageInput.current?.click();
+      return;
+    }
+    try {
+      const path = await platform.chooseImagePath();
+      if (path) await openImagePath(path);
+    } catch (error) {
+      setImageError(error instanceof Error ? error.message : String(error));
+    }
+  }, [isTauri, openImagePath, platform]);
 
   return (
     <main className="app-shell">

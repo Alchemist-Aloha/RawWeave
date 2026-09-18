@@ -156,13 +156,16 @@ export function Viewer({ controller, nodes, revision, source }: ViewerProps) {
   useEffect(() => controller.subscribe(() => setRender((value) => value + 1)), [controller]);
   useEffect(() => controller.setRevision(revision), [controller, revision]);
   useEffect(() => {
-    if (source?.kind !== 'raw') return;
+    if (source?.kind !== 'raw') {
+      controller.clearTargets();
+      return;
+    }
     const displayTarget = options.find(
       (option) => option.nodeName === 'Display Transform' && option.outputPort === 'display',
     );
     if (!displayTarget || controller.state.panes.A.target?.nodeId === displayTarget.nodeId) return;
     controller.setTarget('A', displayTarget);
-  }, [controller, options, source?.kind]);
+  }, [controller, options, source?.kind, source?.revision]);
 
   return (
     <section className="viewer-section" aria-label="Image viewers">

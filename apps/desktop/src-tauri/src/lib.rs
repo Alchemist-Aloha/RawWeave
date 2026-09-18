@@ -1,5 +1,7 @@
 mod preview;
 
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -13,10 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 #[derive(Clone, Debug)]
 pub(crate) enum SourceAsset {
     Ordinary(Image),
-    Raw {
-        bytes: Arc<Vec<u8>>,
-        path: PathBuf,
-    },
+    Raw { bytes: Arc<Vec<u8>>, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -55,8 +54,8 @@ fn lock_editor(editor: &Arc<Mutex<EditorCore>>) -> Result<MutexGuard<'_, EditorC
 }
 
 const RAW_EXTENSIONS: &[&str] = &[
-    "3fr", "arw", "cr2", "cr3", "dcr", "dng", "erf", "kdc", "mrw", "nef", "nrw",
-    "orf", "pef", "raf", "raw", "rw2", "rwl", "srw", "x3f",
+    "3fr", "arw", "cr2", "cr3", "dcr", "dng", "erf", "kdc", "mrw", "nef", "nrw", "orf", "pef",
+    "raf", "raw", "rw2", "rwl", "srw", "x3f",
 ];
 
 fn is_raw_path(path: &Path) -> bool {
@@ -69,19 +68,55 @@ fn is_raw_path(path: &Path) -> bool {
         })
 }
 
-fn read_raw_file(path: &Path, limits: RawDecodeLimits) -> Result<Vec<u8>, String> {
-    let size = std::fs::metadata(path)
-        .map_err(|error| format!("could not inspect RAW '{}': {error}", path.display()))?
-        .len();
-    let size = usize::try_from(size)
-        .map_err(|_| format!("RAW '{}' exceeds the configured input limit", path.display()))?;
-    if size > limits.max_input_bytes {
+fn read_bounded_raw<R: Read>(
+    reader: R,
+    label: &str,
+    max_input_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let read_limit = max_input_bytes
+        .checked_add(1)
+        .and_then(|limit| u64::try_from(limit).ok())
+        .ok_or_else(|| "RAW input limit cannot be represented safely".to_owned())?;
+    let mut reader = reader.take(read_limit);
+    let mut bytes = Vec::with_capacity(max_input_bytes.min(8192));
+    let mut chunk = [0_u8; 8192];
+
+    while bytes.len() < max_input_bytes {
+        let remaining = max_input_bytes - bytes.len();
+        let chunk_len = remaining.min(chunk.len());
+        let read = reader
+            .read(&mut chunk[..chunk_len])
+            .map_err(|error| format!("could not read RAW '{label}': {error}"))?;
+        if read == 0 {
+            return Ok(bytes);
+        }
+        let required = bytes
+            .len()
+            .checked_add(read)
+            .ok_or_else(|| "RAW input size overflowed while reading".to_owned())?;
+        if required > bytes.capacity() {
+            bytes.reserve_exact(required - bytes.capacity());
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+
+    let mut extra = [0_u8; 1];
+    if reader
+        .read(&mut extra)
+        .map_err(|error| format!("could not read RAW '{label}': {error}"))?
+        != 0
+    {
         return Err(format!(
-            "RAW input is too large: {size} bytes exceeds limit {}",
-            limits.max_input_bytes
+            "RAW input is too large: exceeds limit {max_input_bytes}"
         ));
     }
-    std::fs::read(path).map_err(|error| format!("could not read RAW '{}': {error}", path.display()))
+    Ok(bytes)
+}
+
+fn read_raw_file(path: &Path, limits: RawDecodeLimits) -> Result<Vec<u8>, String> {
+    let file = File::open(path)
+        .map_err(|error| format!("could not open RAW '{}': {error}", path.display()))?;
+    read_bounded_raw(file, &path.display().to_string(), limits.max_input_bytes)
 }
 
 fn raw_metadata(frame: &RawFrame) -> OpenMetadataSummary {
@@ -153,11 +188,36 @@ pub(crate) fn open_image_with_decoder(
     editor: &mut EditorCore,
 ) -> Result<(SourceAsset, preview::OpenImageMetadata), String> {
     let (source, mut metadata) = open_image_file_with_decoder(path, decoder)?;
-    if matches!(source, SourceAsset::Raw { .. }) {
-        build_raw_workflow(editor)?;
-        metadata.revision = editor.graph().revision();
+    match &source {
+        SourceAsset::Raw { .. } => build_raw_workflow(editor)?,
+        SourceAsset::Ordinary(_) => build_ordinary_workflow(editor)?,
     }
+    metadata.revision = editor.graph().revision();
     Ok((source, metadata))
+}
+
+pub(crate) fn build_ordinary_workflow(editor: &mut EditorCore) -> Result<(), String> {
+    let existing = editor
+        .graph()
+        .nodes()
+        .keys()
+        .map(|node_id| node_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    for node_id in existing {
+        editor
+            .remove_node(&node_id)
+            .map_err(|error| error.to_string())?;
+    }
+    editor
+        .add_node("input", "core.image-input")
+        .map_err(|error| error.to_string())?;
+    editor
+        .add_node("output", "core.output")
+        .map_err(|error| error.to_string())?;
+    editor
+        .connect("input", "image", "output", "image")
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> {
@@ -183,7 +243,9 @@ pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> 
         ("lens-correction", "raw.lens-correction"),
         ("display-transform", "raw.display-transform"),
     ] {
-        editor.add_node(node_id, type_id).map_err(|error| error.to_string())?;
+        editor
+            .add_node(node_id, type_id)
+            .map_err(|error| error.to_string())?;
     }
     for (from_node, from_port, to_node, to_port) in [
         ("raw-decode", "frame", "black-level", "frame"),
@@ -194,16 +256,21 @@ pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> 
             "highlight-reconstruction",
             "mosaic",
         ),
-        (
-            "highlight-reconstruction",
-            "mosaic",
-            "demosaic",
-            "mosaic",
-        ),
+        ("highlight-reconstruction", "mosaic", "demosaic", "mosaic"),
         ("demosaic", "scene", "camera-transform", "scene"),
-        ("raw-decode", "camera_profile", "camera-transform", "camera_profile"),
+        (
+            "raw-decode",
+            "camera_profile",
+            "camera-transform",
+            "camera_profile",
+        ),
         ("camera-transform", "scene", "lens-correction", "scene"),
-        ("raw-decode", "lens_profile", "lens-correction", "lens_profile"),
+        (
+            "raw-decode",
+            "lens_profile",
+            "lens-correction",
+            "lens_profile",
+        ),
         ("lens-correction", "scene", "display-transform", "scene"),
     ] {
         editor
@@ -279,9 +346,19 @@ fn save_workflow(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 fn load_workflow(state: State<'_, AppState>, workflow: String) -> Result<(), String> {
+    load_workflow_state(&state, &workflow)
+}
+
+fn load_workflow_state(state: &AppState, workflow: &str) -> Result<(), String> {
     lock_editor(&state.editor)?
-        .load_workflow(&workflow)
-        .map_err(|error| error.to_string())
+        .load_workflow(workflow)
+        .map_err(|error| error.to_string())?;
+    *state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())? = None;
+    state.preview.cancel_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -361,10 +438,13 @@ async fn request_preview(
 
 #[cfg(test)]
 fn open_image_file(path: &str) -> Result<(Image, preview::OpenImageMetadata), String> {
-    let (source, metadata) = open_image_file_with_decoder(Path::new(path), &RawloaderDecoder::default())?;
+    let (source, metadata) =
+        open_image_file_with_decoder(Path::new(path), &RawloaderDecoder::default())?;
     match source {
         SourceAsset::Ordinary(image) => Ok((image, metadata)),
-        SourceAsset::Raw { .. } => Err("RAW input must be opened through the RAW source path".to_owned()),
+        SourceAsset::Raw { .. } => {
+            Err("RAW input must be opened through the RAW source path".to_owned())
+        }
     }
 }
 
@@ -375,11 +455,7 @@ fn open_image(
 ) -> Result<preview::OpenImageMetadata, String> {
     let (source, metadata) = {
         let mut editor = lock_editor(&state.editor)?;
-        open_image_with_decoder(
-            Path::new(&path),
-            &RawloaderDecoder::default(),
-            &mut editor,
-        )?
+        open_image_with_decoder(Path::new(&path), &RawloaderDecoder::default(), &mut editor)?
     };
     *state
         .source_image
@@ -403,6 +479,7 @@ pub fn run() {
     let preview = Arc::new(preview::PreviewManager::default());
     let protocol_preview = Arc::clone(&preview);
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("rawweave-preview", move |_ctx, request| {
             protocol_preview.response(&request)
         })
@@ -432,8 +509,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
     use png::{BitDepth, ColorType, Encoder};
+    use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
     use std::io::Cursor;
 
     #[test]
@@ -449,8 +526,8 @@ mod tests {
         let mut writer = encoder.write_header().unwrap();
         writer
             .write_image_data(&[
-                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-                128, 128, 128, 255, 0, 0, 0, 255,
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255, 128, 128, 128,
+                255, 0, 0, 0, 255,
             ])
             .unwrap();
         writer.finish().unwrap();
@@ -466,10 +543,8 @@ mod tests {
 
     #[test]
     fn opens_a_raw_source_with_injected_decoder_and_structured_metadata() {
-        let path = std::env::temp_dir().join(format!(
-            "rawweave-open-raw-{}.dng",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rawweave-open-raw-{}.dng", std::process::id()));
         std::fs::write(&path, b"deterministic raw fixture").unwrap();
         let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
 
@@ -488,10 +563,8 @@ mod tests {
 
     #[test]
     fn deterministic_raw_open_builds_graph_and_renders_display_png() {
-        let path = std::env::temp_dir().join(format!(
-            "rawweave-open-preview-{}.dng",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("rawweave-open-preview-{}.dng", std::process::id()));
         std::fs::write(&path, b"deterministic raw fixture").unwrap();
         let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
         let mut editor = EditorCore::new_with_raw_decoder(decoder.clone());
@@ -522,14 +595,9 @@ mod tests {
             mip: 0,
         };
 
-        let rendered = preview::render_preview(
-            &manager,
-            &editor,
-            &current_editor,
-            Some(source),
-            request,
-        )
-        .unwrap();
+        let rendered =
+            preview::render_preview(&manager, &editor, &current_editor, Some(source), request)
+                .unwrap();
         assert_eq!((rendered.full_width, rendered.full_height), (4, 2));
         let bytes = manager
             .store
@@ -561,5 +629,121 @@ mod tests {
         assert!(!serialized.contains("deterministic raw fixture"));
         assert_eq!(editor.graph().nodes().len(), 8);
         assert_eq!(editor.graph().edges().len(), 9);
+    }
+
+    #[test]
+    fn opening_an_ordinary_image_replaces_the_raw_graph_and_renders_the_standard_output() {
+        let path =
+            std::env::temp_dir().join(format!("rawweave-open-ordinary-{}.png", std::process::id()));
+        let mut bytes = Vec::new();
+        let mut encoder = Encoder::new(Cursor::new(&mut bytes), 2, 2);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ])
+            .unwrap();
+        writer.finish().unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
+        let mut editor = EditorCore::new_with_raw_decoder(decoder.clone());
+        build_raw_workflow(&mut editor).unwrap();
+        let (source, metadata) = open_image_with_decoder(&path, &decoder, &mut editor).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(source, SourceAsset::Ordinary(_)));
+        assert_eq!((metadata.width, metadata.height), (2, 2));
+        assert_eq!(editor.graph().nodes().len(), 2);
+        assert_eq!(editor.graph().edges().len(), 1);
+        assert!(editor
+            .graph()
+            .nodes()
+            .values()
+            .all(|node| !node.type_id.starts_with("raw.")));
+
+        let revision = editor.graph().revision();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = preview::PreviewManager::default();
+        let request = preview::PreviewRequest {
+            request_id: "ordinary-open-preview".to_owned(),
+            revision,
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: preview::PreviewQualityRequest::Preview,
+            region: preview::PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            tile: preview::PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+        let rendered =
+            preview::render_preview(&manager, &editor, &current_editor, Some(source), request)
+                .unwrap();
+        assert_eq!((rendered.full_width, rendered.full_height), (2, 2));
+    }
+
+    #[test]
+    fn bounded_raw_read_rejects_bytes_added_after_the_initial_limit_without_retaining_them() {
+        let error =
+            read_bounded_raw(Cursor::new(vec![1, 2, 3, 4, 5]), "growing.dng", 4).unwrap_err();
+        assert!(error.contains("too large"));
+
+        let bytes = read_bounded_raw(Cursor::new(vec![1, 2, 3, 4]), "exact.dng", 4).unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+        assert!(bytes.capacity() <= 4);
+    }
+
+    #[test]
+    fn workflow_load_clears_source_and_cancels_previews_before_reselection() {
+        let mut loaded_editor = EditorCore::default();
+        loaded_editor.add_node("input", "core.image-input").unwrap();
+        loaded_editor.add_node("output", "core.output").unwrap();
+        loaded_editor
+            .connect("input", "image", "output", "image")
+            .unwrap();
+        let workflow = loaded_editor.save_workflow().unwrap();
+        let preview = Arc::new(preview::PreviewManager::default());
+        preview.begin("load-preview");
+        preview
+            .store
+            .insert(preview::preview_path("load-preview"), 1, vec![1, 2, 3])
+            .unwrap();
+        let state = AppState {
+            editor: Arc::new(Mutex::new(EditorCore::default())),
+            preview: Arc::clone(&preview),
+            source_image: Mutex::new(Some(SourceAsset::Ordinary(Image::new(1, 1).unwrap()))),
+        };
+
+        load_workflow_state(&state, &workflow).unwrap();
+
+        assert!(state.source_image.lock().unwrap().is_none());
+        assert!(preview.is_cancelled("load-preview"));
+        assert_eq!(preview.store.len(), 0);
+        let editor = state.editor.lock().unwrap().clone();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let request = preview::PreviewRequest {
+            request_id: "after-load".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: preview::PreviewQualityRequest::Preview,
+            region: preview::PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            tile: preview::PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+        let error =
+            preview::render_preview(&preview, &editor, &current_editor, None, request).unwrap_err();
+        assert!(error.contains("source image unavailable"));
     }
 }

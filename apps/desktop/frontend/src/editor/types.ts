@@ -74,6 +74,7 @@ export interface OpenImageResult {
 export interface EditorPlatform {
   nodeDescriptors(): Promise<NodeDescriptor[]>;
   snapshot(): Promise<PlatformSnapshot>;
+  chooseImagePath(): Promise<string | null>;
   openImage(path: string): Promise<OpenImageResult>;
   addNode(nodeId: string, typeId: string): Promise<void>;
   removeNode(nodeId: string): Promise<void>;

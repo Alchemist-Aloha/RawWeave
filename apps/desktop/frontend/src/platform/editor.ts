@@ -2,6 +2,7 @@ import type {
   EditorPlatform,
   ExecutionCapability,
   NodeDescriptor,
+  OpenImageResult,
   ParameterValue,
   PlatformEdge,
   PortDescriptor,
@@ -279,8 +280,35 @@ export function createMemoryPlatform(): EditorPlatform {
     async snapshot() {
       return snapshot();
     },
-    async openImage(_path) {
-      throw new Error('opening images requires the desktop application');
+    async chooseImagePath() {
+      return null;
+    },
+    async openImage(_path): Promise<OpenImageResult> {
+      const existing = [...nodes.keys()];
+      for (const nodeId of existing) await this.removeNode(nodeId);
+      const inputDescriptor = descriptorFor(descriptors, 'core.image-input');
+      const outputDescriptor = descriptorFor(descriptors, 'core.output');
+      nodes.set('input', {
+        id: 'input',
+        typeId: inputDescriptor.typeId,
+        parameters: {},
+      });
+      revision += 1;
+      nodes.set('output', {
+        id: 'output',
+        typeId: outputDescriptor.typeId,
+        parameters: {},
+      });
+      revision += 1;
+      edges = [{ fromNode: 'input', fromPort: 'image', toNode: 'output', toPort: 'image' }];
+      revision += 1;
+      return {
+        kind: 'ordinary',
+        width: 1,
+        height: 1,
+        revision,
+        metadata: null,
+      };
     },
     async addNode(nodeId, typeId) {
       if (!nodeId) throw new Error('node identifier cannot be empty');

@@ -154,7 +154,10 @@ impl PreviewStore {
     }
 
     pub fn len(&self) -> usize {
-        self.previews.lock().map(|previews| previews.len()).unwrap_or(0)
+        self.previews
+            .lock()
+            .map(|previews| previews.len())
+            .unwrap_or(0)
     }
 
     pub fn byte_len(&self) -> usize {
@@ -185,7 +188,9 @@ impl PreviewStore {
         previews.insert(path.clone(), StoredPreview { revision, bytes });
         order.push_back(path);
         while previews.len() > self.max_entries || *total_bytes > self.max_bytes {
-            let Some(oldest) = order.pop_front() else { break };
+            let Some(oldest) = order.pop_front() else {
+                break;
+            };
             if let Some(previous) = previews.remove(&oldest) {
                 *total_bytes = total_bytes.saturating_sub(previous.bytes.len());
             }
@@ -233,6 +238,18 @@ impl PreviewStore {
         let _ = self.take(path);
     }
 
+    pub fn clear(&self) {
+        if let Ok(mut previews) = self.previews.lock() {
+            previews.clear();
+        }
+        if let Ok(mut order) = self.order.lock() {
+            order.clear();
+        }
+        if let Ok(mut bytes) = self.bytes.lock() {
+            *bytes = 0;
+        }
+    }
+
     fn touch(&self, path: &str) {
         if let Ok(mut order) = self.order.lock() {
             order.retain(|candidate| candidate != path);
@@ -251,7 +268,9 @@ impl PreviewManager {
     pub fn begin(&self, request_id: &str) -> Arc<AtomicBool> {
         if let Ok(mut jobs) = self.jobs.lock() {
             if let Some(token) = jobs.get(request_id) {
-                return Arc::clone(token);
+                if !token.load(Ordering::Acquire) {
+                    return Arc::clone(token);
+                }
             }
             let token = Arc::new(AtomicBool::new(false));
             jobs.insert(request_id.to_owned(), Arc::clone(&token));
@@ -281,6 +300,15 @@ impl PreviewManager {
             .unwrap_or(false);
         self.store.remove(&preview_path(request_id));
         cancelled
+    }
+
+    pub fn cancel_all(&self) {
+        if let Ok(jobs) = self.jobs.lock() {
+            for token in jobs.values() {
+                token.store(true, Ordering::Release);
+            }
+        }
+        self.store.clear();
     }
 
     pub fn discard(&self, request_id: &str) {
@@ -428,11 +456,11 @@ fn color_value_to_image(value: Value) -> Result<Image, String> {
             let display = SrgbDisplayTransform
                 .transform(&scene)
                 .or_else(|_| {
-                    SrgbDisplayTransform.transform(
-                        &scene.with_working_space(WorkingSpace::Srgb),
-                    )
+                    SrgbDisplayTransform.transform(&scene.with_working_space(WorkingSpace::Srgb))
                 })
-                .map_err(|error| format!("could not convert scene preview to display RGB: {error}"))?;
+                .map_err(|error| {
+                    format!("could not convert scene preview to display RGB: {error}")
+                })?;
             (display.dimensions(), display.pixels().to_vec())
         }
         other => {
@@ -613,11 +641,17 @@ mod tests {
     #[test]
     fn evicts_least_recently_used_previews_by_count_and_bytes() {
         let store = PreviewStore::with_limits(2, 5);
-        store.insert("/preview/a.png".to_owned(), 1, vec![1, 2, 3]).unwrap();
-        store.insert("/preview/b.png".to_owned(), 1, vec![4, 5]).unwrap();
+        store
+            .insert("/preview/a.png".to_owned(), 1, vec![1, 2, 3])
+            .unwrap();
+        store
+            .insert("/preview/b.png".to_owned(), 1, vec![4, 5])
+            .unwrap();
         assert_eq!(store.get("/preview/a.png"), Some(vec![1, 2, 3]));
 
-        store.insert("/preview/c.png".to_owned(), 1, vec![6, 7]).unwrap();
+        store
+            .insert("/preview/c.png".to_owned(), 1, vec![6, 7])
+            .unwrap();
 
         assert!(store.get("/preview/b.png").is_none());
         assert_eq!(store.get("/preview/a.png"), Some(vec![1, 2, 3]));
@@ -658,8 +692,8 @@ mod tests {
     fn selects_the_requested_region_and_mip_for_preview_encoding() {
         let image = Image::new(4, 3).unwrap();
 
-        let region = select_preview_image(&image, rawweave_image::Region::new(1, 1, 2, 2), 1)
-            .unwrap();
+        let region =
+            select_preview_image(&image, rawweave_image::Region::new(1, 1, 2, 2), 1).unwrap();
 
         assert_eq!(region.width(), 1);
         assert_eq!(region.height(), 1);
@@ -790,9 +824,7 @@ mod tests {
             let mut editor = EditorCore::default();
             editor.add_node("input", "core.image-input").unwrap();
             editor.add_node("target", type_id).unwrap();
-            editor
-                .connect("input", "image", "target", "image")
-                .unwrap();
+            editor.connect("input", "image", "target", "image").unwrap();
             for (parameter_id, value) in parameters {
                 editor
                     .set_node_parameter("target", parameter_id, value.into())
@@ -862,7 +894,9 @@ mod tests {
         assert!(manager.cancel("request"));
         assert!(token.load(Ordering::Acquire));
         assert!(manager.is_cancelled("request"));
-        assert!(Arc::ptr_eq(&token, &manager.begin("request")));
+        let replacement = manager.begin("request");
+        assert!(!Arc::ptr_eq(&token, &replacement));
+        assert!(!replacement.load(Ordering::Acquire));
         assert!(manager.store.get(&preview_path("request")).is_none());
         manager.finish_job("request");
         assert!(!manager.is_cancelled("request"));
