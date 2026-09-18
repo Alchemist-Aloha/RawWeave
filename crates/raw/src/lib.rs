@@ -1378,6 +1378,9 @@ fn predecode_dimensions(input: &[u8]) -> Result<Option<(Dimensions, usize)>, Raw
     if has_prefix(input, b"FOVb") {
         return probe_x3f_dimensions(input).map(Some);
     }
+    if has_prefix(input, b"FUJIFILM") {
+        return probe_raf_dimensions(input).map(Some);
+    }
     if is_ciff(input) {
         return Err(RawError::HeaderDimensionsUnavailable { format: "CIFF" });
     }
@@ -1511,6 +1514,50 @@ fn probe_x3f_dimensions(input: &[u8]) -> Result<(Dimensions, usize), RawError> {
     Err(RawError::HeaderDimensionsUnavailable { format: "X3F" })
 }
 
+fn probe_raf_dimensions(input: &[u8]) -> Result<(Dimensions, usize), RawError> {
+    const RAF_DIMENSIONS_TAG: u16 = 0x0100;
+    const RAF_MAX_DIRECTORY_ENTRIES: usize = 4000;
+
+    let unavailable = || RawError::HeaderDimensionsUnavailable { format: "RAF" };
+    let directory_offset = read_be_u32(input, 92)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or_else(unavailable)?;
+    let entry_count = read_be_u32(input, directory_offset)
+        .and_then(|count| usize::try_from(count).ok())
+        .filter(|count| *count <= RAF_MAX_DIRECTORY_ENTRIES)
+        .ok_or_else(unavailable)?;
+
+    let mut entry_offset = directory_offset.checked_add(4).ok_or_else(unavailable)?;
+    for _ in 0..entry_count {
+        let tag = read_be_u16(input, entry_offset).ok_or_else(unavailable)?;
+        let length = read_be_u16(input, entry_offset.checked_add(2).ok_or_else(unavailable)?)
+            .ok_or_else(unavailable)?;
+        if tag == RAF_DIMENSIONS_TAG && length < 4 {
+            return Err(unavailable());
+        }
+        let next_offset = entry_offset
+            .checked_add(4)
+            .and_then(|offset| offset.checked_add(usize::from(length)))
+            .ok_or_else(unavailable)?;
+        if next_offset > input.len() || next_offset <= entry_offset {
+            return Err(unavailable());
+        }
+
+        if tag == RAF_DIMENSIONS_TAG {
+            let data_offset = entry_offset.checked_add(4).ok_or_else(unavailable)?;
+            let data_end = data_offset.checked_add(4).ok_or_else(unavailable)?;
+            let data = input.get(data_offset..data_end).ok_or_else(unavailable)?;
+            let height = read_be_u16(data, 0).ok_or_else(unavailable)?;
+            let width = read_be_u16(data, 2).ok_or_else(unavailable)?;
+            return Ok((Dimensions::new(u32::from(width), u32::from(height)), 1));
+        }
+
+        entry_offset = next_offset;
+    }
+
+    Err(unavailable())
+}
+
 fn has_prefix(input: &[u8], prefix: &[u8]) -> bool {
     input.get(..prefix.len()) == Some(prefix)
 }
@@ -1524,7 +1571,7 @@ fn is_ciff(input: &[u8]) -> bool {
 }
 
 fn is_tiff_family(input: &[u8]) -> bool {
-    has_prefix(input, b"FUJIFILM") || input.get(..2) == Some(b"II") || input.get(..2) == Some(b"MM")
+    input.get(..2) == Some(b"II") || input.get(..2) == Some(b"MM")
 }
 
 fn read_be_u16(input: &[u8], offset: usize) -> Option<u16> {

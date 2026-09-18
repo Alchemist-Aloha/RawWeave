@@ -403,6 +403,135 @@ fn valid_size_header_probe_reaches_vendor_decoder() {
     }
 }
 
+#[test]
+fn valid_size_raf_header_reaches_vendor_decoder() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 64,
+        max_pixels: 64,
+        max_width: 64,
+        max_height: 64,
+    });
+
+    let error = decoder.decode(&crafted_raf_header(8, 1)).unwrap_err();
+    assert!(
+        matches!(error, RawError::Decoder(_)),
+        "expected vendor decoder error after a valid RAF probe, got {error:?}"
+    );
+}
+
+#[test]
+fn oversized_raf_dimensions_are_rejected_before_rawloader() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 64,
+        max_pixels: 64,
+        max_width: 64,
+        max_height: 64,
+    });
+
+    let error = decoder.decode(&crafted_raf_header(65, 1)).unwrap_err();
+    assert_eq!(
+        error,
+        RawError::DimensionTooLarge {
+            dimensions: Dimensions::new(65, 1),
+            max_width: 64,
+            max_height: 64,
+        }
+    );
+}
+
+#[test]
+fn truncated_or_malformed_raf_headers_fail_closed_without_panicking() {
+    let decoder = RawloaderDecoder::default();
+    for input in [
+        b"FUJIFILM".to_vec(),
+        crafted_raf_with_truncated_dimensions(),
+        crafted_raf_with_short_dimension_entry(),
+        crafted_raf_with_too_many_directory_entries(),
+    ] {
+        let result = std::panic::catch_unwind(|| decoder.decode(&input));
+        assert!(result.is_ok(), "RAF probe panicked for {input:?}");
+        assert!(matches!(
+            result.unwrap(),
+            Err(RawError::HeaderDimensionsUnavailable { format: "RAF" })
+        ));
+    }
+}
+
+#[test]
+fn standard_tiff_dimension_limits_remain_predecode_guards() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 64,
+        max_pixels: 64,
+        max_width: 64,
+        max_height: 64,
+    });
+
+    let error = decoder.decode(&crafted_tiff_exif()).unwrap_err();
+    assert_eq!(
+        error,
+        RawError::DimensionTooLarge {
+            dimensions: Dimensions::new(600, 400),
+            max_width: 64,
+            max_height: 64,
+        }
+    );
+}
+
+fn crafted_raf_header(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 256];
+    bytes[0..8].copy_from_slice(b"FUJIFILM");
+    bytes[12..14].copy_from_slice(b"MM");
+    put_be_u16(&mut bytes, 14, 42);
+    put_be_u32(&mut bytes, 16, 8);
+    put_be_u16(&mut bytes, 20, 2);
+    put_be_u16(&mut bytes, 22, 0x010f);
+    put_be_u16(&mut bytes, 24, 2);
+    put_be_u32(&mut bytes, 26, 9);
+    put_be_u32(&mut bytes, 30, 116);
+    put_be_u16(&mut bytes, 34, 0x0110);
+    put_be_u16(&mut bytes, 36, 2);
+    put_be_u32(&mut bytes, 38, 5);
+    put_be_u32(&mut bytes, 42, 125);
+    put_be_u32(&mut bytes, 46, 0);
+    bytes[128..137].copy_from_slice(b"FUJIFILM\0");
+    bytes[137..142].copy_from_slice(b"X-T1\0");
+    put_be_u32(&mut bytes, 92, 104);
+    put_be_u32(&mut bytes, 100, 120);
+    put_be_u32(&mut bytes, 104, 1);
+    put_be_u16(&mut bytes, 108, 0x0100);
+    put_be_u16(&mut bytes, 110, 4);
+    put_be_u16(&mut bytes, 112, height);
+    put_be_u16(&mut bytes, 114, width);
+    bytes
+}
+
+fn crafted_raf_with_truncated_dimensions() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 112];
+    bytes[0..8].copy_from_slice(b"FUJIFILM");
+    put_be_u32(&mut bytes, 92, 104);
+    put_be_u32(&mut bytes, 104, 1);
+    put_be_u16(&mut bytes, 108, 0x0100);
+    put_be_u16(&mut bytes, 110, 4);
+    bytes
+}
+
+fn crafted_raf_with_too_many_directory_entries() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 128];
+    bytes[0..8].copy_from_slice(b"FUJIFILM");
+    put_be_u32(&mut bytes, 92, 104);
+    put_be_u32(&mut bytes, 104, 4001);
+    bytes
+}
+
+fn crafted_raf_with_short_dimension_entry() -> Vec<u8> {
+    let mut bytes = crafted_raf_header(1, 1);
+    put_be_u16(&mut bytes, 110, 2);
+    bytes
+}
+
 fn crafted_arri_header(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = vec![0_u8; 32];
     bytes[0..4].copy_from_slice(b"ARRI");
