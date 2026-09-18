@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use rawweave_core::{CoreError, NodeId};
 use rawweave_node_api::{
-    EvaluationContext, Inputs, NodeDescriptor, NodeError, NodeRegistry, NodeResult, ParameterValue,
-    Value,
+    EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeRegistry,
+    NodeResult, ParameterValue, Value,
 };
-use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResult};
+use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResult, TileCoord};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -404,14 +404,24 @@ impl Graph {
             .nodes
             .get(node_id)
             .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        let capability = node.descriptor.select_execution_capability(context);
+        let execution_context = match capability {
+            Some(ExecutionCapability::FullFrame) => EvaluationContext {
+                requested_region: None,
+                tile: TileCoord::default(),
+                ..context.clone()
+            },
+            _ => context.clone(),
+        };
         let mut inputs = Inputs::new();
         let mut upstream_hasher = DefaultHasher::new();
-        if let Some(source_image) = context.source_image.as_ref() {
+        if let Some(source_image) = execution_context.source_image.as_ref() {
             0_u8.hash(&mut upstream_hasher);
             hash_image(source_image, &mut upstream_hasher);
         }
         for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
-            let upstream = self.evaluate_node(&edge.from_node, context, memo, visiting)?;
+            let upstream =
+                self.evaluate_node(&edge.from_node, &execution_context, memo, visiting)?;
             let value = upstream
                 .result
                 .outputs
@@ -440,10 +450,10 @@ impl Graph {
             node.descriptor.version,
             hash_parameters(&node.parameters),
             upstream_hasher.finish(),
-            context.requested_region().unwrap_or_default(),
-            context.tile(),
-            context.mip_level(),
-            context.quality(),
+            execution_context.requested_region().unwrap_or_default(),
+            execution_context.tile(),
+            execution_context.mip_level(),
+            execution_context.quality(),
         );
         let current_revision = self.graph_revision();
         let cached = self
@@ -451,16 +461,14 @@ impl Graph {
             .lock()
             .ok()
             .and_then(|cache| cache.get_current(&cache_key, current_revision));
-        if let Some(cached) = cached {
-            if let Some(result) = cached_node_result(node, cached) {
-                let evaluated = EvaluatedNode {
-                    output_hash: hash_node_result(&result),
-                    result,
-                };
-                visiting.remove(node_id);
-                memo.insert(node_id.clone(), evaluated.clone());
-                return Ok(evaluated);
-            }
+        if let Some(result) = cached.and_then(|cached| cached_node_result(node, cached)) {
+            let evaluated = EvaluatedNode {
+                output_hash: hash_node_result(&result),
+                result,
+            };
+            visiting.remove(node_id);
+            memo.insert(node_id.clone(), evaluated.clone());
+            return Ok(evaluated);
         }
         let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
             GraphError::UnknownNodeType {
@@ -468,7 +476,7 @@ impl Graph {
             }
         })?;
         let result = instance
-            .evaluate(&inputs, &node.parameters, context)
+            .evaluate(&inputs, &node.parameters, &execution_context)
             .map_err(|source| GraphError::Evaluation {
                 node: node_id.clone(),
                 source,
@@ -510,6 +518,10 @@ impl Graph {
 
     fn bump_revision(&mut self) {
         self.revision = self.revision.saturating_add(1);
+        let revision = self.graph_revision();
+        if let Ok(mut cache) = self.render_cache.lock() {
+            cache.restamp_revision(revision);
+        }
     }
 }
 

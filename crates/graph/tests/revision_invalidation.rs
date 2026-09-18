@@ -113,7 +113,9 @@ fn evaluation_uses_revisioned_cache_and_invalidates_only_downstream_results() {
     let rawweave_node_api::Value::Image(other_after) = other_after else {
         panic!("expected image output")
     };
-    assert_ne!(other_before.revision(), other_after.revision());
+    assert_eq!(other_before.revision(), other_after.revision());
+    assert_eq!(other_before.backing_ptr(), other_after.backing_ptr());
+    assert_eq!(graph.render_cache().lock().unwrap().len(), 3);
 
     let output = graph
         .evaluate(&NodeId::from("output"), "image", &context)

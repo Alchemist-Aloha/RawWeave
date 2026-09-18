@@ -25,31 +25,21 @@ impl Dimensions {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PixelFormat {
+    #[default]
     Rgba32Float,
     Rgba16Float,
     Rgba8Unorm,
 }
 
-impl Default for PixelFormat {
-    fn default() -> Self {
-        Self::Rgba32Float
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColorDomain {
+    #[default]
     LinearSrgb,
     Srgb,
     DisplayP3,
     Unknown,
-}
-
-impl Default for ColorDomain {
-    fn default() -> Self {
-        Self::LinearSrgb
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

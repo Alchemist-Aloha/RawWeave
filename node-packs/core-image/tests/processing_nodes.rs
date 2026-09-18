@@ -170,6 +170,36 @@ fn full_frame_capability_is_used_without_region_requests() {
 }
 
 #[test]
+fn blur_samples_nonzero_origin_images_using_global_coordinates() {
+    let blur = registry().instantiate("core.blur").unwrap();
+    let source = Image::from_pixels_with_origin(
+        rawweave_image::Dimensions::new(2, 1),
+        (10, 20),
+        vec![[0.25, 0.5, 0.75, 1.0], [0.5, 0.25, 0.0, 1.0]],
+        rawweave_image::PixelFormat::default(),
+        rawweave_image::ColorMetadata::default(),
+    )
+    .unwrap();
+    let parameters = [("radius".to_owned(), 0.0.into())]
+        .into_iter()
+        .collect::<Parameters>();
+
+    let result = blur
+        .evaluate(
+            &image_input(source.clone()),
+            &parameters,
+            &EvaluationContext::default(),
+        )
+        .unwrap();
+    let Value::Image(actual) = result.outputs["image"].clone() else {
+        panic!("expected image")
+    };
+
+    assert_eq!(actual.global_region(), source.global_region());
+    assert_eq!(actual.pixels(), source.pixels());
+}
+
+#[test]
 fn levels_curves_and_color_matrix_are_deterministic() {
     let inputs = image_input(source());
     let parameters = [

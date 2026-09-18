@@ -614,14 +614,19 @@ fn blur_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
     if image.width() == 0 || image.height() == 0 {
         return [0.0; 4];
     }
+    let bounds = image.global_region();
+    let min_x = bounds.x as i64;
+    let min_y = bounds.y as i64;
+    let max_x = bounds.end_x().unwrap_or(u32::MAX) as i64 - 1;
+    let max_y = bounds.end_y().unwrap_or(u32::MAX) as i64 - 1;
     let mut total = [0.0; 4];
     let mut count = 0.0;
     let radius = radius as i64;
     for offset_y in -radius..=radius {
         for offset_x in -radius..=radius {
-            let source_x = (x as i64 + offset_x).clamp(0, image.width() as i64 - 1) as u32;
-            let source_y = (y as i64 + offset_y).clamp(0, image.height() as i64 - 1) as u32;
-            let pixel = image.pixel(source_x, source_y).unwrap_or([0.0; 4]);
+            let source_x = (x as i64 + offset_x).clamp(min_x, max_x) as u32;
+            let source_y = (y as i64 + offset_y).clamp(min_y, max_y) as u32;
+            let pixel = image.pixel_global(source_x, source_y).unwrap_or([0.0; 4]);
             for channel in 0..4 {
                 total[channel] += pixel[channel];
             }

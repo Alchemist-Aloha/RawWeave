@@ -195,6 +195,12 @@ impl MemoryRenderCache {
         self.get(key).filter(|result| result.is_current(revision))
     }
 
+    pub fn restamp_revision(&mut self, revision: GraphRevision) {
+        for result in self.entries.values_mut() {
+            result.revision = revision;
+        }
+    }
+
     pub fn invalidate_node(&mut self, node_id: &str) -> usize {
         self.invalidate_where(|key| key.node_id == node_id)
     }
@@ -534,7 +540,7 @@ impl GpuContext {
         }
         let input = self.upload_image(image)?;
         let input_resource = image_resource(&input)?;
-        let output_bytes = vec![0_u8; image.pixels().len() * std::mem::size_of::<Pixel>()];
+        let output_bytes = vec![0_u8; std::mem::size_of_val(image.pixels())];
         let output_resource = self.create_buffer_resource(
             &output_bytes,
             wgpu::BufferUsages::STORAGE
@@ -856,7 +862,7 @@ fn image_resource(image: &GpuImage) -> Result<&WgpuImageResource, GpuError> {
 }
 
 fn pixels_to_bytes(pixels: &[Pixel]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(pixels.len() * std::mem::size_of::<Pixel>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(pixels));
     for pixel in pixels {
         for channel in pixel {
             bytes.extend_from_slice(&channel.to_ne_bytes());
@@ -873,7 +879,9 @@ fn bytes_to_pixels(bytes: &[u8]) -> Result<Vec<Pixel>, GpuError> {
         ));
     }
     Ok(bytes
-        .chunks_exact(PIXEL_BYTES)
+        .as_chunks::<PIXEL_BYTES>()
+        .0
+        .iter()
         .map(|bytes| {
             std::array::from_fn(|channel| {
                 let offset = channel * std::mem::size_of::<f32>();
