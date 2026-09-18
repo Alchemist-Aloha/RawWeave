@@ -1,0 +1,14 @@
+# Rust build output
+target/
+
+# Frontend dependencies and build output
+node_modules/
+dist/
+
+# Local tooling and generated files
+.vite/
+*.log
+*.tsbuildinfo
+apps/desktop/frontend/vite.config.js
+apps/desktop/frontend/vite.config.d.ts
+.DS_Store

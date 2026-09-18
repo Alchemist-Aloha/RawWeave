@@ -1,0 +1,16 @@
+[package]
+name = "rawweave-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+rawweave-node-api = { path = "../../../crates/node-api" }
+rawweave-project = { path = "../../../crates/project" }
+tauri = { version = "2" }
+
+[workspace]

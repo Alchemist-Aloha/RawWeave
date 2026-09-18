@@ -1,0 +1,9 @@
+[package]
+name = "rawweave-core-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rawweave-image.workspace = true
+rawweave-node-api.workspace = true
