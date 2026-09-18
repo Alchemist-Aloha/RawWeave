@@ -268,9 +268,9 @@ impl PreviewManager {
     pub fn begin(&self, request_id: &str) -> Arc<AtomicBool> {
         if let Ok(mut jobs) = self.jobs.lock() {
             if let Some(token) = jobs.get(request_id) {
-                if !token.load(Ordering::Acquire) {
-                    return Arc::clone(token);
-                }
+                // Keep a cancelled request cancelled until its worker cleans it up.
+                // This is also the worker-side lookup after dispatch registration.
+                return Arc::clone(token);
             }
             let token = Arc::new(AtomicBool::new(false));
             jobs.insert(request_id.to_owned(), Arc::clone(&token));
@@ -894,12 +894,61 @@ mod tests {
         assert!(manager.cancel("request"));
         assert!(token.load(Ordering::Acquire));
         assert!(manager.is_cancelled("request"));
-        let replacement = manager.begin("request");
-        assert!(!Arc::ptr_eq(&token, &replacement));
-        assert!(!replacement.load(Ordering::Acquire));
+        let same_request = manager.begin("request");
+        assert!(Arc::ptr_eq(&token, &same_request));
+        assert!(same_request.load(Ordering::Acquire));
         assert!(manager.store.get(&preview_path("request")).is_none());
         manager.finish_job("request");
         assert!(!manager.is_cancelled("request"));
+        let replacement = manager.begin("request");
+        assert!(!Arc::ptr_eq(&token, &replacement));
+        assert!(!replacement.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn queued_worker_keeps_cancellation_and_does_not_repopulate_the_store() {
+        let mut editor = EditorCore::default();
+        editor.add_node("input", "core.image-input").unwrap();
+        editor.add_node("output", "core.output").unwrap();
+        editor.connect("input", "image", "output", "image").unwrap();
+        let revision = editor.graph().revision();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let request_id = "queued-worker";
+        let request = PreviewRequest {
+            request_id: request_id.to_owned(),
+            revision,
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+
+        manager.begin(request_id);
+        manager
+            .store
+            .insert(preview_path(request_id), revision, vec![1, 2, 3])
+            .unwrap();
+        manager.cancel_all();
+
+        let error = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(Image::new(1, 1).unwrap())),
+            request,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "preview cancelled");
+        assert!(manager.store.get(&preview_path(request_id)).is_none());
     }
 
     #[test]
