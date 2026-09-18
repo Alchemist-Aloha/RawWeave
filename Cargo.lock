@@ -626,6 +626,7 @@ dependencies = [
  "rawweave-image",
  "rawweave-node-api",
  "rawweave-rendering",
+ "serde_json",
 ]
 
 [[package]]

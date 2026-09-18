@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
@@ -52,6 +52,8 @@ pub enum GraphError {
     ParameterTypeMismatch { node: NodeId, parameter: String },
     #[error("parameter '{parameter}' on node '{node}' is outside its allowed range")]
     ParameterOutOfRange { node: NodeId, parameter: String },
+    #[error("parameter '{parameter}' on node '{node}' must be finite")]
+    ParameterNotFinite { node: NodeId, parameter: String },
     #[error("output '{node}:{port}' was not produced")]
     MissingOutput { node: NodeId, port: String },
     #[error("node '{node}' failed: {source}")]
@@ -77,6 +79,23 @@ pub struct Graph {
 struct EvaluatedNode {
     result: NodeResult,
     output_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum BackendIdentity {
+    NoRenderContext,
+    Cpu,
+    Gpu(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct MemoKey {
+    node_id: NodeId,
+    requested_region: Option<rawweave_image::Region>,
+    tile: TileCoord,
+    mip_level: u8,
+    quality: rawweave_rendering::PreviewQuality,
+    backend: BackendIdentity,
 }
 
 impl Graph {
@@ -201,17 +220,22 @@ impl Graph {
                     parameter: parameter_id.to_owned(),
                 });
             }
-            if let ParameterValue::Float(number) = value {
-                if descriptor.min.is_some_and(|minimum| number < minimum)
-                    || descriptor.max.is_some_and(|maximum| number > maximum)
+            if let ParameterValue::Float(number) = &value {
+                if !number.is_finite() {
+                    return Err(GraphError::ParameterNotFinite {
+                        node: node_id.clone(),
+                        parameter: parameter_id.to_owned(),
+                    });
+                }
+                if descriptor.min.is_some_and(|minimum| *number < minimum)
+                    || descriptor.max.is_some_and(|maximum| *number > maximum)
                 {
                     return Err(GraphError::ParameterOutOfRange {
                         node: node_id.clone(),
                         parameter: parameter_id.to_owned(),
                     });
                 }
-                node.parameters
-                    .insert(parameter_id.to_owned(), ParameterValue::Float(number));
+                node.parameters.insert(parameter_id.to_owned(), value);
             } else {
                 node.parameters.insert(parameter_id.to_owned(), value);
             }
@@ -311,7 +335,14 @@ impl Graph {
     }
 
     pub fn validate(&self) -> Result<(), GraphError> {
+        let mut connected_inputs = BTreeSet::new();
         for edge in &self.edges {
+            if !connected_inputs.insert((&edge.to_node, edge.to_port.as_str())) {
+                return Err(GraphError::InputAlreadyConnected {
+                    node: edge.to_node.clone(),
+                    port: edge.to_port.clone(),
+                });
+            }
             let source = self
                 .nodes
                 .get(&edge.from_node)
@@ -363,7 +394,7 @@ impl Graph {
                 port: output_port.to_owned(),
             });
         }
-        let mut memo = BTreeMap::new();
+        let mut memo = HashMap::new();
         let mut visiting = BTreeSet::new();
         let result = self.evaluate_node(node_id, context, &mut memo, &mut visiting)?;
         result
@@ -391,15 +422,9 @@ impl Graph {
         &self,
         node_id: &NodeId,
         context: &EvaluationContext,
-        memo: &mut BTreeMap<NodeId, EvaluatedNode>,
+        memo: &mut HashMap<MemoKey, EvaluatedNode>,
         visiting: &mut BTreeSet<NodeId>,
     ) -> Result<EvaluatedNode, GraphError> {
-        if let Some(result) = memo.get(node_id) {
-            return Ok(result.clone());
-        }
-        if !visiting.insert(node_id.clone()) {
-            return Err(GraphError::CycleDetected);
-        }
         let node = self
             .nodes
             .get(node_id)
@@ -413,8 +438,23 @@ impl Graph {
             },
             _ => context.clone(),
         };
+        let memo_key = MemoKey {
+            node_id: node_id.clone(),
+            requested_region: execution_context.requested_region(),
+            tile: execution_context.tile(),
+            mip_level: execution_context.mip_level(),
+            quality: execution_context.quality(),
+            backend: backend_identity(&execution_context),
+        };
+        if let Some(result) = memo.get(&memo_key) {
+            return Ok(result.clone());
+        }
+        if !visiting.insert(node_id.clone()) {
+            return Err(GraphError::CycleDetected);
+        }
         let mut inputs = Inputs::new();
         let mut upstream_hasher = DefaultHasher::new();
+        backend_identity(&execution_context).hash(&mut upstream_hasher);
         if let Some(source_image) = execution_context.source_image.as_ref() {
             0_u8.hash(&mut upstream_hasher);
             hash_image(source_image, &mut upstream_hasher);
@@ -467,7 +507,7 @@ impl Graph {
                 result,
             };
             visiting.remove(node_id);
-            memo.insert(node_id.clone(), evaluated.clone());
+            memo.insert(memo_key.clone(), evaluated.clone());
             return Ok(evaluated);
         }
         let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
@@ -492,7 +532,7 @@ impl Graph {
             }
         }
         visiting.remove(node_id);
-        memo.insert(node_id.clone(), evaluated.clone());
+        memo.insert(memo_key, evaluated.clone());
         Ok(evaluated)
     }
 
@@ -522,6 +562,15 @@ impl Graph {
         if let Ok(mut cache) = self.render_cache.lock() {
             cache.restamp_revision(revision);
         }
+    }
+}
+
+fn backend_identity(context: &EvaluationContext) -> BackendIdentity {
+    match context.render_context() {
+        None => BackendIdentity::NoRenderContext,
+        Some(render_context) => render_context.gpu().map_or(BackendIdentity::Cpu, |gpu| {
+            BackendIdentity::Gpu(gpu.context_id())
+        }),
     }
 }
 

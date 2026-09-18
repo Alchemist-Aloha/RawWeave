@@ -217,3 +217,49 @@ fn missing_node_type_is_reported_when_evaluated() {
         .unwrap_err();
     assert!(matches!(error, GraphError::UnknownNodeType { .. }));
 }
+
+#[test]
+fn graph_rejects_non_finite_parameters_without_poisoning_json() {
+    let mut graph = graph();
+    graph
+        .add_node(NodeId::from("exposure"), "core.exposure")
+        .unwrap();
+    let before = graph.to_json().unwrap();
+
+    assert!(
+        graph
+            .set_parameter(&NodeId::from("exposure"), "exposure", f32::NAN.into(),)
+            .is_err()
+    );
+
+    let json = graph.to_json().unwrap();
+    assert_eq!(json, before);
+    assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+}
+
+#[test]
+fn deserialized_graphs_reject_duplicate_incoming_edges() {
+    let mut original = graph();
+    original
+        .add_node(NodeId::from("input"), "core.image-input")
+        .unwrap();
+    original
+        .add_node(NodeId::from("output"), "core.output")
+        .unwrap();
+    original
+        .connect(
+            NodeId::from("input"),
+            "image",
+            NodeId::from("output"),
+            "image",
+        )
+        .unwrap();
+
+    let mut document: serde_json::Value =
+        serde_json::from_str(&original.to_json().unwrap()).unwrap();
+    let duplicate = document["edges"][0].clone();
+    document["edges"].as_array_mut().unwrap().push(duplicate);
+
+    let error = Graph::from_json(&document.to_string(), registry()).unwrap_err();
+    assert!(matches!(error, GraphError::InputAlreadyConnected { .. }));
+}

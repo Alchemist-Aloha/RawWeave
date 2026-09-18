@@ -100,6 +100,38 @@ fn crop_and_resize_produce_expected_pixels_and_honor_regions() {
 }
 
 #[test]
+fn resize_rejects_oversized_targets_before_working() {
+    let resize = registry().instantiate("core.resize").unwrap();
+    let parameters = [
+        ("width".to_owned(), 100_000.0.into()),
+        ("height".to_owned(), 100_000.0.into()),
+    ]
+    .into_iter()
+    .collect::<Parameters>();
+    let context = EvaluationContext::default().with_requested_region(Region::new(0, 0, 0, 0));
+
+    assert!(
+        resize
+            .evaluate(&image_input(source()), &parameters, &context)
+            .is_err()
+    );
+}
+
+#[test]
+fn blur_rejects_oversized_radii_before_working() {
+    let blur = registry().instantiate("core.blur").unwrap();
+    let parameters = [("radius".to_owned(), 100_000.0.into())]
+        .into_iter()
+        .collect::<Parameters>();
+    let context = EvaluationContext::default().with_requested_region(Region::new(0, 0, 0, 0));
+
+    assert!(
+        blur.evaluate(&image_input(source()), &parameters, &context)
+            .is_err()
+    );
+}
+
+#[test]
 fn requested_regions_keep_global_coordinates_through_chained_operations() {
     let crop = registry().instantiate("core.crop").unwrap();
     let crop_parameters = [
@@ -262,6 +294,22 @@ fn color_matrix_uses_gpu_when_the_context_provides_one() {
             assert!((actual - expected).abs() <= 1e-5, "{actual} != {expected}");
         }
     }
+}
+
+#[test]
+fn color_matrix_gpu_fallback_propagates_cpu_errors_instead_of_panicking() {
+    let Some(gpu) = GpuContext::initialize_or_cpu() else {
+        return;
+    };
+    let malformed: Image = serde_json::from_str(r#"{"width":1,"height":1,"pixels":[]}"#).unwrap();
+    let matrix = registry().instantiate("core.color-matrix").unwrap();
+    let context =
+        EvaluationContext::default().with_render_context(RenderContext::new().with_gpu(gpu));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        matrix.evaluate(&image_input(malformed), &Parameters::new(), &context)
+    }));
+
+    assert!(matches!(result, Ok(Err(_))));
 }
 
 struct NodeResultLike;

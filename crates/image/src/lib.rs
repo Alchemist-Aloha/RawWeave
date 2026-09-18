@@ -117,6 +117,11 @@ pub enum ImageError {
     },
     #[error("image dimensions are too large")]
     DimensionsOverflow,
+    #[error("image origin {origin:?} overflows dimensions {dimensions:?}")]
+    OriginOverflow {
+        origin: (u32, u32),
+        dimensions: Dimensions,
+    },
     #[error("region {region:?} is outside image dimensions {dimensions:?}")]
     InvalidRegion {
         region: Region,
@@ -243,6 +248,7 @@ impl Image {
                 actual: pixels.len(),
             });
         }
+        validate_origin(origin, dimensions)?;
         Ok(Self {
             width: dimensions.width,
             height: dimensions.height,
@@ -289,6 +295,7 @@ impl Image {
                 actual: pixels.len(),
             });
         }
+        validate_origin(origin, dimensions)?;
         Ok(Self {
             width: dimensions.width,
             height: dimensions.height,
@@ -607,6 +614,15 @@ fn pixel_count(width: u32, height: u32) -> Result<usize, ImageError> {
     (width as usize)
         .checked_mul(height as usize)
         .ok_or(ImageError::DimensionsOverflow)
+}
+
+fn validate_origin(origin: (u32, u32), dimensions: Dimensions) -> Result<(), ImageError> {
+    if origin.0.checked_add(dimensions.width).is_none()
+        || origin.1.checked_add(dimensions.height).is_none()
+    {
+        return Err(ImageError::OriginOverflow { origin, dimensions });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

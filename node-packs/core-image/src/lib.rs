@@ -5,6 +5,9 @@ use rawweave_node_api::{
     PortDescriptor, Value,
 };
 
+const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+const MAX_BLUR_RADIUS: u32 = 64;
+
 fn set_cpu_region_capabilities(descriptor: &mut NodeDescriptor) {
     descriptor.capabilities = vec![ExecutionCapability::Cpu, ExecutionCapability::RegionAware];
 }
@@ -303,6 +306,12 @@ impl NodeInstance for Resize {
         let image = image_input(inputs, "image")?;
         let width = integer_parameter(parameters, "width", 1)?;
         let height = integer_parameter(parameters, "height", 1)?;
+        let target_pixels = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+        if width == 0 || height == 0 || target_pixels > MAX_IMAGE_PIXELS {
+            return Err(NodeError::InvalidParameter("dimensions".to_owned()));
+        }
         let target = Dimensions::new(width, height);
         let region = requested_region(Region::new(0, 0, target.width, target.height), context);
         let mut pixels = Vec::with_capacity(pixel_capacity(region));
@@ -342,12 +351,15 @@ impl NodeInstance for Crop {
             )));
         }
         let (origin_x, origin_y) = image.origin();
-        let crop_region = Region::new(
-            origin_x.saturating_add(x),
-            origin_y.saturating_add(y),
-            width,
-            height,
+        let crop_origin = (
+            origin_x
+                .checked_add(x)
+                .ok_or_else(|| NodeError::Message("crop origin overflowed".to_owned()))?,
+            origin_y
+                .checked_add(y)
+                .ok_or_else(|| NodeError::Message("crop origin overflowed".to_owned()))?,
         );
+        let crop_region = Region::new(crop_origin.0, crop_origin.1, width, height);
         let output_region = requested_region(crop_region, context);
         let mut pixels = Vec::with_capacity(pixel_capacity(output_region));
         for output_y in 0..output_region.height {
@@ -377,6 +389,9 @@ impl NodeInstance for Blur {
     ) -> Result<NodeResult, NodeError> {
         let image = image_input(inputs, "image")?;
         let radius = integer_parameter(parameters, "radius", 1)?;
+        if radius > MAX_BLUR_RADIUS {
+            return Err(NodeError::InvalidParameter("radius".to_owned()));
+        }
         let region = requested_region(image.global_region(), context);
         let mut pixels = Vec::with_capacity(pixel_capacity(region));
         for y in 0..region.height {
@@ -484,10 +499,14 @@ impl NodeInstance for ColorMatrix {
         let output = if let Some(gpu) = context.render_context().and_then(|render| render.gpu()) {
             let region = requested_region(image.global_region(), context);
             let region_image = image_region(&image, region)?;
-            gpu.apply_color_matrix(&region_image, matrix, offsets)
-                .unwrap_or_else(|_| {
-                    cpu_output().expect("CPU color matrix fallback preserves dimensions")
-                })
+            match gpu.apply_color_matrix(&region_image, matrix, offsets) {
+                Ok(output) => output,
+                Err(gpu_error) => cpu_output().map_err(|cpu_error| {
+                    NodeError::Message(format!(
+                        "GPU color matrix failed: {gpu_error}; CPU fallback failed: {cpu_error}"
+                    ))
+                })?,
+            }
         } else {
             cpu_output()?
         };

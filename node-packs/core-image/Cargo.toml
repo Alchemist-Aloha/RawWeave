@@ -10,3 +10,4 @@ rawweave-node-api.workspace = true
 
 [dev-dependencies]
 rawweave-rendering.workspace = true
+serde_json.workspace = true

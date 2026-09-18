@@ -3,7 +3,7 @@ use std::fmt;
 
 use rawweave_image::{Image, Region};
 use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 pub type TypeId = String;
@@ -58,9 +58,20 @@ pub enum ParameterType {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
-    Float(f32),
+    Float(#[serde(deserialize_with = "deserialize_finite_float")] f32),
     Boolean(bool),
     String(String),
+}
+
+fn deserialize_finite_float<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = f32::deserialize(deserializer)?;
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| serde::de::Error::custom("float parameter must be finite"))
 }
 
 impl ParameterValue {
