@@ -638,7 +638,8 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
             | Value::CameraMetadata(_)
             | Value::ExifMetadata(_)
             | Value::CameraProfile(_)
-            | Value::LensProfile(_) => None,
+            | Value::LensProfile(_)
+            | Value::EmbeddedPreview(_) => None,
         })
 }
 
@@ -732,6 +733,10 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
             10_u8.hash(hasher);
             hash_lens_profile(profile, hasher);
         }
+        Value::EmbeddedPreview(preview) => {
+            11_u8.hash(hasher);
+            hash_embedded_preview(preview, hasher);
+        }
     }
 }
 
@@ -739,6 +744,11 @@ fn hash_camera_profile(profile: &rawweave_raw::CameraProfile, hasher: &mut impl 
     profile.make.hash(hasher);
     profile.model.hash(hasher);
     for row in &profile.xyz_to_camera {
+        for value in row {
+            value.to_bits().hash(hasher);
+        }
+    }
+    for row in &profile.camera_to_xyz {
         for value in row {
             value.to_bits().hash(hasher);
         }
@@ -755,6 +765,12 @@ fn hash_lens_profile(profile: &rawweave_raw::LensProfile, hasher: &mut impl Hash
     {
         value.to_bits().hash(hasher);
     }
+    profile.provenance.hash(hasher);
+}
+
+fn hash_embedded_preview(preview: &rawweave_raw::EmbeddedPreview, hasher: &mut impl Hasher) {
+    preview.bytes().hash(hasher);
+    preview.mime_type().hash(hasher);
 }
 
 fn hash_raw_frame(frame: &rawweave_raw::RawFrame, hasher: &mut impl Hasher) {
@@ -771,7 +787,7 @@ fn hash_raw_frame(frame: &rawweave_raw::RawFrame, hasher: &mut impl Hasher) {
         }
         None => false.hash(hasher),
     }
-    frame.embedded_preview().hash(hasher);
+    hash_embedded_preview(frame.embedded_preview(), hasher);
     for (key, value) in &frame.exif().tags {
         key.hash(hasher);
         value.hash(hasher);

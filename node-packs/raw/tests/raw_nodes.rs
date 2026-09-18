@@ -116,7 +116,10 @@ fn decode_is_deterministic_and_returns_frame_mosaic_and_metadata() {
         first.outputs.get("exif"),
         Some(Value::ExifMetadata(_))
     ));
-    assert!(!first.outputs.contains_key("preview"));
+    assert!(matches!(
+        first.outputs.get("preview"),
+        Some(Value::EmbeddedPreview(preview)) if preview.bytes().is_none()
+    ));
 }
 
 #[test]
@@ -288,8 +291,12 @@ fn camera_transform_applies_profile_matrix_and_keeps_identity_profiles_identity(
     assert_eq!(identity_scene.pixels(), scene.pixels());
     assert_eq!(identity_scene.working_space(), WorkingSpace::Srgb);
 
-    let mut profile = CameraProfile::identity("Test", "Matrix");
-    profile.xyz_to_camera = [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]];
+    let profile = CameraProfile::from_xyz_to_camera(
+        "Test",
+        "Matrix",
+        [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0; 3]],
+    )
+    .unwrap();
     let transformed = evaluate(
         &registry,
         "raw.camera-transform",

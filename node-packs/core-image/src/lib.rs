@@ -547,7 +547,8 @@ fn image_input(inputs: &Inputs, port: &str) -> Result<Image, NodeError> {
         | Value::CameraMetadata(_)
         | Value::ExifMetadata(_)
         | Value::CameraProfile(_)
-        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::LensProfile(_)
+        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 

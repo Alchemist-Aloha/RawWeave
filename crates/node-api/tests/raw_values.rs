@@ -1,6 +1,6 @@
 use rawweave_color::SceneLinearRGB;
 use rawweave_node_api::Value;
-use rawweave_raw::{CameraProfile, DeterministicCorpus, LensProfile};
+use rawweave_raw::{CameraProfile, DeterministicCorpus, EmbeddedPreview, LensProfile};
 
 #[test]
 fn raw_and_color_values_have_stable_graph_type_ids() {
@@ -23,5 +23,9 @@ fn raw_and_color_values_have_stable_graph_type_ids() {
     assert_eq!(
         Value::LensProfile(LensProfile::identity("Lens")).data_type(),
         "raw.LensProfile"
+    );
+    assert_eq!(
+        Value::EmbeddedPreview(EmbeddedPreview::unavailable()).data_type(),
+        "raw.EmbeddedPreview"
     );
 }

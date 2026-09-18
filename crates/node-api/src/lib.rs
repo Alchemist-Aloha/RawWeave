@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rawweave_color::{DisplayRGB, SceneLinearRGB};
 use rawweave_image::{Image, Region};
-use rawweave_raw::{CameraMetadata, ExifMetadata, Mosaic, RawFrame};
+use rawweave_raw::{CameraMetadata, EmbeddedPreview, ExifMetadata, Mosaic, RawFrame};
 use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -267,6 +267,7 @@ pub enum Value {
     ExifMetadata(ExifMetadata),
     CameraProfile(rawweave_raw::CameraProfile),
     LensProfile(rawweave_raw::LensProfile),
+    EmbeddedPreview(EmbeddedPreview),
 }
 
 impl Value {
@@ -283,6 +284,7 @@ impl Value {
             Self::ExifMetadata(_) => "raw.ExifMetadata",
             Self::CameraProfile(_) => "raw.CameraProfile",
             Self::LensProfile(_) => "raw.LensProfile",
+            Self::EmbeddedPreview(_) => "raw.EmbeddedPreview",
         }
     }
 }

@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use rawweave_color::{
-    DisplayTransform as DisplayTransformTrait, SceneLinearRGB, SrgbDisplayTransform, WorkingSpace,
+    DisplayTransform as DisplayTransformTrait, MatrixWorkingSpaceTransform, SceneLinearRGB,
+    SrgbDisplayTransform, WorkingSpace,
 };
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
@@ -65,7 +66,7 @@ pub fn raw_decode_descriptor() -> NodeDescriptor {
     descriptor.outputs.push(PortDescriptor::output(
         "preview",
         "Embedded Preview",
-        "core.Bytes",
+        "raw.EmbeddedPreview",
     ));
     full_frame_capabilities(&mut descriptor);
     descriptor
@@ -286,7 +287,7 @@ impl NodeInstance for RawDecode {
                     .unwrap_or_else(|| "Unknown lens".to_owned()),
             )
         });
-        let mut outputs = [
+        let outputs = [
             ("frame".to_owned(), Value::RawFrame(frame.clone())),
             ("mosaic".to_owned(), Value::Mosaic(frame.mosaic().clone())),
             (
@@ -299,12 +300,13 @@ impl NodeInstance for RawDecode {
             ),
             ("lens_profile".to_owned(), Value::LensProfile(lens_profile)),
             ("exif".to_owned(), Value::ExifMetadata(frame.exif().clone())),
+            (
+                "preview".to_owned(),
+                Value::EmbeddedPreview(frame.embedded_preview().clone()),
+            ),
         ]
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
-        if let Some(preview) = frame.embedded_preview() {
-            outputs.insert("preview".to_owned(), Value::Bytes(preview.to_vec()));
-        }
         Ok(NodeResult::new(outputs))
     }
 }
@@ -437,18 +439,25 @@ impl NodeInstance for CameraTransform {
             Some(_) => return Err(NodeError::InvalidParameter("camera_profile".to_owned())),
         };
         let transformed = match profile {
-            Some(profile) => scene
-                .map_pixels(|pixel| {
-                    [
-                        dot(profile.xyz_to_camera[0], pixel),
-                        dot(profile.xyz_to_camera[1], pixel),
-                        dot(profile.xyz_to_camera[2], pixel),
-                    ]
-                })
-                .map_err(|error| NodeError::Message(error.to_string()))?,
-            None => scene,
-        }
-        .with_working_space(working_space);
+            Some(profile) if profile.is_identity() => scene.with_working_space(working_space),
+            Some(profile) => {
+                let xyz_pixels = scene
+                    .pixels()
+                    .iter()
+                    .map(|pixel| {
+                        [
+                            dot(profile.camera_to_xyz[0], *pixel),
+                            dot(profile.camera_to_xyz[1], *pixel),
+                            dot(profile.camera_to_xyz[2], *pixel),
+                        ]
+                    })
+                    .collect();
+                MatrixWorkingSpaceTransform::new(working_space)
+                    .transform_xyz(scene.dimensions(), xyz_pixels)
+                    .map_err(|error| NodeError::Message(error.to_string()))?
+            }
+            None => scene.with_working_space(working_space),
+        };
         Ok(NodeResult::single(
             "scene",
             Value::SceneLinearRGB(transformed),
@@ -556,7 +565,8 @@ fn raw_frame_input(inputs: &Inputs, port: &str) -> Result<RawFrame, NodeError> {
         | Value::CameraMetadata(_)
         | Value::ExifMetadata(_)
         | Value::CameraProfile(_)
-        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::LensProfile(_)
+        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
@@ -572,7 +582,8 @@ fn mosaic_input(inputs: &Inputs, port: &str) -> Result<Mosaic, NodeError> {
         | Value::CameraMetadata(_)
         | Value::ExifMetadata(_)
         | Value::CameraProfile(_)
-        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::LensProfile(_)
+        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
@@ -588,7 +599,8 @@ fn scene_input(inputs: &Inputs, port: &str) -> Result<SceneLinearRGB, NodeError>
         | Value::CameraMetadata(_)
         | Value::ExifMetadata(_)
         | Value::CameraProfile(_)
-        | Value::LensProfile(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        | Value::LensProfile(_)
+        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 

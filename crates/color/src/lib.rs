@@ -398,6 +398,30 @@ impl MatrixWorkingSpaceTransform {
     pub fn destination(&self) -> WorkingSpace {
         self.destination.clone()
     }
+
+    /// Convert D65-referenced XYZ pixels into the destination working space.
+    pub fn transform_xyz(
+        &self,
+        dimensions: Dimensions,
+        xyz_pixels: Vec<[f32; 3]>,
+    ) -> Result<SceneLinearRGB, ColorError> {
+        let xyz_to_destination =
+            invert_matrix(working_space_to_xyz(&self.destination).ok_or_else(|| {
+                ColorError::UnsupportedWorkingSpace {
+                    from: WorkingSpace::CameraNative,
+                    to: self.destination.clone(),
+                }
+            })?)
+            .ok_or_else(|| ColorError::UnsupportedWorkingSpace {
+                from: WorkingSpace::CameraNative,
+                to: self.destination.clone(),
+            })?;
+        let pixels = xyz_pixels
+            .into_iter()
+            .map(|pixel| multiply_vector(xyz_to_destination, pixel))
+            .collect();
+        SceneLinearRGB::new(dimensions, pixels, self.destination.clone())
+    }
 }
 
 impl SceneTransform for MatrixWorkingSpaceTransform {
@@ -411,24 +435,12 @@ impl SceneTransform for MatrixWorkingSpaceTransform {
                 from: source.clone(),
                 to: self.destination.clone(),
             })?;
-        let xyz_to_destination =
-            invert_matrix(working_space_to_xyz(&self.destination).ok_or_else(|| {
-                ColorError::UnsupportedWorkingSpace {
-                    from: source.clone(),
-                    to: self.destination.clone(),
-                }
-            })?)
-            .ok_or_else(|| ColorError::UnsupportedWorkingSpace {
-                from: source.clone(),
-                to: self.destination.clone(),
-            })?;
-        let conversion = multiply_matrix(xyz_to_destination, source_to_xyz);
-        let pixels = scene
+        let xyz_pixels = scene
             .pixels()
             .iter()
-            .map(|pixel| multiply_vector(conversion, *pixel))
+            .map(|pixel| multiply_vector(source_to_xyz, *pixel))
             .collect();
-        SceneLinearRGB::new(scene.dimensions(), pixels, self.destination.clone())
+        self.transform_xyz(scene.dimensions(), xyz_pixels)
     }
 
     fn name(&self) -> &'static str {
@@ -451,9 +463,9 @@ fn working_space_to_xyz(space: &WorkingSpace) -> Option<[[f32; 3]; 3]> {
             [0.0, 0.04511338, 1.043_944_4],
         ]),
         WorkingSpace::ProPhoto => Some([
-            [0.797_766_6, 0.135_181_3, 0.03134773],
-            [0.28807483, 0.71183515, 0.00008902],
-            [0.0, 0.0, 0.825_104_6],
+            [0.7555907, 0.1127198, 0.0821454],
+            [0.2683219, 0.7151153, 0.0165619],
+            [0.0039160, -0.0129335, 1.0980752],
         ]),
         WorkingSpace::Rec2020 => Some([
             [0.63695805, 0.144_616_9, 0.16888098],
@@ -462,16 +474,6 @@ fn working_space_to_xyz(space: &WorkingSpace) -> Option<[[f32; 3]; 3]> {
         ]),
         WorkingSpace::CameraNative | WorkingSpace::Custom(_) => None,
     }
-}
-
-fn multiply_matrix(left: [[f32; 3]; 3], right: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    std::array::from_fn(|row| {
-        std::array::from_fn(|column| {
-            (0..3)
-                .map(|index| left[row][index] * right[index][column])
-                .sum()
-        })
-    })
 }
 
 fn multiply_vector(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {

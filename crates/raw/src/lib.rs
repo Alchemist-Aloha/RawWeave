@@ -307,6 +307,66 @@ pub struct ParsedExifMetadata {
     pub embedded_preview: Option<Vec<u8>>,
 }
 
+/// An optional embedded preview with its source MIME type when known.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddedPreview {
+    bytes: Option<Vec<u8>>,
+    mime_type: Option<String>,
+}
+
+/// Compatibility name for graph boundaries that model optional byte payloads.
+pub type OptionalBytes = EmbeddedPreview;
+
+impl EmbeddedPreview {
+    /// Construct a preview value. `None` bytes is an explicit unavailable preview.
+    pub fn new<M>(bytes: Option<Vec<u8>>, mime_type: Option<M>) -> Self
+    where
+        M: Into<String>,
+    {
+        Self {
+            bytes,
+            mime_type: mime_type.map(Into::into),
+        }
+    }
+
+    /// Construct an unavailable preview value.
+    pub fn unavailable() -> Self {
+        Self::default()
+    }
+
+    /// Construct a preview and infer a common MIME type from its signature.
+    pub fn from_bytes(bytes: Option<Vec<u8>>) -> Self {
+        let mime_type = bytes.as_deref().and_then(preview_mime_type);
+        Self { bytes, mime_type }
+    }
+
+    /// Preview bytes when a vendor or EXIF source supplied them.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+
+    /// MIME type supplied by the source or inferred from the byte signature.
+    pub fn mime_type(&self) -> Option<&str> {
+        self.mime_type.as_deref()
+    }
+}
+
+impl From<Option<Vec<u8>>> for EmbeddedPreview {
+    fn from(bytes: Option<Vec<u8>>) -> Self {
+        Self::from_bytes(bytes)
+    }
+}
+
+fn preview_mime_type(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg".to_owned())
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png".to_owned())
+    } else {
+        None
+    }
+}
+
 /// Camera color profile metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CameraProfile {
@@ -314,8 +374,14 @@ pub struct CameraProfile {
     pub make: String,
     /// Camera model.
     pub model: String,
-    /// Matrix mapping XYZ-like values into camera channels, where supplied.
+    /// Original vendor matrix mapping XYZ values into camera channels.
+    ///
+    /// This is retained for provenance and serialization compatibility. Processing must use
+    /// [`CameraProfile::camera_to_xyz`], never this source-direction matrix.
     pub xyz_to_camera: [[f32; 3]; 4],
+    /// Validated 3x3 matrix mapping camera RGB channels into D65-referenced XYZ.
+    #[serde(default = "identity_camera_to_xyz")]
+    pub camera_to_xyz: [[f32; 3]; 3],
 }
 
 impl CameraProfile {
@@ -330,8 +396,113 @@ impl CameraProfile {
                 [0.0, 0.0, 1.0],
                 [0.0, 0.0, 0.0],
             ],
+            camera_to_xyz: identity_camera_to_xyz(),
         }
     }
+
+    /// Build a profile from rawloader's XYZ-to-camera matrix.
+    pub fn from_xyz_to_camera(
+        make: impl Into<String>,
+        model: impl Into<String>,
+        xyz_to_camera: [[f32; 3]; 4],
+    ) -> Result<Self, RawError> {
+        let camera_to_xyz = invert_camera_matrix(xyz_to_camera)?;
+        Ok(Self {
+            make: make.into(),
+            model: model.into(),
+            xyz_to_camera,
+            camera_to_xyz,
+        })
+    }
+
+    /// Build a profile from an already adapted camera-to-XYZ matrix.
+    pub fn from_camera_to_xyz(
+        make: impl Into<String>,
+        model: impl Into<String>,
+        camera_to_xyz: [[f32; 3]; 3],
+    ) -> Result<Self, RawError> {
+        let xyz_to_camera = invert_3x3(camera_to_xyz, "camera color matrix")?;
+        Ok(Self {
+            make: make.into(),
+            model: model.into(),
+            xyz_to_camera: [
+                xyz_to_camera[0],
+                xyz_to_camera[1],
+                xyz_to_camera[2],
+                [0.0; 3],
+            ],
+            camera_to_xyz,
+        })
+    }
+
+    /// Whether this profile intentionally performs no camera calibration.
+    pub fn is_identity(&self) -> bool {
+        self.camera_to_xyz == identity_camera_to_xyz()
+    }
+}
+
+fn identity_camera_to_xyz() -> [[f32; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn invert_camera_matrix(xyz_to_camera: [[f32; 3]; 4]) -> Result<[[f32; 3]; 3], RawError> {
+    invert_3x3(
+        [xyz_to_camera[0], xyz_to_camera[1], xyz_to_camera[2]],
+        "camera color matrix",
+    )
+}
+
+fn invert_3x3(matrix: [[f32; 3]; 3], label: &str) -> Result<[[f32; 3]; 3], RawError> {
+    if matrix.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(RawError::InvalidCameraMatrix(format!(
+            "{label} contains a non-finite value"
+        )));
+    }
+    let scale = matrix
+        .iter()
+        .flatten()
+        .copied()
+        .map(f32::abs)
+        .fold(0.0_f32, f32::max);
+    if scale == 0.0 {
+        return Err(RawError::InvalidCameraMatrix(format!(
+            "{label} is singular"
+        )));
+    }
+    let [a, b, c] = matrix[0];
+    let [d, e, f] = matrix[1];
+    let [g, h, i] = matrix[2];
+    let determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    let threshold = 1e-6_f32 * scale.powi(3);
+    if !determinant.is_finite() || determinant.abs() <= threshold {
+        return Err(RawError::InvalidCameraMatrix(format!(
+            "{label} is singular or ill-conditioned"
+        )));
+    }
+    let inverse_determinant = 1.0 / determinant;
+    let inverse = [
+        [
+            (e * i - f * h) * inverse_determinant,
+            (c * h - b * i) * inverse_determinant,
+            (b * f - c * e) * inverse_determinant,
+        ],
+        [
+            (f * g - d * i) * inverse_determinant,
+            (a * i - c * g) * inverse_determinant,
+            (c * d - a * f) * inverse_determinant,
+        ],
+        [
+            (d * h - e * g) * inverse_determinant,
+            (b * g - a * h) * inverse_determinant,
+            (a * e - b * d) * inverse_determinant,
+        ],
+    ];
+    if inverse.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(RawError::InvalidCameraMatrix(format!(
+            "{label} produced a non-finite inverse"
+        )));
+    }
+    Ok(inverse)
 }
 
 /// Lens correction profile metadata.
@@ -346,6 +517,9 @@ pub struct LensProfile {
     /// Radial vignette correction coefficients.
     #[serde(default)]
     pub vignette: [f32; 3],
+    /// Source of the calibration coefficients.
+    #[serde(default)]
+    pub provenance: LensProfileProvenance,
 }
 
 impl LensProfile {
@@ -356,7 +530,50 @@ impl LensProfile {
             radial_distortion: [0.0; 3],
             tangential_distortion: [0.0; 2],
             vignette: [0.0; 3],
+            provenance: LensProfileProvenance::Unavailable,
         }
+    }
+
+    /// Create an explicit unavailable identity profile.
+    pub fn unavailable(name: impl Into<String>) -> Self {
+        Self::identity(name)
+    }
+
+    /// Create a calibrated profile with coefficients from a trusted provider.
+    pub fn calibrated(
+        name: impl Into<String>,
+        radial_distortion: [f32; 3],
+        tangential_distortion: [f32; 2],
+        vignette: [f32; 3],
+    ) -> Self {
+        Self {
+            name: name.into(),
+            radial_distortion,
+            tangential_distortion,
+            vignette,
+            provenance: LensProfileProvenance::BuiltInCalibrated,
+        }
+    }
+
+    /// Create a calibrated profile supplied by an external provider.
+    pub fn external(
+        name: impl Into<String>,
+        radial_distortion: [f32; 3],
+        tangential_distortion: [f32; 2],
+        vignette: [f32; 3],
+    ) -> Self {
+        Self {
+            name: name.into(),
+            radial_distortion,
+            tangential_distortion,
+            vignette,
+            provenance: LensProfileProvenance::External,
+        }
+    }
+
+    /// Profile provenance.
+    pub const fn provenance(&self) -> LensProfileProvenance {
+        self.provenance
     }
 
     /// Whether this profile would change image coordinates.
@@ -365,6 +582,116 @@ impl LensProfile {
             && self.tangential_distortion == [0.0; 2]
             && self.vignette == [0.0; 3]
     }
+}
+
+/// Provenance for a lens profile, including an explicit unavailable state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LensProfileProvenance {
+    /// The coefficients came from the built-in calibrated table.
+    BuiltInCalibrated,
+    /// The coefficients came from an injected or external provider.
+    External,
+    /// No calibrated correction is available for this lens.
+    #[default]
+    Unavailable,
+}
+
+/// Provider boundary for camera/lens calibration data.
+pub trait LensProfileProvider: Send + Sync {
+    /// Return a calibrated profile for the supplied camera metadata, if known.
+    fn profile_for(&self, camera: &CameraMetadata) -> Option<LensProfile>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LensProfileKey {
+    make: String,
+    model: String,
+    lens: String,
+}
+
+/// Small deterministic registry used by the production rawloader adapter.
+#[derive(Clone, Debug, Default)]
+pub struct LensProfileRegistry {
+    profiles: BTreeMap<LensProfileKey, LensProfile>,
+}
+
+impl LensProfileRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create the built-in calibrated table.
+    ///
+    /// The RawWeave Test / Test Camera / Test Lens entry is a deterministic fixture. The Canon
+    /// EOS R5 / RF 50mm F1.2 L USM entry is a documented representative production lens; values
+    /// are intentionally small and deterministic until a full lens database is integrated.
+    pub fn built_in() -> Self {
+        let mut registry = Self::new();
+        registry.register(
+            "RawWeave",
+            "Test Camera",
+            "Test Lens",
+            LensProfile::calibrated(
+                "RawWeave Test / Test Camera / Test Lens",
+                [0.012, -0.001, 0.0],
+                [0.0005, -0.0003],
+                [-0.08, 0.01, 0.0],
+            ),
+        );
+        registry.register(
+            "Canon",
+            "EOS R5",
+            "RF 50mm F1.2 L USM",
+            LensProfile::calibrated(
+                "Canon RF 50mm F1.2 L USM",
+                [0.018, -0.002, 0.0],
+                [0.0002, -0.0001],
+                [-0.12, 0.015, 0.0],
+            ),
+        );
+        registry
+    }
+
+    /// Register or replace one normalized make/model/lens entry.
+    pub fn register(&mut self, make: &str, model: &str, lens: &str, profile: LensProfile) {
+        self.profiles.insert(
+            LensProfileKey {
+                make: normalize_profile_key(make),
+                model: normalize_profile_key(model),
+                lens: normalize_profile_key(lens),
+            },
+            profile,
+        );
+    }
+
+    /// Look up a profile by make, model, and lens using normalized keys.
+    pub fn lookup(&self, make: &str, model: &str, lens: &str) -> Option<&LensProfile> {
+        self.profiles.get(&LensProfileKey {
+            make: normalize_profile_key(make),
+            model: normalize_profile_key(model),
+            lens: normalize_profile_key(lens),
+        })
+    }
+}
+
+impl LensProfileProvider for LensProfileRegistry {
+    fn profile_for(&self, camera: &CameraMetadata) -> Option<LensProfile> {
+        self.lookup(
+            &camera.make,
+            &camera.model,
+            camera.lens.as_deref().unwrap_or_default(),
+        )
+        .cloned()
+    }
+}
+
+fn normalize_profile_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// A decoded RAW frame and all metadata needed by the initial RAW graph stages.
@@ -376,23 +703,27 @@ pub struct RawFrame {
     camera: CameraMetadata,
     profile: CameraProfile,
     lens_profile: Option<LensProfile>,
-    embedded_preview: Option<Vec<u8>>,
+    #[serde(default)]
+    embedded_preview: EmbeddedPreview,
     exif: ExifMetadata,
 }
 
 impl RawFrame {
     /// Construct a validated RAW frame.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<P>(
         mosaic: Mosaic,
         black_levels: [f32; 4],
         white_levels: [f32; 4],
         camera: CameraMetadata,
         profile: CameraProfile,
         lens_profile: Option<LensProfile>,
-        embedded_preview: Option<Vec<u8>>,
+        embedded_preview: P,
         exif: ExifMetadata,
-    ) -> Result<Self, RawError> {
+    ) -> Result<Self, RawError>
+    where
+        P: Into<EmbeddedPreview>,
+    {
         if let Some(index) = black_levels
             .iter()
             .chain(white_levels.iter())
@@ -414,7 +745,7 @@ impl RawFrame {
             camera,
             profile,
             lens_profile,
-            embedded_preview,
+            embedded_preview: embedded_preview.into(),
             exif,
         })
     }
@@ -454,9 +785,14 @@ impl RawFrame {
         self.lens_profile.as_ref()
     }
 
-    /// Optional embedded preview bytes.
-    pub fn embedded_preview(&self) -> Option<&[u8]> {
-        self.embedded_preview.as_deref()
+    /// Embedded preview, including explicit unavailable state and MIME metadata.
+    pub fn embedded_preview(&self) -> &EmbeddedPreview {
+        &self.embedded_preview
+    }
+
+    /// Embedded preview bytes when available.
+    pub fn embedded_preview_bytes(&self) -> Option<&[u8]> {
+        self.embedded_preview.bytes()
     }
 
     /// Structured EXIF metadata.
@@ -535,6 +871,9 @@ pub enum RawError {
     /// A vendor decoder returned data this abstraction cannot represent.
     #[error("unsupported RAW decoder data: {0}")]
     UnsupportedData(String),
+    /// A camera color matrix cannot be inverted safely.
+    #[error("invalid camera color matrix: {0}")]
+    InvalidCameraMatrix(String),
     /// EXIF metadata could not be parsed by the pure-Rust EXIF reader.
     #[error("EXIF metadata could not be parsed: {0}")]
     Exif(String),
@@ -826,18 +1165,24 @@ fn adapt_rawloader_image(image: rawloader::RawImage, input: &[u8]) -> Result<Raw
     tags.insert("clean_model".to_owned(), image.clean_model.clone());
     tags.insert("cpp".to_owned(), image.cpp.to_string());
     let exif = ExifMetadata { tags };
-    let lens_profile = camera.lens.clone().map(LensProfile::identity);
-    let embedded_preview = parsed.and_then(|metadata| metadata.embedded_preview);
+    let lens_profile = camera.lens.as_deref().map(|lens| {
+        LensProfileRegistry::built_in()
+            .profile_for(&camera)
+            .unwrap_or_else(|| LensProfile::unavailable(lens))
+    });
+    let embedded_preview =
+        EmbeddedPreview::from_bytes(parsed.and_then(|metadata| metadata.embedded_preview));
+    let profile = CameraProfile::from_xyz_to_camera(
+        camera.make.clone(),
+        camera.model.clone(),
+        image.xyz_to_cam,
+    )?;
     RawFrame::new(
         mosaic,
         image.blacklevels.map(f32::from),
         white_levels,
         camera,
-        CameraProfile {
-            make: image.make,
-            model: image.model,
-            xyz_to_camera: image.xyz_to_cam,
-        },
+        profile,
         lens_profile,
         embedded_preview,
         exif,

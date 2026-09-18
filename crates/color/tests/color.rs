@@ -67,6 +67,25 @@ fn display_transform_converts_declared_non_srgb_working_space() {
 }
 
 #[test]
+fn prophoto_d50_neutral_maps_to_d65_srgb_neutral() {
+    let scene = SceneLinearRGB::new(
+        Dimensions::new(1, 1),
+        vec![[1.0, 1.0, 1.0]],
+        WorkingSpace::ProPhoto,
+    )
+    .unwrap();
+    let transformed = MatrixWorkingSpaceTransform::new(WorkingSpace::Srgb)
+        .transform(&scene)
+        .unwrap();
+    let pixel = transformed.pixel(0, 0).unwrap();
+    assert!(
+        pixel
+            .into_iter()
+            .all(|channel| (channel - 1.0).abs() < 1e-3)
+    );
+}
+
+#[test]
 fn native_color_backends_expose_handles_and_fail_clearly_when_unavailable() {
     let ocio = OcioBackend::new("config.ocio");
     assert_eq!(ocio.backend(), ColorTransformBackend::Ocio);

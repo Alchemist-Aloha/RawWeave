@@ -1,7 +1,8 @@
 use rawweave_image::Dimensions;
 use rawweave_raw::{
     CameraMetadata, CameraProfile, CfaColor, CfaPattern, DeterministicCorpus, DeterministicDecoder,
-    ExifMetadata, LensProfile, Mosaic, Orientation, RawDecoder, RawFrame, parse_exif_metadata,
+    EmbeddedPreview, ExifMetadata, LensProfile, LensProfileProvider, LensProfileRegistry, Mosaic,
+    Orientation, RawDecoder, RawFrame, parse_exif_metadata,
 };
 
 fn fixture_frame() -> RawFrame {
@@ -162,6 +163,79 @@ fn deterministic_corpus_covers_distinct_cameras_levels_patterns_and_clipped_high
             .zip(frame.white_levels().iter().cycle())
             .any(|(sample, white)| sample > white)
     }));
+}
+
+#[test]
+fn camera_profile_inverts_xyz_to_camera_and_rejects_singular_matrices() {
+    let profile = CameraProfile::from_xyz_to_camera(
+        "Test",
+        "Matrix",
+        [
+            [2.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 0.0, 5.0],
+            [0.0, 0.0, 0.0],
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        profile.camera_to_xyz,
+        [[0.5, 0.0, 0.0], [0.0, 0.25, 0.0], [0.0, 0.0, 0.2]]
+    );
+    let error = CameraProfile::from_xyz_to_camera(
+        "Test",
+        "Singular",
+        [
+            [1.0, 2.0, 3.0],
+            [2.0, 4.0, 6.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("camera color matrix"));
+}
+
+#[test]
+fn built_in_lens_profiles_normalize_keys_and_mark_unknown_lenses_unavailable() {
+    let registry = LensProfileRegistry::built_in();
+    let camera = CameraMetadata {
+        make: " RAWWEAVE ".to_owned(),
+        model: "Test-Camera".to_owned(),
+        lens: Some("Test Lens".to_owned()),
+        ..CameraMetadata::default()
+    };
+    let profile = registry.profile_for(&camera).unwrap();
+    assert_eq!(
+        profile.provenance(),
+        rawweave_raw::LensProfileProvenance::BuiltInCalibrated
+    );
+    assert!(!profile.is_identity());
+    assert!(
+        registry
+            .profile_for(&CameraMetadata {
+                make: "Unknown".to_owned(),
+                model: "Body".to_owned(),
+                lens: Some("Lens".to_owned()),
+                ..CameraMetadata::default()
+            })
+            .is_none()
+    );
+    let unavailable = LensProfile::unavailable("Unknown Lens");
+    assert_eq!(
+        unavailable.provenance(),
+        rawweave_raw::LensProfileProvenance::Unavailable
+    );
+    assert!(unavailable.is_identity());
+}
+
+#[test]
+fn embedded_preview_preserves_availability_and_mime_type() {
+    let unavailable = EmbeddedPreview::unavailable();
+    assert_eq!(unavailable.bytes(), None);
+    let available = EmbeddedPreview::new(Some(vec![0xff, 0xd8]), Some("image/jpeg"));
+    assert_eq!(available.bytes(), Some(&[0xff, 0xd8][..]));
+    assert_eq!(available.mime_type(), Some("image/jpeg"));
 }
 
 fn crafted_tiff_exif() -> Vec<u8> {
