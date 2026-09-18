@@ -17,6 +17,14 @@ fn set_cpu_tile_capabilities(descriptor: &mut NodeDescriptor) {
     ];
 }
 
+fn set_cpu_full_frame_capabilities(descriptor: &mut NodeDescriptor) {
+    descriptor.capabilities = vec![
+        ExecutionCapability::Cpu,
+        ExecutionCapability::FullFrame,
+        ExecutionCapability::RegionAware,
+    ];
+}
+
 fn image_input_descriptor() -> NodeDescriptor {
     let mut descriptor = NodeDescriptor::new("core.image-input", "Image Input");
     descriptor
@@ -129,6 +137,7 @@ fn crop_descriptor() -> NodeDescriptor {
 
 fn blur_descriptor() -> NodeDescriptor {
     let mut descriptor = image_processing_descriptor("core.blur", "Blur");
+    set_cpu_full_frame_capabilities(&mut descriptor);
     descriptor.parameters.push(ParameterDescriptor::float(
         "radius",
         "Radius",
@@ -295,7 +304,7 @@ impl NodeInstance for Resize {
         let width = integer_parameter(parameters, "width", 1)?;
         let height = integer_parameter(parameters, "height", 1)?;
         let target = Dimensions::new(width, height);
-        let region = requested_region(target, context);
+        let region = requested_region(Region::new(0, 0, target.width, target.height), context);
         let mut pixels = Vec::with_capacity(pixel_capacity(region));
         for y in 0..region.height {
             for x in 0..region.width {
@@ -306,7 +315,7 @@ impl NodeInstance for Resize {
         }
         Ok(NodeResult::single(
             "image",
-            Value::Image(image_from_pixels(&image, region.dimensions(), pixels)?),
+            Value::Image(image_from_region(&image, region, pixels)?),
         ))
     }
 }
@@ -325,31 +334,34 @@ impl NodeInstance for Crop {
         let y = integer_parameter(parameters, "y", 0)?;
         let width = integer_parameter(parameters, "width", 1)?;
         let height = integer_parameter(parameters, "height", 1)?;
-        let crop_region = Region::new(x, y, width, height);
-        if !crop_region.is_inside(image.dimensions()) {
+        let local_crop_region = Region::new(x, y, width, height);
+        if !local_crop_region.is_inside(image.dimensions()) {
             return Err(NodeError::Message(format!(
-                "crop region {crop_region:?} is outside image dimensions {:?}",
+                "crop region {local_crop_region:?} is outside image dimensions {:?}",
                 image.dimensions()
             )));
         }
-        let output_region = requested_region(crop_region.dimensions(), context);
+        let (origin_x, origin_y) = image.origin();
+        let crop_region = Region::new(
+            origin_x.saturating_add(x),
+            origin_y.saturating_add(y),
+            width,
+            height,
+        );
+        let output_region = requested_region(crop_region, context);
         let mut pixels = Vec::with_capacity(pixel_capacity(output_region));
         for output_y in 0..output_region.height {
             for output_x in 0..output_region.width {
-                let source_x = crop_region.x + output_region.x + output_x;
-                let source_y = crop_region.y + output_region.y + output_y;
-                pixels.push(image.pixel(source_x, source_y).ok_or_else(|| {
+                let source_x = output_region.x + output_x;
+                let source_y = output_region.y + output_y;
+                pixels.push(image.pixel_global(source_x, source_y).ok_or_else(|| {
                     NodeError::Message("crop source pixel was outside the image".to_owned())
                 })?);
             }
         }
         Ok(NodeResult::single(
             "image",
-            Value::Image(image_from_pixels(
-                &image,
-                output_region.dimensions(),
-                pixels,
-            )?),
+            Value::Image(image_from_region(&image, output_region, pixels)?),
         ))
     }
 }
@@ -365,7 +377,7 @@ impl NodeInstance for Blur {
     ) -> Result<NodeResult, NodeError> {
         let image = image_input(inputs, "image")?;
         let radius = integer_parameter(parameters, "radius", 1)?;
-        let region = requested_region(image.dimensions(), context);
+        let region = requested_region(image.global_region(), context);
         let mut pixels = Vec::with_capacity(pixel_capacity(region));
         for y in 0..region.height {
             for x in 0..region.width {
@@ -374,7 +386,7 @@ impl NodeInstance for Blur {
         }
         Ok(NodeResult::single(
             "image",
-            Value::Image(image_from_pixels(&image, region.dimensions(), pixels)?),
+            Value::Image(image_from_region(&image, region, pixels)?),
         ))
     }
 }
@@ -456,17 +468,29 @@ impl NodeInstance for ColorMatrix {
             optional_float_alias(parameters, &["offset_b", "offset_2"], 0.0)?,
             optional_float_alias(parameters, &["offset_a", "offset_3"], 0.0)?,
         ];
-        let output = map_image_region(&image, context, |pixel| {
-            let mut output = [0.0; 4];
-            for row in 0..4 {
-                output[row] = offsets[row]
-                    + matrix[row][0] * pixel[0]
-                    + matrix[row][1] * pixel[1]
-                    + matrix[row][2] * pixel[2]
-                    + matrix[row][3] * pixel[3];
-            }
-            output
-        })?;
+        let cpu_output = || {
+            map_image_region(&image, context, |pixel| {
+                let mut output = [0.0; 4];
+                for row in 0..4 {
+                    output[row] = offsets[row]
+                        + matrix[row][0] * pixel[0]
+                        + matrix[row][1] * pixel[1]
+                        + matrix[row][2] * pixel[2]
+                        + matrix[row][3] * pixel[3];
+                }
+                output
+            })
+        };
+        let output = if let Some(gpu) = context.render_context().and_then(|render| render.gpu()) {
+            let region = requested_region(image.global_region(), context);
+            let region_image = image_region(&image, region)?;
+            gpu.apply_color_matrix(&region_image, matrix, offsets)
+                .unwrap_or_else(|_| {
+                    cpu_output().expect("CPU color matrix fallback preserves dimensions")
+                })
+        } else {
+            cpu_output()?
+        };
         Ok(NodeResult::single("image", Value::Image(output)))
     }
 }
@@ -499,14 +523,14 @@ fn image_input(inputs: &Inputs, port: &str) -> Result<Image, NodeError> {
     }
 }
 
-fn image_from_pixels(
+fn image_from_region(
     source: &Image,
-    dimensions: Dimensions,
+    region: Region,
     pixels: Vec<[f32; 4]>,
 ) -> Result<Image, NodeError> {
-    Image::from_pixels_with_color_metadata(
-        dimensions.width,
-        dimensions.height,
+    Image::from_pixels_with_origin(
+        region.dimensions(),
+        (region.x, region.y),
         pixels,
         source.pixel_format(),
         source.color_metadata(),
@@ -514,26 +538,55 @@ fn image_from_pixels(
     .map_err(|error| NodeError::Message(error.to_string()))
 }
 
+fn image_region(image: &Image, region: Region) -> Result<Image, NodeError> {
+    if region.width == 0 || region.height == 0 {
+        return Image::from_pixels_with_origin(
+            region.dimensions(),
+            (region.x, region.y),
+            Vec::new(),
+            image.pixel_format(),
+            image.color_metadata(),
+        )
+        .map_err(|error| NodeError::Message(error.to_string()));
+    }
+    let (origin_x, origin_y) = image.origin();
+    let local_region = Region::new(
+        region.x.checked_sub(origin_x).ok_or_else(|| {
+            NodeError::Message("requested region was outside the image".to_owned())
+        })?,
+        region.y.checked_sub(origin_y).ok_or_else(|| {
+            NodeError::Message("requested region was outside the image".to_owned())
+        })?,
+        region.width,
+        region.height,
+    );
+    image
+        .view(local_region)
+        .and_then(|view| view.to_image())
+        .map_err(|error| NodeError::Message(error.to_string()))
+}
+
 fn map_image_region(
     image: &Image,
     context: &EvaluationContext,
     mut map: impl FnMut([f32; 4]) -> [f32; 4],
 ) -> Result<Image, NodeError> {
-    let region = requested_region(image.dimensions(), context);
+    let region = requested_region(image.global_region(), context);
     let mut pixels = Vec::with_capacity(pixel_capacity(region));
     for y in 0..region.height {
         for x in 0..region.width {
-            let pixel = image.pixel(region.x + x, region.y + y).ok_or_else(|| {
-                NodeError::Message("requested region was outside the image".to_owned())
-            })?;
+            let pixel = image
+                .pixel_global(region.x + x, region.y + y)
+                .ok_or_else(|| {
+                    NodeError::Message("requested region was outside the image".to_owned())
+                })?;
             pixels.push(map(pixel));
         }
     }
-    image_from_pixels(image, region.dimensions(), pixels)
+    image_from_region(image, region, pixels)
 }
 
-fn requested_region(dimensions: Dimensions, context: &EvaluationContext) -> Region {
-    let full = Region::new(0, 0, dimensions.width, dimensions.height);
+fn requested_region(full: Region, context: &EvaluationContext) -> Region {
     match context.requested_region() {
         Some(region) => region
             .intersection(full)

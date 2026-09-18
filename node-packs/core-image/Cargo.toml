@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 rawweave-image.workspace = true
 rawweave-node-api.workspace = true
+
+[dev-dependencies]
+rawweave-rendering.workspace = true

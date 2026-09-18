@@ -1,3 +1,5 @@
+use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -137,10 +139,14 @@ pub struct Image {
     width: u32,
     height: u32,
     #[serde(default)]
+    origin_x: u32,
+    #[serde(default)]
+    origin_y: u32,
+    #[serde(default)]
     pixel_format: PixelFormat,
     #[serde(default)]
     color_metadata: ColorMetadata,
-    pixels: Vec<Pixel>,
+    pixels: Arc<Vec<Pixel>>,
     #[serde(default)]
     revision: u64,
 }
@@ -149,6 +155,8 @@ impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
         self.width == other.width
             && self.height == other.height
+            && self.origin_x == other.origin_x
+            && self.origin_y == other.origin_y
             && self.pixel_format == other.pixel_format
             && self.color_metadata == other.color_metadata
             && self.pixels == other.pixels
@@ -163,9 +171,11 @@ impl Image {
         Ok(Self {
             width,
             height,
+            origin_x: 0,
+            origin_y: 0,
             pixel_format: PixelFormat::default(),
             color_metadata: ColorMetadata::default(),
-            pixels: vec![[0.0; 4]; count],
+            pixels: Arc::new(vec![[0.0; 4]; count]),
             revision: next_revision(),
         })
     }
@@ -218,15 +228,63 @@ impl Image {
         Ok(Self {
             width,
             height,
+            origin_x: 0,
+            origin_y: 0,
             pixel_format,
             color_metadata,
-            pixels,
+            pixels: Arc::new(pixels),
+            revision: next_revision(),
+        })
+    }
+
+    pub fn from_pixels_with_origin(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        pixels: Vec<Pixel>,
+        pixel_format: PixelFormat,
+        color_metadata: ColorMetadata,
+    ) -> Result<Self, ImageError> {
+        let expected = dimensions.pixel_count()?;
+        if pixels.len() != expected {
+            return Err(ImageError::PixelCountMismatch {
+                width: dimensions.width,
+                height: dimensions.height,
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self {
+            width: dimensions.width,
+            height: dimensions.height,
+            origin_x: origin.0,
+            origin_y: origin.1,
+            pixel_format,
+            color_metadata,
+            pixels: Arc::new(pixels),
             revision: next_revision(),
         })
     }
 
     pub fn from_pixels_with_revision(
         dimensions: Dimensions,
+        pixels: Vec<Pixel>,
+        pixel_format: PixelFormat,
+        color_metadata: ColorMetadata,
+        revision: u64,
+    ) -> Result<Self, ImageError> {
+        Self::from_pixels_with_origin_and_revision(
+            dimensions,
+            (0, 0),
+            pixels,
+            pixel_format,
+            color_metadata,
+            revision,
+        )
+    }
+
+    fn from_pixels_with_origin_and_revision(
+        dimensions: Dimensions,
+        origin: (u32, u32),
         pixels: Vec<Pixel>,
         pixel_format: PixelFormat,
         color_metadata: ColorMetadata,
@@ -244,15 +302,25 @@ impl Image {
         Ok(Self {
             width: dimensions.width,
             height: dimensions.height,
+            origin_x: origin.0,
+            origin_y: origin.1,
             pixel_format,
             color_metadata,
-            pixels,
+            pixels: Arc::new(pixels),
             revision,
         })
     }
 
     pub fn dimensions(&self) -> Dimensions {
         Dimensions::new(self.width, self.height)
+    }
+
+    pub fn origin(&self) -> (u32, u32) {
+        (self.origin_x, self.origin_y)
+    }
+
+    pub fn global_region(&self) -> Region {
+        Region::new(self.origin_x, self.origin_y, self.width, self.height)
     }
 
     pub fn width(&self) -> u32 {
@@ -280,7 +348,11 @@ impl Image {
     }
 
     pub fn pixels(&self) -> &[Pixel] {
-        &self.pixels
+        self.pixels.as_slice()
+    }
+
+    pub fn backing_ptr(&self) -> *const Pixel {
+        self.pixels.as_ptr()
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> Option<Pixel> {
@@ -292,9 +364,17 @@ impl Image {
             .copied()
     }
 
+    pub fn pixel_global(&self, x: u32, y: u32) -> Option<Pixel> {
+        if !self.global_region().contains(x, y) {
+            return None;
+        }
+        self.pixel(x - self.origin_x, y - self.origin_y)
+    }
+
     pub fn map_pixels(&self, mut map: impl FnMut(Pixel) -> Pixel) -> Self {
-        Self::from_pixels_with_revision(
+        Self::from_pixels_with_origin_and_revision(
             self.dimensions(),
+            self.origin(),
             self.pixels.iter().copied().map(&mut map).collect(),
             self.pixel_format,
             self.color_metadata,
@@ -332,6 +412,21 @@ impl ImageView {
         self.region.dimensions()
     }
 
+    pub fn origin(&self) -> (u32, u32) {
+        (
+            self.image.origin_x.saturating_add(self.region.x),
+            self.image.origin_y.saturating_add(self.region.y),
+        )
+    }
+
+    pub fn stride(&self) -> u32 {
+        self.image.width
+    }
+
+    pub fn backing_ptr(&self) -> *const Pixel {
+        self.image.backing_ptr()
+    }
+
     pub fn revision(&self) -> u64 {
         self.image.revision()
     }
@@ -350,8 +445,9 @@ impl ImageView {
     }
 
     pub fn to_image(&self) -> Result<Image, ImageError> {
-        Image::from_pixels_with_revision(
+        Image::from_pixels_with_origin_and_revision(
             self.dimensions(),
+            self.origin(),
             self.pixels(),
             self.image.pixel_format(),
             self.image.color_metadata(),
@@ -366,13 +462,119 @@ pub enum ResourceKind {
     Gpu,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub trait GpuImageResource: Send + Sync + fmt::Debug {
+    fn resource_id(&self) -> u64;
+    fn context_id(&self) -> u64;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GpuImage {
     pub resource_id: u64,
+    pub context_id: u64,
+    #[serde(default)]
+    pub origin: (u32, u32),
     pub dimensions: Dimensions,
     pub pixel_format: PixelFormat,
     pub color_metadata: ColorMetadata,
     pub revision: u64,
+    #[serde(skip)]
+    runtime_resource: Option<Arc<dyn GpuImageResource>>,
+}
+
+impl fmt::Debug for GpuImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GpuImage")
+            .field("resource_id", &self.resource_id)
+            .field("context_id", &self.context_id)
+            .field("dimensions", &self.dimensions)
+            .field("pixel_format", &self.pixel_format)
+            .field("color_metadata", &self.color_metadata)
+            .field("revision", &self.revision)
+            .field("has_runtime_resource", &self.runtime_resource.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for GpuImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.resource_id == other.resource_id
+            && self.context_id == other.context_id
+            && self.origin == other.origin
+            && self.dimensions == other.dimensions
+            && self.pixel_format == other.pixel_format
+            && self.color_metadata == other.color_metadata
+            && self.revision == other.revision
+    }
+}
+
+impl Eq for GpuImage {}
+
+impl GpuImage {
+    pub fn new(
+        resource_id: u64,
+        dimensions: Dimensions,
+        pixel_format: PixelFormat,
+        color_metadata: ColorMetadata,
+        revision: u64,
+    ) -> Self {
+        Self {
+            resource_id,
+            context_id: 0,
+            origin: (0, 0),
+            dimensions,
+            pixel_format,
+            color_metadata,
+            revision,
+            runtime_resource: None,
+        }
+    }
+
+    pub fn from_resource(
+        dimensions: Dimensions,
+        pixel_format: PixelFormat,
+        color_metadata: ColorMetadata,
+        revision: u64,
+        resource: Arc<dyn GpuImageResource>,
+    ) -> Self {
+        Self::from_resource_with_origin(
+            dimensions,
+            (0, 0),
+            pixel_format,
+            color_metadata,
+            revision,
+            resource,
+        )
+    }
+
+    pub fn from_resource_with_origin(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        pixel_format: PixelFormat,
+        color_metadata: ColorMetadata,
+        revision: u64,
+        resource: Arc<dyn GpuImageResource>,
+    ) -> Self {
+        Self {
+            resource_id: resource.resource_id(),
+            context_id: resource.context_id(),
+            origin,
+            dimensions,
+            pixel_format,
+            color_metadata,
+            revision,
+            runtime_resource: Some(resource),
+        }
+    }
+
+    pub fn runtime_resource(&self) -> Option<&Arc<dyn GpuImageResource>> {
+        self.runtime_resource.as_ref()
+    }
+
+    pub fn has_runtime_resource(&self) -> bool {
+        self.runtime_resource.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -439,5 +641,27 @@ mod tests {
         let image = Image::new(2, 2).unwrap();
         let view = image.view(Region::new(0, 0, 1, 1)).unwrap();
         assert_eq!(view.revision(), image.revision());
+    }
+
+    #[test]
+    fn image_views_share_the_source_backing_without_copying_pixels() {
+        let image = Image::from_pixels(
+            3,
+            2,
+            vec![
+                [0.0, 0.0, 0.0, 1.0],
+                [0.1, 0.2, 0.3, 1.0],
+                [0.4, 0.5, 0.6, 1.0],
+                [0.7, 0.8, 0.9, 1.0],
+                [1.0, 0.9, 0.8, 1.0],
+                [0.7, 0.6, 0.5, 1.0],
+            ],
+        )
+        .unwrap();
+        let view = image.view(Region::new(1, 0, 2, 2)).unwrap();
+
+        assert_eq!(image.backing_ptr(), view.backing_ptr());
+        assert_eq!(view.origin(), (1, 0));
+        assert_eq!(view.stride(), 3);
     }
 }

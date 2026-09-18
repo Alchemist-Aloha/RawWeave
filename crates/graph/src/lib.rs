@@ -1,10 +1,14 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 
 use rawweave_core::{CoreError, NodeId};
 use rawweave_node_api::{
     EvaluationContext, Inputs, NodeDescriptor, NodeError, NodeRegistry, NodeResult, ParameterValue,
     Value,
 };
+use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResult};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -65,6 +69,14 @@ pub struct Graph {
     revision: u64,
     #[serde(skip, default)]
     registry: NodeRegistry,
+    #[serde(skip, default)]
+    render_cache: Arc<Mutex<MemoryRenderCache>>,
+}
+
+#[derive(Clone)]
+struct EvaluatedNode {
+    result: NodeResult,
+    output_hash: u64,
 }
 
 impl Graph {
@@ -74,7 +86,21 @@ impl Graph {
             edges: Vec::new(),
             revision: 0,
             registry,
+            render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
         }
+    }
+
+    pub fn with_render_cache(mut self, cache: MemoryRenderCache) -> Self {
+        self.render_cache = Arc::new(Mutex::new(cache));
+        self
+    }
+
+    pub fn render_cache(&self) -> Arc<Mutex<MemoryRenderCache>> {
+        Arc::clone(&self.render_cache)
+    }
+
+    pub fn graph_revision(&self) -> GraphRevision {
+        GraphRevision::from(self.revision)
     }
 
     pub fn with_registry(mut self, registry: NodeRegistry) -> Self {
@@ -141,11 +167,13 @@ impl Graph {
     }
 
     pub fn remove_node(&mut self, id: &NodeId) -> Result<(), GraphError> {
+        let affected = self.downstream_nodes(id);
         if self.nodes.remove(id).is_none() {
             return Err(GraphError::MissingNode(id.clone()));
         }
         self.edges
             .retain(|edge| &edge.from_node != id && &edge.to_node != id);
+        self.invalidate_nodes(&affected);
         self.bump_revision();
         Ok(())
     }
@@ -156,36 +184,40 @@ impl Graph {
         parameter_id: &str,
         value: ParameterValue,
     ) -> Result<(), GraphError> {
-        let node = self
-            .nodes
-            .get_mut(node_id)
-            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
-        let descriptor = node.descriptor.parameter(parameter_id).ok_or_else(|| {
-            GraphError::MissingParameter {
-                node: node_id.clone(),
-                parameter: parameter_id.to_owned(),
-            }
-        })?;
-        if descriptor.parameter_type != value.parameter_type() {
-            return Err(GraphError::ParameterTypeMismatch {
-                node: node_id.clone(),
-                parameter: parameter_id.to_owned(),
-            });
-        }
-        if let ParameterValue::Float(number) = value {
-            if descriptor.min.is_some_and(|minimum| number < minimum)
-                || descriptor.max.is_some_and(|maximum| number > maximum)
-            {
-                return Err(GraphError::ParameterOutOfRange {
+        {
+            let node = self
+                .nodes
+                .get_mut(node_id)
+                .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+            let descriptor = node.descriptor.parameter(parameter_id).ok_or_else(|| {
+                GraphError::MissingParameter {
+                    node: node_id.clone(),
+                    parameter: parameter_id.to_owned(),
+                }
+            })?;
+            if descriptor.parameter_type != value.parameter_type() {
+                return Err(GraphError::ParameterTypeMismatch {
                     node: node_id.clone(),
                     parameter: parameter_id.to_owned(),
                 });
             }
-            node.parameters
-                .insert(parameter_id.to_owned(), ParameterValue::Float(number));
-        } else {
-            node.parameters.insert(parameter_id.to_owned(), value);
+            if let ParameterValue::Float(number) = value {
+                if descriptor.min.is_some_and(|minimum| number < minimum)
+                    || descriptor.max.is_some_and(|maximum| number > maximum)
+                {
+                    return Err(GraphError::ParameterOutOfRange {
+                        node: node_id.clone(),
+                        parameter: parameter_id.to_owned(),
+                    });
+                }
+                node.parameters
+                    .insert(parameter_id.to_owned(), ParameterValue::Float(number));
+            } else {
+                node.parameters.insert(parameter_id.to_owned(), value);
+            }
         }
+        let affected = self.downstream_nodes(node_id);
+        self.invalidate_nodes(&affected);
         self.bump_revision();
         Ok(())
     }
@@ -241,13 +273,15 @@ impl Graph {
         self.edges.push(GraphEdge {
             from_node,
             from_port: from_port.to_owned(),
-            to_node,
+            to_node: to_node.clone(),
             to_port: to_port.to_owned(),
         });
         if self.has_cycle() {
             self.edges.pop();
             return Err(GraphError::CycleDetected);
         }
+        let affected = self.downstream_nodes(&to_node);
+        self.invalidate_nodes(&affected);
         self.bump_revision();
         Ok(())
     }
@@ -269,7 +303,9 @@ impl Graph {
                     && edge.to_port == to_port
             })
             .ok_or(GraphError::EdgeNotFound)?;
+        let affected = self.downstream_nodes(&to_node);
         self.edges.remove(index);
+        self.invalidate_nodes(&affected);
         self.bump_revision();
         Ok(())
     }
@@ -331,6 +367,7 @@ impl Graph {
         let mut visiting = BTreeSet::new();
         let result = self.evaluate_node(node_id, context, &mut memo, &mut visiting)?;
         result
+            .result
             .outputs
             .get(output_port)
             .cloned()
@@ -354,9 +391,9 @@ impl Graph {
         &self,
         node_id: &NodeId,
         context: &EvaluationContext,
-        memo: &mut BTreeMap<NodeId, NodeResult>,
+        memo: &mut BTreeMap<NodeId, EvaluatedNode>,
         visiting: &mut BTreeSet<NodeId>,
-    ) -> Result<NodeResult, GraphError> {
+    ) -> Result<EvaluatedNode, GraphError> {
         if let Some(result) = memo.get(node_id) {
             return Ok(result.clone());
         }
@@ -367,15 +404,16 @@ impl Graph {
             .nodes
             .get(node_id)
             .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
-        let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
-            GraphError::UnknownNodeType {
-                type_id: node.type_id.clone(),
-            }
-        })?;
         let mut inputs = Inputs::new();
+        let mut upstream_hasher = DefaultHasher::new();
+        if let Some(source_image) = context.source_image.as_ref() {
+            0_u8.hash(&mut upstream_hasher);
+            hash_image(source_image, &mut upstream_hasher);
+        }
         for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
-            let result = self.evaluate_node(&edge.from_node, context, memo, visiting)?;
-            let value = result
+            let upstream = self.evaluate_node(&edge.from_node, context, memo, visiting)?;
+            let value = upstream
+                .result
                 .outputs
                 .get(&edge.from_port)
                 .cloned()
@@ -383,6 +421,10 @@ impl Graph {
                     node: edge.from_node.clone(),
                     port: edge.from_port.clone(),
                 })?;
+            edge.from_node.as_str().hash(&mut upstream_hasher);
+            edge.from_port.hash(&mut upstream_hasher);
+            edge.to_port.hash(&mut upstream_hasher);
+            upstream.output_hash.hash(&mut upstream_hasher);
             inputs.insert(edge.to_port.clone(), value);
         }
         for port in &node.descriptor.inputs {
@@ -393,17 +435,64 @@ impl Graph {
                 });
             }
         }
+        let cache_key = CacheKey::new(
+            node.id.as_str(),
+            node.descriptor.version,
+            hash_parameters(&node.parameters),
+            upstream_hasher.finish(),
+            context.requested_region().unwrap_or_default(),
+            context.tile(),
+            context.mip_level(),
+            context.quality(),
+        );
+        let current_revision = self.graph_revision();
+        let cached = self
+            .render_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get_current(&cache_key, current_revision));
+        if let Some(cached) = cached {
+            if let Some(result) = cached_node_result(node, cached) {
+                let evaluated = EvaluatedNode {
+                    output_hash: hash_node_result(&result),
+                    result,
+                };
+                visiting.remove(node_id);
+                memo.insert(node_id.clone(), evaluated.clone());
+                return Ok(evaluated);
+            }
+        }
+        let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
+            GraphError::UnknownNodeType {
+                type_id: node.type_id.clone(),
+            }
+        })?;
         let result = instance
             .evaluate(&inputs, &node.parameters, context)
             .map_err(|source| GraphError::Evaluation {
                 node: node_id.clone(),
                 source,
             })?;
+        let evaluated = EvaluatedNode {
+            output_hash: hash_node_result(&result),
+            result,
+        };
+        if let Some(image) = single_image(&evaluated.result) {
+            let render = RenderResult::new(image.clone(), current_revision);
+            if let Ok(mut cache) = self.render_cache.lock() {
+                cache.insert_if_current(cache_key, render, current_revision);
+            }
+        }
         visiting.remove(node_id);
-        memo.insert(node_id.clone(), result.clone());
-        Ok(result)
+        memo.insert(node_id.clone(), evaluated.clone());
+        Ok(evaluated)
     }
 
+    fn invalidate_nodes(&self, node_ids: &BTreeSet<NodeId>) {
+        if let Ok(mut cache) = self.render_cache.lock() {
+            cache.invalidate_nodes(node_ids.iter().map(NodeId::as_str));
+        }
+    }
     fn has_cycle(&self) -> bool {
         let mut adjacency: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
         for edge in &self.edges {
@@ -421,6 +510,83 @@ impl Graph {
 
     fn bump_revision(&mut self) {
         self.revision = self.revision.saturating_add(1);
+    }
+}
+
+fn cached_node_result(node: &GraphNode, cached: RenderResult) -> Option<NodeResult> {
+    let output = node.descriptor.outputs.first()?;
+    (node.descriptor.outputs.len() == 1 && output.data_type == "core.Image").then(|| {
+        NodeResult::single(
+            output.id.clone(),
+            Value::Image(cached.image.as_ref().clone()),
+        )
+    })
+}
+
+fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
+    (result.outputs.len() == 1)
+        .then(|| result.outputs.values().next())
+        .flatten()
+        .and_then(|value| match value {
+            Value::Image(image) => Some(image),
+            Value::Float(_) => None,
+        })
+}
+
+fn hash_parameters(parameters: &rawweave_node_api::Parameters) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (id, value) in parameters {
+        id.hash(&mut hasher);
+        match value {
+            ParameterValue::Float(number) => {
+                0_u8.hash(&mut hasher);
+                number.to_bits().hash(&mut hasher);
+            }
+            ParameterValue::Boolean(value) => {
+                1_u8.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+            ParameterValue::String(value) => {
+                2_u8.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+fn hash_node_result(result: &NodeResult) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (port, value) in &result.outputs {
+        port.hash(&mut hasher);
+        hash_value(value, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_value(value: &Value, hasher: &mut impl Hasher) {
+    match value {
+        Value::Image(image) => {
+            0_u8.hash(hasher);
+            hash_image(image, hasher);
+        }
+        Value::Float(number) => {
+            1_u8.hash(hasher);
+            number.to_bits().hash(hasher);
+        }
+    }
+}
+
+fn hash_image(image: &rawweave_image::Image, hasher: &mut impl Hasher) {
+    image.revision().hash(hasher);
+    image.dimensions().hash(hasher);
+    image.origin().hash(hasher);
+    image.pixel_format().hash(hasher);
+    image.color_metadata().hash(hasher);
+    for pixel in image.pixels() {
+        for channel in pixel {
+            channel.to_bits().hash(hasher);
+        }
     }
 }
 

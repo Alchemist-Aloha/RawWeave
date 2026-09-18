@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use rawweave_image::{Image, Region};
-use rawweave_rendering::RenderContext;
+use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -171,6 +171,38 @@ impl NodeDescriptor {
         self.capabilities.contains(&capability)
     }
 
+    /// Select the most specific executable capability for the current request.
+    ///
+    /// Backend availability is considered before CPU execution, while tile and
+    /// region scope are selected only when the request asks for a sub-region.
+    pub fn select_capability(&self, context: &EvaluationContext) -> Option<ExecutionCapability> {
+        if context
+            .render_context()
+            .is_some_and(|render_context| render_context.gpu_available())
+            && self.supports(ExecutionCapability::Gpu)
+        {
+            return Some(ExecutionCapability::Gpu);
+        }
+        if context.requested_region().is_some() && self.supports(ExecutionCapability::TileLocal) {
+            return Some(ExecutionCapability::TileLocal);
+        }
+        if context.requested_region().is_some() && self.supports(ExecutionCapability::RegionAware) {
+            return Some(ExecutionCapability::RegionAware);
+        }
+        if self.supports(ExecutionCapability::FullFrame) {
+            return Some(ExecutionCapability::FullFrame);
+        }
+        self.supports(ExecutionCapability::Cpu)
+            .then_some(ExecutionCapability::Cpu)
+    }
+
+    pub fn select_execution_capability(
+        &self,
+        context: &EvaluationContext,
+    ) -> Option<ExecutionCapability> {
+        self.select_capability(context)
+    }
+
     pub fn parameter_defaults(&self) -> Parameters {
         self.parameters
             .iter()
@@ -226,14 +258,16 @@ pub struct EvaluationContext {
     pub source_image: Option<Image>,
     pub requested_region: Option<Region>,
     pub render_context: Option<RenderContext>,
+    pub tile: TileCoord,
+    pub mip_level: u8,
+    pub quality: PreviewQuality,
 }
 
 impl EvaluationContext {
     pub fn with_source_image(source_image: Image) -> Self {
         Self {
             source_image: Some(source_image),
-            requested_region: None,
-            render_context: None,
+            ..Self::default()
         }
     }
 
@@ -247,12 +281,47 @@ impl EvaluationContext {
         self
     }
 
+    pub fn with_tile_request(mut self, request: TileRequest) -> Self {
+        self.requested_region = Some(request.region);
+        self.tile = request.tile;
+        self.mip_level = request.mip_level;
+        self.quality = request.quality;
+        self
+    }
+
+    pub fn with_tile(mut self, tile: TileCoord) -> Self {
+        self.tile = tile;
+        self
+    }
+
+    pub fn with_mip_level(mut self, mip_level: u8) -> Self {
+        self.mip_level = mip_level;
+        self
+    }
+
+    pub fn with_quality(mut self, quality: PreviewQuality) -> Self {
+        self.quality = quality;
+        self
+    }
+
     pub fn requested_region(&self) -> Option<Region> {
         self.requested_region
     }
 
     pub fn render_context(&self) -> Option<&RenderContext> {
         self.render_context.as_ref()
+    }
+
+    pub fn tile(&self) -> TileCoord {
+        self.tile
+    }
+
+    pub fn mip_level(&self) -> u8 {
+        self.mip_level
+    }
+
+    pub fn quality(&self) -> PreviewQuality {
+        self.quality
     }
 }
 

@@ -60,3 +60,37 @@ fn minimal_gpu_compute_is_optional_but_real_when_an_adapter_exists() {
     };
     gpu.run_minimal_compute().unwrap();
 }
+
+#[test]
+fn gpu_color_matrix_matches_cpu_reference_within_tolerance() {
+    let Some(gpu) = GpuContext::initialize_or_cpu() else {
+        return;
+    };
+    let source =
+        Image::from_pixels(2, 1, vec![[0.1, 0.2, 0.3, 1.0], [0.8, 0.4, 0.2, 0.5]]).unwrap();
+    let matrix = [
+        [0.9, 0.1, 0.0, 0.0],
+        [0.0, 0.8, 0.2, 0.0],
+        [0.1, 0.0, 0.7, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let offset = [0.01, -0.02, 0.03, 0.0];
+    let cpu = source.map_pixels(|pixel| {
+        let mut output = [0.0; 4];
+        for row in 0..4 {
+            output[row] = offset[row]
+                + matrix[row][0] * pixel[0]
+                + matrix[row][1] * pixel[1]
+                + matrix[row][2] * pixel[2]
+                + matrix[row][3] * pixel[3];
+        }
+        output
+    });
+    let actual = gpu.apply_color_matrix(&source, matrix, offset).unwrap();
+
+    for (actual, expected) in actual.pixels().iter().zip(cpu.pixels()) {
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1e-5, "{actual} != {expected}");
+        }
+    }
+}

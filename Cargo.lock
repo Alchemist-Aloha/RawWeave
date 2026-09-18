@@ -625,6 +625,7 @@ version = "0.1.0"
 dependencies = [
  "rawweave-image",
  "rawweave-node-api",
+ "rawweave-rendering",
 ]
 
 [[package]]
@@ -643,6 +644,7 @@ dependencies = [
  "rawweave-core-values",
  "rawweave-image",
  "rawweave-node-api",
+ "rawweave-rendering",
  "serde",
  "serde_json",
  "thiserror",
