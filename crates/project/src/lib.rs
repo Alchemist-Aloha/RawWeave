@@ -15,6 +15,8 @@ pub fn default_registry() -> NodeRegistry {
         .expect("the built-in image node pack must register once");
     rawweave_core_values::register_nodes(&mut registry)
         .expect("the built-in values node pack must register once");
+    rawweave_raw_nodes::register_nodes(&mut registry)
+        .expect("the built-in RAW node pack must register once");
     registry
 }
 

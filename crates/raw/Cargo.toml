@@ -1,13 +1,11 @@
 [package]
-name = "rawweave-node-api"
+name = "rawweave-raw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rawweave-color.workspace = true
+rawloader = "0.37.2"
 rawweave-image.workspace = true
-rawweave-raw.workspace = true
-rawweave-rendering.workspace = true
 serde.workspace = true
 thiserror.workspace = true

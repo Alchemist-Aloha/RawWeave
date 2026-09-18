@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
+use rawweave_color::{DisplayRGB, SceneLinearRGB};
 use rawweave_image::{Image, Region};
+use rawweave_raw::{CameraMetadata, ExifMetadata, Mosaic, RawFrame};
 use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -234,10 +237,18 @@ impl NodeDescriptor {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Image(Image),
     Float(f32),
+    Bytes(Vec<u8>),
+    RawFrame(RawFrame),
+    Mosaic(Mosaic),
+    SceneLinearRGB(SceneLinearRGB),
+    DisplayRGB(DisplayRGB),
+    CameraMetadata(CameraMetadata),
+    ExifMetadata(ExifMetadata),
 }
 
 impl Value {
@@ -245,6 +256,13 @@ impl Value {
         match self {
             Self::Image(_) => "core.Image",
             Self::Float(_) => "value.Float",
+            Self::Bytes(_) => "core.Bytes",
+            Self::RawFrame(_) => "raw.Frame",
+            Self::Mosaic(_) => "raw.Mosaic",
+            Self::SceneLinearRGB(_) => "color.SceneLinearRGB",
+            Self::DisplayRGB(_) => "color.DisplayRGB",
+            Self::CameraMetadata(_) => "raw.CameraMetadata",
+            Self::ExifMetadata(_) => "raw.ExifMetadata",
         }
     }
 }
@@ -362,8 +380,10 @@ pub type NodeFactory = fn() -> Box<dyn NodeInstance>;
 #[derive(Clone)]
 struct RegisteredNode {
     descriptor: NodeDescriptor,
-    factory: NodeFactory,
+    factory: SharedNodeFactory,
 }
+
+type SharedNodeFactory = Arc<dyn Fn() -> Box<dyn NodeInstance> + Send + Sync>;
 
 impl fmt::Debug for RegisteredNode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -393,6 +413,17 @@ impl NodeRegistry {
         descriptor: NodeDescriptor,
         factory: NodeFactory,
     ) -> Result<(), RegistryError> {
+        self.register_factory(descriptor, factory)
+    }
+
+    pub fn register_factory<F>(
+        &mut self,
+        descriptor: NodeDescriptor,
+        factory: F,
+    ) -> Result<(), RegistryError>
+    where
+        F: Fn() -> Box<dyn NodeInstance> + Send + Sync + 'static,
+    {
         if descriptor.type_id.is_empty() {
             return Err(RegistryError::EmptyType);
         }
@@ -403,7 +434,7 @@ impl NodeRegistry {
             descriptor.type_id.clone(),
             RegisteredNode {
                 descriptor,
-                factory,
+                factory: Arc::new(factory),
             },
         );
         Ok(())

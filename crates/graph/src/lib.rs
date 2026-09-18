@@ -598,7 +598,14 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
         .flatten()
         .and_then(|value| match value {
             Value::Image(image) => Some(image),
-            Value::Float(_) => None,
+            Value::Float(_)
+            | Value::Bytes(_)
+            | Value::RawFrame(_)
+            | Value::Mosaic(_)
+            | Value::SceneLinearRGB(_)
+            | Value::DisplayRGB(_)
+            | Value::CameraMetadata(_)
+            | Value::ExifMetadata(_) => None,
         })
 }
 
@@ -652,6 +659,132 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
         Value::Float(number) => {
             1_u8.hash(hasher);
             number.to_bits().hash(hasher);
+        }
+        Value::Bytes(bytes) => {
+            2_u8.hash(hasher);
+            bytes.hash(hasher);
+        }
+        Value::RawFrame(frame) => {
+            3_u8.hash(hasher);
+            hash_raw_frame(frame, hasher);
+        }
+        Value::Mosaic(mosaic) => {
+            4_u8.hash(hasher);
+            hash_mosaic(mosaic, hasher);
+        }
+        Value::SceneLinearRGB(scene) => {
+            5_u8.hash(hasher);
+            hash_scene_linear(scene, hasher);
+        }
+        Value::DisplayRGB(display) => {
+            6_u8.hash(hasher);
+            hash_display(display, hasher);
+        }
+        Value::CameraMetadata(metadata) => {
+            7_u8.hash(hasher);
+            hash_camera_metadata(metadata, hasher);
+        }
+        Value::ExifMetadata(metadata) => {
+            8_u8.hash(hasher);
+            for (key, value) in &metadata.tags {
+                key.hash(hasher);
+                value.hash(hasher);
+            }
+        }
+    }
+}
+
+fn hash_raw_frame(frame: &rawweave_raw::RawFrame, hasher: &mut impl Hasher) {
+    hash_mosaic(frame.mosaic(), hasher);
+    for level in frame.black_levels().iter().chain(frame.white_levels()) {
+        level.to_bits().hash(hasher);
+    }
+    hash_camera_metadata(frame.camera(), hasher);
+    frame.profile().make.hash(hasher);
+    frame.profile().model.hash(hasher);
+    for row in &frame.profile().xyz_to_camera {
+        for value in row {
+            value.to_bits().hash(hasher);
+        }
+    }
+    match frame.lens_profile() {
+        Some(profile) => {
+            true.hash(hasher);
+            profile.name.hash(hasher);
+            for value in profile
+                .radial_distortion
+                .iter()
+                .chain(profile.tangential_distortion.iter())
+            {
+                value.to_bits().hash(hasher);
+            }
+        }
+        None => false.hash(hasher),
+    }
+    frame.embedded_preview().hash(hasher);
+    for (key, value) in &frame.exif().tags {
+        key.hash(hasher);
+        value.hash(hasher);
+    }
+}
+
+fn hash_mosaic(mosaic: &rawweave_raw::Mosaic, hasher: &mut impl Hasher) {
+    mosaic.dimensions().hash(hasher);
+    mosaic.bit_depth().hash(hasher);
+    mosaic.orientation().hash(hasher);
+    mosaic.cfa().width().hash(hasher);
+    mosaic.cfa().height().hash(hasher);
+    mosaic.cfa().colors().hash(hasher);
+    for sample in mosaic.samples() {
+        sample.to_bits().hash(hasher);
+    }
+}
+
+fn hash_camera_metadata(metadata: &rawweave_raw::CameraMetadata, hasher: &mut impl Hasher) {
+    metadata.make.hash(hasher);
+    metadata.model.hash(hasher);
+    metadata.lens.hash(hasher);
+    metadata.iso.hash(hasher);
+    hash_optional_float(metadata.aperture, hasher);
+    hash_optional_float(metadata.shutter_seconds, hasher);
+    hash_optional_float(metadata.focal_length_mm, hasher);
+    metadata.capture_time.hash(hasher);
+    metadata.orientation.hash(hasher);
+}
+
+fn hash_optional_float(value: Option<f32>, hasher: &mut impl Hasher) {
+    value.map(f32::to_bits).hash(hasher);
+}
+
+fn hash_scene_linear(scene: &rawweave_color::SceneLinearRGB, hasher: &mut impl Hasher) {
+    scene.dimensions().hash(hasher);
+    hash_working_space(&scene.working_space(), hasher);
+    for pixel in scene.pixels() {
+        for channel in pixel {
+            channel.to_bits().hash(hasher);
+        }
+    }
+}
+
+fn hash_display(display: &rawweave_color::DisplayRGB, hasher: &mut impl Hasher) {
+    display.dimensions().hash(hasher);
+    hash_working_space(&display.working_space(), hasher);
+    for pixel in display.pixels() {
+        for channel in pixel {
+            channel.to_bits().hash(hasher);
+        }
+    }
+}
+
+fn hash_working_space(space: &rawweave_color::WorkingSpace, hasher: &mut impl Hasher) {
+    match space {
+        rawweave_color::WorkingSpace::Srgb => 0_u8.hash(hasher),
+        rawweave_color::WorkingSpace::DisplayP3 => 1_u8.hash(hasher),
+        rawweave_color::WorkingSpace::ProPhoto => 2_u8.hash(hasher),
+        rawweave_color::WorkingSpace::Rec2020 => 3_u8.hash(hasher),
+        rawweave_color::WorkingSpace::Custom(name) => {
+            4_u8.hash(hasher);
+            name.hash(hasher);
         }
     }
 }

@@ -7,8 +7,11 @@ members = [
   "crates/node-api",
   "crates/graph",
   "crates/project",
+  "crates/raw",
+  "crates/color",
   "node-packs/core-values",
   "node-packs/core-image",
+  "node-packs/raw",
 ]
 
 [workspace.package]
@@ -26,5 +29,8 @@ rawweave-rendering = { path = "crates/rendering" }
 rawweave-node-api = { path = "crates/node-api" }
 rawweave-graph = { path = "crates/graph" }
 rawweave-project = { path = "crates/project" }
+rawweave-raw = { path = "crates/raw" }
+rawweave-color = { path = "crates/color" }
 rawweave-core-values = { path = "node-packs/core-values" }
 rawweave-core-image = { path = "node-packs/core-image" }
+rawweave-raw-nodes = { path = "node-packs/raw" }

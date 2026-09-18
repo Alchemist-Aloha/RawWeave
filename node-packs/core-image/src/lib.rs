@@ -538,7 +538,14 @@ fn image_value(inputs: &Inputs, port: &str) -> Result<Value, NodeError> {
 fn image_input(inputs: &Inputs, port: &str) -> Result<Image, NodeError> {
     match image_value(inputs, port)? {
         Value::Image(image) => Ok(image),
-        Value::Float(_) => unreachable!("image_value only returns images"),
+        Value::Float(_)
+        | Value::Bytes(_)
+        | Value::RawFrame(_)
+        | Value::Mosaic(_)
+        | Value::SceneLinearRGB(_)
+        | Value::DisplayRGB(_)
+        | Value::CameraMetadata(_)
+        | Value::ExifMetadata(_) => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
