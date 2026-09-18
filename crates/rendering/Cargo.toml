@@ -1,11 +1,12 @@
 [package]
-name = "rawweave-node-api"
+name = "rawweave-rendering"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 rawweave-image.workspace = true
-rawweave-rendering.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+pollster = "1.0"
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "vulkan", "gles", "noop"] }

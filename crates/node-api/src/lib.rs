@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use rawweave_image::Image;
+use rawweave_image::{Image, Region};
+use rawweave_rendering::RenderContext;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -140,6 +141,17 @@ pub struct NodeDescriptor {
     pub inputs: Vec<PortDescriptor>,
     pub outputs: Vec<PortDescriptor>,
     pub parameters: Vec<ParameterDescriptor>,
+    #[serde(default)]
+    pub capabilities: Vec<ExecutionCapability>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExecutionCapability {
+    Cpu,
+    Gpu,
+    TileLocal,
+    RegionAware,
+    FullFrame,
 }
 
 impl NodeDescriptor {
@@ -151,7 +163,12 @@ impl NodeDescriptor {
             inputs: Vec::new(),
             outputs: Vec::new(),
             parameters: Vec::new(),
+            capabilities: Vec::new(),
         }
+    }
+
+    pub fn supports(&self, capability: ExecutionCapability) -> bool {
+        self.capabilities.contains(&capability)
     }
 
     pub fn parameter_defaults(&self) -> Parameters {
@@ -207,13 +224,35 @@ impl NodeResult {
 #[derive(Clone, Debug, Default)]
 pub struct EvaluationContext {
     pub source_image: Option<Image>,
+    pub requested_region: Option<Region>,
+    pub render_context: Option<RenderContext>,
 }
 
 impl EvaluationContext {
     pub fn with_source_image(source_image: Image) -> Self {
         Self {
             source_image: Some(source_image),
+            requested_region: None,
+            render_context: None,
         }
+    }
+
+    pub fn with_requested_region(mut self, requested_region: Region) -> Self {
+        self.requested_region = Some(requested_region);
+        self
+    }
+
+    pub fn with_render_context(mut self, render_context: RenderContext) -> Self {
+        self.render_context = Some(render_context);
+        self
+    }
+
+    pub fn requested_region(&self) -> Option<Region> {
+        self.requested_region
+    }
+
+    pub fn render_context(&self) -> Option<&RenderContext> {
+        self.render_context.as_ref()
     }
 }
 

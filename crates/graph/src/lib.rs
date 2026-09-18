@@ -102,6 +102,23 @@ impl Graph {
         self.revision
     }
 
+    pub fn downstream_nodes(&self, source: &NodeId) -> BTreeSet<NodeId> {
+        let mut downstream = BTreeSet::new();
+        let mut pending = vec![source.clone()];
+        while let Some(node) = pending.pop() {
+            if !downstream.insert(node.clone()) {
+                continue;
+            }
+            pending.extend(
+                self.edges
+                    .iter()
+                    .filter(|edge| edge.from_node == node)
+                    .map(|edge| edge.to_node.clone()),
+            );
+        }
+        downstream
+    }
+
     pub fn add_node(&mut self, id: NodeId, type_id: &str) -> Result<(), GraphError> {
         NodeId::try_new(id.as_str()).map_err(GraphError::InvalidNodeId)?;
         if self.nodes.contains_key(&id) {

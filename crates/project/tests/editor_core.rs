@@ -10,12 +10,22 @@ fn editor_core_registers_the_backbone_node_packs() {
         .into_iter()
         .map(|descriptor| descriptor.type_id)
         .collect::<Vec<_>>();
-    assert_eq!(types.len(), 5);
-    assert!(types.iter().any(|type_id| type_id == "core.image-input"));
-    assert!(types.iter().any(|type_id| type_id == "core.constant-float"));
-    assert!(types.iter().any(|type_id| type_id == "core.exposure"));
-    assert!(types.iter().any(|type_id| type_id == "core.invert"));
-    assert!(types.iter().any(|type_id| type_id == "core.output"));
+    assert_eq!(types.len(), 11);
+    for type_id in [
+        "core.image-input",
+        "core.constant-float",
+        "core.exposure",
+        "core.invert",
+        "core.resize",
+        "core.crop",
+        "core.blur",
+        "core.levels",
+        "core.curves",
+        "core.color-matrix",
+        "core.output",
+    ] {
+        assert!(types.iter().any(|registered| registered == type_id));
+    }
 }
 
 #[test]
