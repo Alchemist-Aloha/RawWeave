@@ -4,6 +4,7 @@ import type {
   NodeDescriptor,
   ParameterValue,
   PlatformEdge,
+  PortDescriptor,
   PlatformNode,
   PlatformSnapshot,
 } from '../editor/types';
@@ -42,6 +43,113 @@ function imageProcessingDescriptor(typeId: string, name: string): NodeDescriptor
 function parameter(id: string, name: string, defaultValue: number, min: number | null = null, max: number | null = null) {
   return { id, name, parameterType: 'Float' as const, default: defaultValue, min, max };
 }
+
+function stringParameter(id: string, name: string, defaultValue: string) {
+  return { id, name, parameterType: 'String' as const, default: defaultValue, min: null, max: null };
+}
+
+function input(id: string, name: string, dataType: string, required: boolean): PortDescriptor {
+  return { id, name, dataType, required };
+}
+
+function outputPort(id: string, name: string, dataType: string): PortDescriptor {
+  return { id, name, dataType, required: false };
+}
+
+const rawCapabilities: ExecutionCapability[] = ['CPU', 'FullFrame'];
+
+const rawDescriptors: NodeDescriptor[] = [
+  {
+    typeId: 'raw.decode',
+    name: 'RAW Decode',
+    version: 1,
+    inputs: [input('bytes', 'RAW Bytes', 'core.Bytes', false)],
+    outputs: [
+      outputPort('frame', 'RAW Frame', 'raw.Frame'),
+      outputPort('mosaic', 'Mosaic', 'raw.Mosaic'),
+      outputPort('camera', 'Camera Metadata', 'raw.CameraMetadata'),
+      outputPort('camera_profile', 'Camera Profile', 'raw.CameraProfile'),
+      outputPort('lens_profile', 'Lens Profile', 'raw.LensProfile'),
+      outputPort('exif', 'EXIF Metadata', 'raw.ExifMetadata'),
+      outputPort('preview', 'Embedded Preview', 'raw.EmbeddedPreview'),
+    ],
+    parameters: [],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.black-level',
+    name: 'Black Level',
+    version: 1,
+    inputs: [input('frame', 'RAW Frame', 'raw.Frame', true)],
+    outputs: [outputPort('mosaic', 'Mosaic', 'raw.Mosaic')],
+    parameters: [],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.white-balance',
+    name: 'White Balance',
+    version: 1,
+    inputs: [input('mosaic', 'Mosaic', 'raw.Mosaic', true)],
+    outputs: [outputPort('mosaic', 'Mosaic', 'raw.Mosaic')],
+    parameters: [
+      parameter('red_gain', 'Red Gain', 1, 0),
+      parameter('green_gain', 'Green Gain', 1, 0),
+      parameter('blue_gain', 'Blue Gain', 1, 0),
+    ],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.highlight-reconstruction',
+    name: 'Highlight Reconstruction',
+    version: 1,
+    inputs: [input('mosaic', 'Mosaic', 'raw.Mosaic', true)],
+    outputs: [outputPort('mosaic', 'Mosaic', 'raw.Mosaic')],
+    parameters: [parameter('threshold', 'Threshold', 1, 0), parameter('strength', 'Recovery Strength', 1, 0, 1)],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.demosaic',
+    name: 'Demosaic',
+    version: 1,
+    inputs: [input('mosaic', 'Mosaic', 'raw.Mosaic', true)],
+    outputs: [outputPort('scene', 'Scene Linear RGB', 'color.SceneLinearRGB')],
+    parameters: [],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.camera-transform',
+    name: 'Camera Transform',
+    version: 1,
+    inputs: [
+      input('scene', 'Scene Linear RGB', 'color.SceneLinearRGB', true),
+      input('camera_profile', 'Camera Profile', 'raw.CameraProfile', false),
+    ],
+    outputs: [outputPort('scene', 'Scene Linear RGB', 'color.SceneLinearRGB')],
+    parameters: [stringParameter('working_space', 'Working Space', 'sRGB')],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.lens-correction',
+    name: 'Lens Correction',
+    version: 1,
+    inputs: [
+      input('scene', 'Scene Linear RGB', 'color.SceneLinearRGB', true),
+      input('lens_profile', 'Lens Profile', 'raw.LensProfile', false),
+    ],
+    outputs: [outputPort('scene', 'Scene Linear RGB', 'color.SceneLinearRGB')],
+    parameters: [],
+    capabilities: rawCapabilities,
+  },
+  {
+    typeId: 'raw.display-transform',
+    name: 'Display Transform',
+    version: 1,
+    inputs: [input('scene', 'Scene Linear RGB', 'color.SceneLinearRGB', true)],
+    outputs: [outputPort('display', 'Display RGB', 'color.DisplayRGB')],
+    parameters: [],
+    capabilities: rawCapabilities,
+  },
+];
 
 const imageInput = imageInputDescriptor();
 const constantFloat: NodeDescriptor = {
@@ -111,6 +219,7 @@ export const builtInDescriptors: NodeDescriptor[] = [
   curves,
   colorMatrix,
   output,
+  ...rawDescriptors,
 ];
 
 function descriptorFor(descriptors: NodeDescriptor[], typeId: string): NodeDescriptor {

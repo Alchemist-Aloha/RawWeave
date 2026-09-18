@@ -7,6 +7,7 @@ use std::sync::{
 };
 
 use png::{BitDepth, ColorType, Encoder};
+use rawweave_color::{DisplayTransform, SrgbDisplayTransform, WorkingSpace};
 use rawweave_image::{Dimensions, Image, Region};
 use rawweave_node_api::{EvaluationContext, Value};
 use rawweave_project::EditorCore;
@@ -91,9 +92,11 @@ pub struct PreviewMetadata {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenImageMetadata {
+    pub kind: crate::SourceKind,
     pub width: u32,
     pub height: u32,
     pub revision: u64,
+    pub metadata: Option<crate::OpenMetadataSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -408,11 +411,53 @@ fn channel_to_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
+    match source {
+        crate::SourceAsset::Ordinary(image) => EvaluationContext::with_source_image(image.clone()),
+        crate::SourceAsset::Raw { bytes, path } => EvaluationContext::default()
+            .with_source_bytes(bytes.as_ref().clone())
+            .with_source_path(path),
+    }
+}
+
+fn color_value_to_image(value: Value) -> Result<Image, String> {
+    let (dimensions, pixels) = match value {
+        Value::Image(image) => return Ok(image),
+        Value::DisplayRGB(display) => (display.dimensions(), display.pixels().to_vec()),
+        Value::SceneLinearRGB(scene) => {
+            let display = SrgbDisplayTransform
+                .transform(&scene)
+                .or_else(|_| {
+                    SrgbDisplayTransform.transform(
+                        &scene.with_working_space(WorkingSpace::Srgb),
+                    )
+                })
+                .map_err(|error| format!("could not convert scene preview to display RGB: {error}"))?;
+            (display.dimensions(), display.pixels().to_vec())
+        }
+        other => {
+            return Err(format!(
+                "preview output has unsupported data type {}",
+                other.data_type()
+            ));
+        }
+    };
+    Image::from_pixels(
+        dimensions.width,
+        dimensions.height,
+        pixels
+            .into_iter()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+            .collect(),
+    )
+    .map_err(|error| format!("could not create display preview image: {error}"))
+}
+
 pub fn render_preview(
     manager: &PreviewManager,
     editor: &EditorCore,
     current_editor: &Arc<Mutex<EditorCore>>,
-    source_image: Option<Image>,
+    source: Option<crate::SourceAsset>,
     request: PreviewRequest,
 ) -> Result<PreviewMetadata, String> {
     manager.begin(&request.request_id);
@@ -431,22 +476,22 @@ pub fn render_preview(
                 request.revision
             ));
         }
-        let source_image = source_image.ok_or_else(|| {
+        let source = source.ok_or_else(|| {
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
         let full_frame = editor
             .evaluate(
                 &request.node_id,
                 &request.output_port,
-                EvaluationContext::with_source_image(source_image.clone()),
+                evaluation_context(&source),
             )
             .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
-        let Value::Image(full_frame) = full_frame else {
-            return Err(format!(
-                "preview output '{}:{}' is not an image",
+        let full_frame = color_value_to_image(full_frame).map_err(|error| {
+            format!(
+                "preview output '{}:{}' is not displayable: {error}",
                 request.node_id, request.output_port
-            ));
-        };
+            )
+        })?;
         let full_width = full_frame.width();
         let full_height = full_frame.height();
         let full_origin = full_frame.origin();
@@ -465,26 +510,24 @@ pub fn render_preview(
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
         }
-        let context = EvaluationContext::with_source_image(source_image).with_tile_request(
-            TileRequest::new(
-                requested_region,
-                request.tile.into(),
-                request.mip,
-                request.quality.into(),
-            ),
-        );
+        let context = evaluation_context(&source).with_tile_request(TileRequest::new(
+            requested_region,
+            request.tile.into(),
+            request.mip,
+            request.quality.into(),
+        ));
         let value = editor
             .evaluate(&request.node_id, &request.output_port, context)
             .map_err(|error| format!("preview evaluation failed: {error}"))?;
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
         }
-        let Value::Image(image) = value else {
-            return Err(format!(
-                "preview output '{}:{}' is not an image",
+        let image = color_value_to_image(value).map_err(|error| {
+            format!(
+                "preview output '{}:{}' is not displayable: {error}",
                 request.node_id, request.output_port
-            ));
-        };
+            )
+        })?;
         let image = select_preview_image(&image, requested_region, request.mip)?;
         let latest_revision = current_editor
             .lock()
@@ -672,7 +715,7 @@ mod tests {
             &manager,
             &editor,
             &current_editor,
-            Some(source),
+            Some(crate::SourceAsset::Ordinary(source)),
             request,
         )
         .unwrap();
@@ -683,7 +726,49 @@ mod tests {
     }
 
     #[test]
-    fn reports_full_logical_dimensions_for_region_limited_intermediate_outputs() {
+    fn renders_raw_display_output_from_source_bytes_as_png() {
+        let decoder = rawweave_raw::DeterministicDecoder::new(
+            rawweave_raw::DeterministicCorpus::bayer_12_bit(),
+        );
+        let mut editor = rawweave_project::EditorCore::new_with_raw_decoder(decoder);
+        crate::build_raw_workflow(&mut editor).unwrap();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let request = PreviewRequest {
+            request_id: "raw-open-render".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "display-transform".to_owned(),
+            output_port: "display".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 2,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+
+        let metadata = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Raw {
+                bytes: Arc::new(vec![1, 2, 3]),
+                path: std::path::PathBuf::from("fixture.dng"),
+            }),
+            request,
+        )
+        .unwrap();
+
+        assert_eq!((metadata.full_width, metadata.full_height), (4, 2));
+        let bytes = manager.store.get(&preview_path("raw-open-render")).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn ordinary_image_preview_still_uses_the_existing_source_path() {
         let source = Image::new(4, 3).unwrap();
         let manager = PreviewManager::default();
 
@@ -742,7 +827,7 @@ mod tests {
                 &manager,
                 &editor,
                 &current_editor,
-                Some(source.clone()),
+                Some(crate::SourceAsset::Ordinary(source.clone())),
                 request,
             )
             .unwrap();

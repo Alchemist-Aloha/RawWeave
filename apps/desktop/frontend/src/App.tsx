@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
-import type { ParameterValue } from './editor/types';
+import type { OpenImageResult, ParameterValue } from './editor/types';
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
@@ -31,6 +31,79 @@ function downloadWorkflow(contents: string): void {
   URL.revokeObjectURL(url);
 }
 
+const RAW_EXTENSIONS = [
+  '.3fr',
+  '.arw',
+  '.cr2',
+  '.cr3',
+  '.dcr',
+  '.dng',
+  '.erf',
+  '.kdc',
+  '.mrw',
+  '.nef',
+  '.nrw',
+  '.orf',
+  '.pef',
+  '.raf',
+  '.raw',
+  '.rw2',
+  '.rwl',
+  '.srw',
+  '.x3f',
+];
+const IMAGE_ACCEPT = ['image/*', ...RAW_EXTENSIONS].join(',');
+
+function unavailable(value: unknown): string {
+  return value === null || value === undefined || value === '' ? 'Unavailable' : String(value);
+}
+
+function SourceMetadata({ source }: { source: OpenImageResult | null }) {
+  if (!source) return null;
+  const metadata = source.metadata;
+  const rows = metadata
+    ? [
+        ['Camera', metadata.camera],
+        ['Lens', metadata.lens],
+        ['ISO', metadata.iso],
+        ['Aperture', metadata.aperture === null ? null : `f/${metadata.aperture}`],
+        ['Shutter', metadata.shutter === null ? null : `${metadata.shutter}s`],
+        ['Focal length', metadata.focalLength === null ? null : `${metadata.focalLength}mm`],
+        ['Capture time', metadata.captureTime],
+        ['Orientation', metadata.orientation],
+        ['Dimensions', `${metadata.dimensions.width} × ${metadata.dimensions.height}`],
+        ['EXIF tags', Object.keys(metadata.exif).length || null],
+      ]
+    : [
+        ['Camera', null],
+        ['Lens', null],
+        ['ISO', null],
+        ['Aperture', null],
+        ['Shutter', null],
+        ['Focal length', null],
+        ['Capture time', null],
+        ['Orientation', null],
+        ['Dimensions', `${source.width} × ${source.height}`],
+        ['EXIF tags', null],
+      ];
+  return (
+    <section aria-label="Source metadata" className="source-metadata">
+      <div>
+        <span className="eyebrow">Source</span>
+        <strong>{source.kind === 'raw' ? 'RAW image' : 'Image'}</strong>
+      </div>
+      <dl>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{unavailable(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 export default function App() {
   const [platform] = useState(() => createPlatform());
   const [controller] = useState(() => new EditorController(platform));
@@ -38,6 +111,7 @@ export default function App() {
   const [, setRevision] = useState(0);
   const [imageError, setImageError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const imageInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const unsubscribe = controller.subscribe(() => setRevision((revision) => revision + 1));
@@ -135,17 +209,31 @@ export default function App() {
     [controller],
   );
 
-  const openImage = useCallback(async () => {
-    const path = window.prompt('Image path');
-    if (!path) return;
-    try {
-      const image = await platform.openImage(path);
-      viewerController.setSourceDimensions(image);
-      setImageError(null);
-    } catch (error) {
-      setImageError(error instanceof Error ? error.message : String(error));
-    }
-  }, [platform, viewerController]);
+  const openImagePath = useCallback(
+    async (path: string) => {
+      try {
+        const image = await controller.openImage(path);
+        viewerController.setSourceDimensions(image);
+        setImageError(null);
+      } catch (error) {
+        setImageError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [controller, viewerController],
+  );
+
+  const chooseImage = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      const path = (file as File & { path?: string }).path ?? window.prompt('Image path', file.name);
+      if (path) await openImagePath(path);
+    },
+    [openImagePath],
+  );
+
+  const openImage = useCallback(() => imageInput.current?.click(), []);
 
   return (
     <main className="app-shell">
@@ -159,10 +247,10 @@ export default function App() {
         </div>
         <div className="topbar__actions">
           <button className="button button--quiet" onClick={() => void openImage()} type="button">
-            Open image
+            Open Image
           </button>
           <button className="button button--quiet" onClick={() => fileInput.current?.click()} type="button">
-            Open workflow
+            Open Workflow
           </button>
           <button
             className="button button--primary"
@@ -172,6 +260,13 @@ export default function App() {
             Save workflow
           </button>
           <input
+            accept={IMAGE_ACCEPT}
+            className="sr-only"
+            onChange={chooseImage}
+            ref={imageInput}
+            type="file"
+          />
+          <input
             accept="application/json,.json"
             className="sr-only"
             onChange={loadFile}
@@ -180,6 +275,8 @@ export default function App() {
           />
         </div>
       </header>
+
+      <SourceMetadata source={controller.state.source} />
 
       <section className="workspace">
         <NodeLibrary
@@ -238,7 +335,12 @@ export default function App() {
         />
       </section>
 
-      <Viewer controller={viewerController} nodes={controller.state.nodes} revision={controller.state.revision} />
+      <Viewer
+        controller={viewerController}
+        nodes={controller.state.nodes}
+        revision={controller.state.revision}
+        source={controller.state.source}
+      />
 
       {controller.state.error && (
         <div className="error-toast" role="alert">

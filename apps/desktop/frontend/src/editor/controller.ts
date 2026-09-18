@@ -4,6 +4,7 @@ import type {
   EditorPlatform,
   EditorState,
   NodeDescriptor,
+  OpenImageResult,
   ParameterValue,
   Position,
 } from './types';
@@ -30,6 +31,7 @@ export class EditorController {
     nodes: [],
     edges: [],
     revision: 0,
+    source: null,
     selectedNodeId: null,
     error: null,
     notification: null,
@@ -116,6 +118,23 @@ export class EditorController {
     }
   }
 
+  public async openImage(path: string): Promise<OpenImageResult> {
+    try {
+      const result = await this.platform.openImage(path);
+      await this.refresh();
+      this.setState({
+        source: result,
+        error: null,
+        notification:
+          result.kind === 'raw' ? 'RAW source opened; display transform is ready to preview' : 'Image opened',
+      });
+      return result;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
   public async createNode(typeId: string, requestedId?: string): Promise<string> {
     const descriptor = this.state.descriptors.find((candidate) => candidate.typeId === typeId);
     if (!descriptor) {
@@ -195,7 +214,14 @@ export class EditorController {
       const positions = parsed.positions ?? {};
       await this.platform.loadWorkflow(graph);
       await this.refresh(positions);
-      this.setState({ error: null, notification: 'Workflow loaded' });
+      const rawWorkflow = this.state.nodes.some((node) => node.typeId.startsWith('raw.'));
+      this.setState({
+        source: rawWorkflow ? null : this.state.source,
+        error: null,
+        notification: rawWorkflow
+          ? 'RAW workflow loaded; select the source RAW file again to render previews'
+          : 'Workflow loaded',
+      });
     } catch (error) {
       this.setState({ error: errorMessage(error), notification: null });
       throw error;

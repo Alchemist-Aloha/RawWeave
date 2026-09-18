@@ -48,10 +48,27 @@ export interface PlatformSnapshot {
   revision?: number;
 }
 
+export type SourceKind = 'ordinary' | 'raw';
+
+export interface RawMetadataSummary {
+  camera: string;
+  lens: string | null;
+  iso: number | null;
+  aperture: number | null;
+  shutter: number | null;
+  focalLength: number | null;
+  captureTime: string | null;
+  orientation: string;
+  dimensions: { width: number; height: number };
+  exif: Record<string, string>;
+}
+
 export interface OpenImageResult {
+  kind: SourceKind;
   width: number;
   height: number;
   revision: number;
+  metadata: RawMetadataSummary | null;
 }
 
 export interface EditorPlatform {
@@ -90,6 +107,7 @@ export interface EditorState {
   nodes: EditorNode[];
   edges: EditorEdge[];
   revision: number;
+  source: OpenImageResult | null;
   selectedNodeId: string | null;
   error: string | null;
   notification: string | null;

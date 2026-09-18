@@ -1,11 +1,72 @@
 import { describe, expect, it } from 'vitest';
 import { EditorController } from './controller';
 import { createMemoryPlatform } from '../platform/editor';
+import type { EditorPlatform, OpenImageResult } from './types';
 
 async function controller() {
   const editor = new EditorController(createMemoryPlatform());
   await editor.initialize();
   return editor;
+}
+
+function rawOpenResult(): OpenImageResult {
+  return {
+    kind: 'raw',
+    width: 4,
+    height: 2,
+    revision: 17,
+    metadata: {
+      camera: 'Canon EOS R5',
+      lens: null,
+      iso: null,
+      aperture: null,
+      shutter: null,
+      focalLength: null,
+      captureTime: null,
+      orientation: 'Normal',
+      dimensions: { width: 4, height: 2 },
+      exif: {},
+    },
+  };
+}
+
+async function rawPlatform(): Promise<{ platform: EditorPlatform; result: OpenImageResult }> {
+  const base = createMemoryPlatform();
+  const result = rawOpenResult();
+  const platform: EditorPlatform = {
+    ...base,
+    async openImage() {
+      const existing = await base.snapshot();
+      for (const node of existing.nodes) await base.removeNode(node.id);
+      for (const [id, typeId] of [
+        ['raw-decode', 'raw.decode'],
+        ['black-level', 'raw.black-level'],
+        ['white-balance', 'raw.white-balance'],
+        ['highlight-reconstruction', 'raw.highlight-reconstruction'],
+        ['demosaic', 'raw.demosaic'],
+        ['camera-transform', 'raw.camera-transform'],
+        ['lens-correction', 'raw.lens-correction'],
+        ['display-transform', 'raw.display-transform'],
+      ]) {
+        await base.addNode(id, typeId);
+      }
+      for (const [fromNode, fromPort, toNode, toPort] of [
+        ['raw-decode', 'frame', 'black-level', 'frame'],
+        ['black-level', 'mosaic', 'white-balance', 'mosaic'],
+        ['white-balance', 'mosaic', 'highlight-reconstruction', 'mosaic'],
+        ['highlight-reconstruction', 'mosaic', 'demosaic', 'mosaic'],
+        ['demosaic', 'scene', 'camera-transform', 'scene'],
+        ['raw-decode', 'camera_profile', 'camera-transform', 'camera_profile'],
+        ['camera-transform', 'scene', 'lens-correction', 'scene'],
+        ['raw-decode', 'lens_profile', 'lens-correction', 'lens_profile'],
+        ['lens-correction', 'scene', 'display-transform', 'scene'],
+      ]) {
+        await base.connect(fromNode, fromPort, toNode, toPort);
+      }
+      return result;
+    },
+  };
+  return { platform, result };
 }
 
 describe('editor controller', () => {
@@ -65,5 +126,47 @@ describe('editor controller', () => {
 
     await expect(editor.connect('constant', 'value', 'output', 'image')).rejects.toThrow();
     expect(editor.state.error).toMatch(/cannot connect|type/i);
+  });
+
+  it('opens RAW sources and synchronizes the default RAW graph', async () => {
+    const { platform, result } = await rawPlatform();
+    const editor = new EditorController(platform);
+    await editor.initialize();
+
+    await expect(editor.openImage('fixture.dng')).resolves.toEqual(result);
+
+    expect(editor.state.source).toEqual(result);
+    expect(editor.state.descriptors.filter((descriptor) => descriptor.typeId.startsWith('raw.'))).toHaveLength(8);
+    expect(editor.state.nodes).toHaveLength(8);
+    expect(editor.state.nodes.map((node) => node.typeId)).toEqual([
+      'raw.decode',
+      'raw.black-level',
+      'raw.white-balance',
+      'raw.highlight-reconstruction',
+      'raw.demosaic',
+      'raw.camera-transform',
+      'raw.lens-correction',
+      'raw.display-transform',
+    ]);
+    expect(editor.state.edges).toHaveLength(9);
+    expect(editor.state.revision).toBe(result.revision);
+  });
+
+  it('notifies that a loaded RAW workflow needs its source selected again', async () => {
+    const { platform, result } = await rawPlatform();
+    const editor = new EditorController(platform);
+    await editor.initialize();
+    await editor.openImage('fixture.dng');
+    const workflow = await editor.saveWorkflow();
+
+    await editor.loadWorkflow(workflow);
+
+    expect(editor.state.source).toBeNull();
+    expect(editor.state.notification).toMatch(/select the source RAW file again/i);
+
+    await expect(editor.openImage('fixture.dng')).resolves.toEqual(result);
+    expect(editor.state.source).toEqual(result);
+    expect(editor.state.nodes).toHaveLength(8);
+    expect(editor.state.notification).toMatch(/display transform is ready/i);
   });
 });

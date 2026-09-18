@@ -1,23 +1,216 @@
 mod preview;
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rawweave_image::Image;
 use rawweave_node_api::{NodeDescriptor, ParameterValue};
 use rawweave_project::EditorCore;
+use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+
+#[derive(Clone, Debug)]
+pub(crate) enum SourceAsset {
+    Ordinary(Image),
+    Raw {
+        bytes: Arc<Vec<u8>>,
+        path: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SourceKind {
+    Ordinary,
+    Raw,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenMetadataSummary {
+    pub camera: String,
+    pub lens: Option<String>,
+    pub iso: Option<u32>,
+    pub aperture: Option<f32>,
+    pub shutter: Option<f32>,
+    pub focal_length: Option<f32>,
+    pub capture_time: Option<String>,
+    pub orientation: String,
+    pub dimensions: rawweave_image::Dimensions,
+    pub exif: std::collections::BTreeMap<String, String>,
+}
 
 #[derive(Default)]
 pub struct AppState {
     pub editor: Arc<Mutex<EditorCore>>,
     pub preview: Arc<preview::PreviewManager>,
-    pub source_image: Mutex<Option<Image>>,
+    pub(crate) source_image: Mutex<Option<SourceAsset>>,
 }
 
 fn lock_editor(editor: &Arc<Mutex<EditorCore>>) -> Result<MutexGuard<'_, EditorCore>, String> {
     editor
         .lock()
         .map_err(|_| "editor state is unavailable".to_owned())
+}
+
+const RAW_EXTENSIONS: &[&str] = &[
+    "3fr", "arw", "cr2", "cr3", "dcr", "dng", "erf", "kdc", "mrw", "nef", "nrw",
+    "orf", "pef", "raf", "raw", "rw2", "rwl", "srw", "x3f",
+];
+
+fn is_raw_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            RAW_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn read_raw_file(path: &Path, limits: RawDecodeLimits) -> Result<Vec<u8>, String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect RAW '{}': {error}", path.display()))?
+        .len();
+    let size = usize::try_from(size)
+        .map_err(|_| format!("RAW '{}' exceeds the configured input limit", path.display()))?;
+    if size > limits.max_input_bytes {
+        return Err(format!(
+            "RAW input is too large: {size} bytes exceeds limit {}",
+            limits.max_input_bytes
+        ));
+    }
+    std::fs::read(path).map_err(|error| format!("could not read RAW '{}': {error}", path.display()))
+}
+
+fn raw_metadata(frame: &RawFrame) -> OpenMetadataSummary {
+    let camera = [frame.camera().make.trim(), frame.camera().model.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    OpenMetadataSummary {
+        camera: if camera.is_empty() {
+            "Unavailable".to_owned()
+        } else {
+            camera
+        },
+        lens: frame.camera().lens.clone(),
+        iso: frame.camera().iso,
+        aperture: frame.camera().aperture,
+        shutter: frame.camera().shutter_seconds,
+        focal_length: frame.camera().focal_length_mm,
+        capture_time: frame.camera().capture_time.clone(),
+        orientation: format!("{:?}", frame.camera().orientation),
+        dimensions: frame.sensor_dimensions(),
+        exif: frame.exif().tags.clone(),
+    }
+}
+
+pub(crate) fn open_image_file_with_decoder(
+    path: &Path,
+    decoder: &dyn RawDecoder,
+) -> Result<(SourceAsset, preview::OpenImageMetadata), String> {
+    if is_raw_path(path) {
+        let limits = RawDecodeLimits::default();
+        let bytes = read_raw_file(path, limits)?;
+        let frame = decoder
+            .decode(&bytes)
+            .map_err(|error| format!("could not decode RAW '{}': {error}", path.display()))?;
+        let dimensions = frame.sensor_dimensions();
+        return Ok((
+            SourceAsset::Raw {
+                bytes: Arc::new(bytes),
+                path: path.to_owned(),
+            },
+            preview::OpenImageMetadata {
+                kind: SourceKind::Raw,
+                width: dimensions.width,
+                height: dimensions.height,
+                revision: 0,
+                metadata: Some(raw_metadata(&frame)),
+            },
+        ));
+    }
+
+    let image = preview::decode_image_file(path)?;
+    Ok((
+        SourceAsset::Ordinary(image.clone()),
+        preview::OpenImageMetadata {
+            kind: SourceKind::Ordinary,
+            width: image.width(),
+            height: image.height(),
+            revision: image.revision(),
+            metadata: None,
+        },
+    ))
+}
+
+pub(crate) fn open_image_with_decoder(
+    path: &Path,
+    decoder: &dyn RawDecoder,
+    editor: &mut EditorCore,
+) -> Result<(SourceAsset, preview::OpenImageMetadata), String> {
+    let (source, mut metadata) = open_image_file_with_decoder(path, decoder)?;
+    if matches!(source, SourceAsset::Raw { .. }) {
+        build_raw_workflow(editor)?;
+        metadata.revision = editor.graph().revision();
+    }
+    Ok((source, metadata))
+}
+
+pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> {
+    let existing = editor
+        .graph()
+        .nodes()
+        .keys()
+        .map(|node_id| node_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    for node_id in existing {
+        editor
+            .remove_node(&node_id)
+            .map_err(|error| error.to_string())?;
+    }
+
+    for (node_id, type_id) in [
+        ("raw-decode", "raw.decode"),
+        ("black-level", "raw.black-level"),
+        ("white-balance", "raw.white-balance"),
+        ("highlight-reconstruction", "raw.highlight-reconstruction"),
+        ("demosaic", "raw.demosaic"),
+        ("camera-transform", "raw.camera-transform"),
+        ("lens-correction", "raw.lens-correction"),
+        ("display-transform", "raw.display-transform"),
+    ] {
+        editor.add_node(node_id, type_id).map_err(|error| error.to_string())?;
+    }
+    for (from_node, from_port, to_node, to_port) in [
+        ("raw-decode", "frame", "black-level", "frame"),
+        ("black-level", "mosaic", "white-balance", "mosaic"),
+        (
+            "white-balance",
+            "mosaic",
+            "highlight-reconstruction",
+            "mosaic",
+        ),
+        (
+            "highlight-reconstruction",
+            "mosaic",
+            "demosaic",
+            "mosaic",
+        ),
+        ("demosaic", "scene", "camera-transform", "scene"),
+        ("raw-decode", "camera_profile", "camera-transform", "camera_profile"),
+        ("camera-transform", "scene", "lens-correction", "scene"),
+        ("raw-decode", "lens_profile", "lens-correction", "lens_profile"),
+        ("lens-correction", "scene", "display-transform", "scene"),
+    ] {
+        editor
+            .connect(from_node, from_port, to_node, to_port)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -166,14 +359,13 @@ async fn request_preview(
     result
 }
 
+#[cfg(test)]
 fn open_image_file(path: &str) -> Result<(Image, preview::OpenImageMetadata), String> {
-    let image = preview::decode_image_file(path)?;
-    let metadata = preview::OpenImageMetadata {
-        width: image.width(),
-        height: image.height(),
-        revision: image.revision(),
-    };
-    Ok((image, metadata))
+    let (source, metadata) = open_image_file_with_decoder(Path::new(path), &RawloaderDecoder::default())?;
+    match source {
+        SourceAsset::Ordinary(image) => Ok((image, metadata)),
+        SourceAsset::Raw { .. } => Err("RAW input must be opened through the RAW source path".to_owned()),
+    }
 }
 
 #[tauri::command]
@@ -181,11 +373,18 @@ fn open_image(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<preview::OpenImageMetadata, String> {
-    let (image, metadata) = open_image_file(&path)?;
+    let (source, metadata) = {
+        let mut editor = lock_editor(&state.editor)?;
+        open_image_with_decoder(
+            Path::new(&path),
+            &RawloaderDecoder::default(),
+            &mut editor,
+        )?
+    };
     *state
         .source_image
         .lock()
-        .map_err(|_| "source image state is unavailable".to_owned())? = Some(image);
+        .map_err(|_| "source image state is unavailable".to_owned())? = Some(source);
     Ok(metadata)
 }
 
@@ -233,6 +432,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
     use png::{BitDepth, ColorType, Encoder};
     use std::io::Cursor;
 
@@ -262,5 +462,104 @@ mod tests {
         assert_eq!((image.width(), image.height()), (3, 2));
         assert_eq!((metadata.width, metadata.height), (3, 2));
         assert_eq!(metadata.revision, image.revision());
+    }
+
+    #[test]
+    fn opens_a_raw_source_with_injected_decoder_and_structured_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-open-raw-{}.dng",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"deterministic raw fixture").unwrap();
+        let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
+
+        let (source, metadata) = open_image_file_with_decoder(&path, &decoder).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(source, SourceAsset::Raw { .. }));
+        assert_eq!((metadata.width, metadata.height), (4, 2));
+        let raw_metadata = metadata.metadata.expect("RAW metadata");
+        assert_eq!(raw_metadata.camera, "Canon EOS R5");
+        assert_eq!(raw_metadata.lens, None);
+        assert_eq!(raw_metadata.orientation, "Normal");
+        assert_eq!(raw_metadata.dimensions.width, 4);
+        assert_eq!(raw_metadata.dimensions.height, 2);
+    }
+
+    #[test]
+    fn deterministic_raw_open_builds_graph_and_renders_display_png() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-open-preview-{}.dng",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"deterministic raw fixture").unwrap();
+        let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
+        let mut editor = EditorCore::new_with_raw_decoder(decoder.clone());
+
+        let (source, metadata) = open_image_with_decoder(&path, &decoder, &mut editor).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(source, SourceAsset::Raw { .. }));
+        assert_eq!((metadata.width, metadata.height), (4, 2));
+        assert_eq!(editor.graph().nodes().len(), 8);
+        assert_eq!(metadata.revision, editor.graph().revision());
+
+        let revision = editor.graph().revision();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = preview::PreviewManager::default();
+        let request = preview::PreviewRequest {
+            request_id: "open-graph-preview".to_owned(),
+            revision,
+            node_id: "display-transform".to_owned(),
+            output_port: "display".to_owned(),
+            quality: preview::PreviewQualityRequest::Preview,
+            region: preview::PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 2,
+            },
+            tile: preview::PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+        };
+
+        let rendered = preview::render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(source),
+            request,
+        )
+        .unwrap();
+        assert_eq!((rendered.full_width, rendered.full_height), (4, 2));
+        let bytes = manager
+            .store
+            .get(&preview::preview_path("open-graph-preview"))
+            .unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn raw_open_builds_the_complete_graph_without_serializing_source_bytes() {
+        let mut editor = EditorCore::new_with_raw_decoder(DeterministicDecoder::new(
+            DeterministicCorpus::bayer_12_bit(),
+        ));
+        build_raw_workflow(&mut editor).unwrap();
+        let serialized = editor.save_workflow().unwrap();
+
+        for type_id in [
+            "raw.decode",
+            "raw.black-level",
+            "raw.white-balance",
+            "raw.highlight-reconstruction",
+            "raw.demosaic",
+            "raw.camera-transform",
+            "raw.lens-correction",
+            "raw.display-transform",
+        ] {
+            assert!(serialized.contains(type_id), "missing {type_id}");
+        }
+        assert!(!serialized.contains("deterministic raw fixture"));
+        assert_eq!(editor.graph().nodes().len(), 8);
+        assert_eq!(editor.graph().edges().len(), 9);
     }
 }

@@ -35,6 +35,14 @@ interface RustDescriptor {
   capabilities?: string[];
 }
 
+interface RustOpenImageResult {
+  kind: 'ordinary' | 'raw';
+  width: number;
+  height: number;
+  revision: number;
+  metadata: OpenImageResult['metadata'];
+}
+
 type RustValue = { Float: number } | { Boolean: boolean } | { String: string };
 
 function fromRustValue(value: RustValue): ParameterValue {
@@ -47,6 +55,16 @@ function toRustValue(value: ParameterValue): RustValue {
   if (typeof value === 'number') return { Float: value };
   if (typeof value === 'boolean') return { Boolean: value };
   return { String: value };
+}
+
+function mapOpenImageResult(result: RustOpenImageResult): OpenImageResult {
+  return {
+    kind: result.kind,
+    width: result.width,
+    height: result.height,
+    revision: result.revision,
+    metadata: result.metadata,
+  };
 }
 
 function mapDescriptor(descriptor: RustDescriptor): NodeDescriptor {
@@ -137,7 +155,8 @@ export function createTauriPlatform(): EditorPlatform {
     snapshot: readSnapshot,
     async openImage(path) {
       try {
-        return await invoke<OpenImageResult>('open_image', { path });
+        const result = await invoke<RustOpenImageResult>('open_image', { path });
+        return mapOpenImageResult(result);
       } catch (error) {
         throw message(error);
       }

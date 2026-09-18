@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { EditorNode } from '../editor/types';
+import type { EditorNode, OpenImageResult } from '../editor/types';
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerId, ViewerPaneState } from '../viewer/types';
 
@@ -7,12 +7,15 @@ interface ViewerProps {
   controller: ViewerController;
   nodes: EditorNode[];
   revision: number;
+  source: OpenImageResult | null;
 }
 
-function targetsFor(nodes: EditorNode[]): PreviewTarget[] {
+const PREVIEWABLE_DATA_TYPES = new Set(['core.Image', 'color.DisplayRGB', 'color.SceneLinearRGB']);
+
+export function targetsFor(nodes: EditorNode[]): PreviewTarget[] {
   return nodes.flatMap((node) =>
     node.descriptor.outputs
-      .filter((output) => output.dataType === 'core.Image')
+      .filter((output) => PREVIEWABLE_DATA_TYPES.has(output.dataType))
       .map((output) => ({
         nodeId: node.id,
         nodeName: node.descriptor.name,
@@ -146,12 +149,20 @@ function Pane({ viewer, pane, options, controller }: {
   );
 }
 
-export function Viewer({ controller, nodes, revision }: ViewerProps) {
+export function Viewer({ controller, nodes, revision, source }: ViewerProps) {
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
 
   useEffect(() => controller.subscribe(() => setRender((value) => value + 1)), [controller]);
   useEffect(() => controller.setRevision(revision), [controller, revision]);
+  useEffect(() => {
+    if (source?.kind !== 'raw') return;
+    const displayTarget = options.find(
+      (option) => option.nodeName === 'Display Transform' && option.outputPort === 'display',
+    );
+    if (!displayTarget || controller.state.panes.A.target?.nodeId === displayTarget.nodeId) return;
+    controller.setTarget('A', displayTarget);
+  }, [controller, options, source?.kind]);
 
   return (
     <section className="viewer-section" aria-label="Image viewers">
