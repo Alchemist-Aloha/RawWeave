@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use exif::{In, Reader, Tag, Value};
 use rawweave_image::Dimensions;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -283,6 +284,9 @@ pub struct CameraMetadata {
     pub capture_time: Option<String>,
     /// Orientation recorded by the camera.
     pub orientation: Orientation,
+    /// Pixel dimensions recorded by the camera metadata, when present.
+    #[serde(default)]
+    pub dimensions: Option<Dimensions>,
 }
 
 /// Structured EXIF data retained for later metadata/control nodes.
@@ -290,6 +294,17 @@ pub struct CameraMetadata {
 pub struct ExifMetadata {
     /// Additional decoded tags not covered by the common fields.
     pub tags: BTreeMap<String, String>,
+}
+
+/// Metadata parsed from an input container before a RAW decoder is selected.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParsedExifMetadata {
+    /// Common camera metadata parsed from EXIF.
+    pub camera: CameraMetadata,
+    /// All decoded EXIF fields retained for later nodes.
+    pub exif: ExifMetadata,
+    /// JPEG or TIFF thumbnail bytes, when the EXIF container contains one.
+    pub embedded_preview: Option<Vec<u8>>,
 }
 
 /// Camera color profile metadata.
@@ -520,6 +535,9 @@ pub enum RawError {
     /// A vendor decoder returned data this abstraction cannot represent.
     #[error("unsupported RAW decoder data: {0}")]
     UnsupportedData(String),
+    /// EXIF metadata could not be parsed by the pure-Rust EXIF reader.
+    #[error("EXIF metadata could not be parsed: {0}")]
+    Exif(String),
 }
 
 /// Decoder boundary used by graph nodes and test fixtures.
@@ -550,6 +568,161 @@ impl RawDecoder for DeterministicDecoder {
     fn decode(&self, _input: &[u8]) -> Result<RawFrame, RawError> {
         Ok(self.frame.clone())
     }
+}
+
+/// Parse EXIF metadata and embedded preview bytes from a supported image container.
+///
+/// This helper intentionally accepts TIFF/EXIF bytes independently of RAW decoding so metadata
+/// tests and future decoders can share the same pure-Rust parser. A RAW adapter may ignore the
+/// error when its container has no parseable EXIF block.
+pub fn parse_exif_metadata(input: &[u8]) -> Result<ParsedExifMetadata, RawError> {
+    let exif = Reader::new()
+        .read_from_container(&mut Cursor::new(input))
+        .map_err(|error| RawError::Exif(error.to_string()))?;
+    let mut tags = BTreeMap::new();
+    for field in exif.fields() {
+        tags.insert(
+            format!("{}@{}", field.tag, field.ifd_num),
+            field.display_value().to_string(),
+        );
+    }
+
+    let make = exif_text(&exif, Tag::Make).unwrap_or_default();
+    let model = exif_text(&exif, Tag::Model).unwrap_or_default();
+    let lens = exif_text(&exif, Tag::LensModel);
+    let dimensions = exif_dimensions(&exif);
+    let orientation = exif
+        .get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .and_then(parse_orientation);
+    let capture_time = exif_text(&exif, Tag::DateTimeOriginal)
+        .or_else(|| exif_text(&exif, Tag::DateTime))
+        .map(normalize_capture_time);
+    let camera = CameraMetadata {
+        make,
+        model,
+        lens,
+        iso: exif
+            .get_field(Tag::PhotographicSensitivity, In::PRIMARY)
+            .and_then(|field| field.value.get_uint(0)),
+        aperture: exif_number(&exif, Tag::FNumber),
+        shutter_seconds: exif_number(&exif, Tag::ExposureTime),
+        focal_length_mm: exif_number(&exif, Tag::FocalLength),
+        capture_time,
+        orientation: orientation.unwrap_or_default(),
+        dimensions,
+    };
+    Ok(ParsedExifMetadata {
+        camera,
+        exif: ExifMetadata { tags },
+        embedded_preview: exif_thumbnail(&exif),
+    })
+}
+
+fn exif_text(exif: &exif::Exif, tag: Tag) -> Option<String> {
+    let field = exif.get_field(tag, In::PRIMARY)?;
+    let bytes = match &field.value {
+        Value::Ascii(values) => values.first()?.as_slice(),
+        Value::Byte(values) => values.as_slice(),
+        Value::Undefined(values, _) => values.as_slice(),
+        _ => return Some(field.display_value().to_string()),
+    };
+    let text = std::str::from_utf8(bytes).ok()?.trim_matches('\0').trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn exif_number(exif: &exif::Exif, tag: Tag) -> Option<f32> {
+    let field = exif.get_field(tag, In::PRIMARY)?;
+    let number = match &field.value {
+        Value::Rational(values) => values.first()?.to_f32(),
+        Value::SRational(values) => values.first()?.to_f32(),
+        Value::Float(values) => *values.first()?,
+        Value::Double(values) => *values.first()? as f32,
+        _ => field.value.get_uint(0)? as f32,
+    };
+    number.is_finite().then_some(number)
+}
+
+fn exif_dimensions(exif: &exif::Exif) -> Option<Dimensions> {
+    let width = exif
+        .get_field(Tag::ImageWidth, In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .or_else(|| {
+            exif.get_field(Tag::PixelXDimension, In::PRIMARY)
+                .and_then(|field| field.value.get_uint(0))
+        })?;
+    let height = exif
+        .get_field(Tag::ImageLength, In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .or_else(|| {
+            exif.get_field(Tag::PixelYDimension, In::PRIMARY)
+                .and_then(|field| field.value.get_uint(0))
+        })?;
+    Some(Dimensions::new(width, height))
+}
+
+fn parse_orientation(value: u32) -> Option<Orientation> {
+    Some(match value {
+        1 => Orientation::Normal,
+        2 => Orientation::HorizontalFlip,
+        3 => Orientation::Rotate180,
+        4 => Orientation::VerticalFlip,
+        5 => Orientation::Transpose,
+        6 => Orientation::Rotate90,
+        7 => Orientation::Transverse,
+        8 => Orientation::Rotate270,
+        _ => return None,
+    })
+}
+
+fn normalize_capture_time(value: String) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 19 && bytes[4] == b':' && bytes[7] == b':' && bytes[10] == b' ' {
+        format!(
+            "{}-{}-{}T{}",
+            &value[0..4],
+            &value[5..7],
+            &value[8..10],
+            &value[11..]
+        )
+    } else {
+        value
+    }
+}
+
+fn exif_thumbnail(exif: &exif::Exif) -> Option<Vec<u8>> {
+    let jpeg_offset = exif
+        .get_field(Tag::JPEGInterchangeFormat, In::THUMBNAIL)
+        .and_then(|field| field.value.get_uint(0));
+    let jpeg_length = exif
+        .get_field(Tag::JPEGInterchangeFormatLength, In::THUMBNAIL)
+        .and_then(|field| field.value.get_uint(0));
+    if let Some(bytes) = jpeg_offset
+        .zip(jpeg_length)
+        .and_then(|(offset, length)| exif_slice(exif.buf(), offset, length))
+    {
+        return (!bytes.is_empty()).then(|| bytes.to_vec());
+    }
+
+    let offsets = exif
+        .get_field(Tag::StripOffsets, In::THUMBNAIL)
+        .and_then(|field| field.value.iter_uint())
+        .map(|values| values.collect::<Vec<_>>())?;
+    let lengths = exif
+        .get_field(Tag::StripByteCounts, In::THUMBNAIL)
+        .and_then(|field| field.value.iter_uint())
+        .map(|values| values.collect::<Vec<_>>())?;
+    let mut preview = Vec::new();
+    for (offset, length) in offsets.into_iter().zip(lengths) {
+        preview.extend_from_slice(exif_slice(exif.buf(), offset, length)?);
+    }
+    (!preview.is_empty()).then_some(preview)
+}
+
+fn exif_slice(bytes: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
+    let start = usize::try_from(offset).ok()?;
+    let end = start.checked_add(usize::try_from(length).ok()?)?;
+    bytes.get(start..end)
 }
 
 /// Adapter around the selected `rawloader` vendor decoder.
@@ -584,11 +757,11 @@ impl RawDecoder for RawloaderDecoder {
         }))
         .map_err(|_| RawError::Decoder("rawloader panicked while parsing input".to_owned()))?
         .map_err(|error| RawError::Decoder(error.to_string()))?;
-        adapt_rawloader_image(decoded)
+        adapt_rawloader_image(decoded, input)
     }
 }
 
-fn adapt_rawloader_image(image: rawloader::RawImage) -> Result<RawFrame, RawError> {
+fn adapt_rawloader_image(image: rawloader::RawImage, input: &[u8]) -> Result<RawFrame, RawError> {
     if image.cpp != 1 {
         return Err(RawError::UnsupportedData(format!(
             "rawloader returned {} components per pixel",
@@ -640,13 +813,21 @@ fn adapt_rawloader_image(image: rawloader::RawImage) -> Result<RawFrame, RawErro
         make: image.make.clone(),
         model: image.model.clone(),
         orientation: image.orientation.into(),
+        dimensions: Some(dimensions),
         ..CameraMetadata::default()
     };
-    let mut tags = BTreeMap::new();
+    let parsed = parse_exif_metadata(input).ok();
+    let camera = merge_camera_metadata(camera, parsed.as_ref().map(|metadata| &metadata.camera));
+    let mut tags = parsed
+        .as_ref()
+        .map(|metadata| metadata.exif.tags.clone())
+        .unwrap_or_default();
     tags.insert("clean_make".to_owned(), image.clean_make.clone());
     tags.insert("clean_model".to_owned(), image.clean_model.clone());
     tags.insert("cpp".to_owned(), image.cpp.to_string());
     let exif = ExifMetadata { tags };
+    let lens_profile = camera.lens.clone().map(LensProfile::identity);
+    let embedded_preview = parsed.and_then(|metadata| metadata.embedded_preview);
     RawFrame::new(
         mosaic,
         image.blacklevels.map(f32::from),
@@ -657,10 +838,50 @@ fn adapt_rawloader_image(image: rawloader::RawImage) -> Result<RawFrame, RawErro
             model: image.model,
             xyz_to_camera: image.xyz_to_cam,
         },
-        None,
-        None,
+        lens_profile,
+        embedded_preview,
         exif,
     )
+}
+
+fn merge_camera_metadata(
+    mut base: CameraMetadata,
+    parsed: Option<&CameraMetadata>,
+) -> CameraMetadata {
+    let Some(parsed) = parsed else {
+        return base;
+    };
+    if !parsed.make.is_empty() {
+        base.make = parsed.make.clone();
+    }
+    if !parsed.model.is_empty() {
+        base.model = parsed.model.clone();
+    }
+    if parsed.lens.is_some() {
+        base.lens = parsed.lens.clone();
+    }
+    if parsed.iso.is_some() {
+        base.iso = parsed.iso;
+    }
+    if parsed.aperture.is_some() {
+        base.aperture = parsed.aperture;
+    }
+    if parsed.shutter_seconds.is_some() {
+        base.shutter_seconds = parsed.shutter_seconds;
+    }
+    if parsed.focal_length_mm.is_some() {
+        base.focal_length_mm = parsed.focal_length_mm;
+    }
+    if parsed.capture_time.is_some() {
+        base.capture_time = parsed.capture_time.clone();
+    }
+    if parsed.dimensions.is_some() {
+        base.dimensions = parsed.dimensions;
+    }
+    if parsed.orientation != Orientation::Normal {
+        base.orientation = parsed.orientation;
+    }
+    base
 }
 
 fn infer_bit_depth(white_levels: [f32; 4]) -> u8 {
@@ -672,130 +893,221 @@ fn infer_bit_depth(white_levels: [f32; 4]) -> u8 {
     white.log2().ceil().clamp(1.0, 32.0) as u8
 }
 
-/// Deterministic fixtures covering the RAW cases needed before camera files are available.
-pub struct DeterministicCorpus;
-
-impl DeterministicCorpus {
-    /// A small 12-bit Bayer frame.
-    pub fn bayer_12_bit() -> RawFrame {
-        frame_fixture(
-            Dimensions::new(4, 2),
-            12,
-            Orientation::Normal,
-            CfaPattern::new(
-                2,
-                2,
-                vec![
-                    CfaColor::Red,
-                    CfaColor::Green,
-                    CfaColor::Green,
-                    CfaColor::Blue,
-                ],
-            )
-            .expect("fixture CFA is valid"),
-        )
-    }
-
-    /// A small 14-bit 6x6 multi-CFA frame.
-    pub fn xtrans_14_bit() -> RawFrame {
-        let colors = [
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Red,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Red,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Blue,
-            CfaColor::Blue,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Blue,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Red,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Red,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-            CfaColor::Green,
-            CfaColor::Green,
-            CfaColor::Blue,
-        ];
-        frame_fixture(
-            Dimensions::new(6, 2),
-            14,
-            Orientation::Rotate180,
-            CfaPattern::new(6, 6, colors.to_vec()).expect("fixture CFA is valid"),
-        )
-    }
-
-    /// A 16-bit frame with a rotated orientation tag.
-    pub fn rotated_16_bit() -> RawFrame {
-        frame_fixture(
-            Dimensions::new(2, 3),
-            16,
-            Orientation::Rotate90,
-            CfaPattern::new(
-                2,
-                2,
-                vec![
-                    CfaColor::Red,
-                    CfaColor::Green,
-                    CfaColor::Green,
-                    CfaColor::Blue,
-                ],
-            )
-            .expect("fixture CFA is valid"),
-        )
-    }
-}
-
-fn frame_fixture(
+struct FixtureSpec {
     dimensions: Dimensions,
     bit_depth: u8,
     orientation: Orientation,
     cfa: CfaPattern,
-) -> RawFrame {
-    let pixel_count = dimensions
-        .pixel_count()
-        .expect("fixture dimensions are small");
-    let max = ((1_u32 << bit_depth.min(16)) - 1) as f32;
-    let samples = (0..pixel_count)
-        .map(|index| (index as f32 * 37.0 + 11.0) % max)
-        .collect();
-    let mosaic = Mosaic::new(dimensions, samples, bit_depth, cfa, orientation)
-        .expect("fixture mosaic is valid");
-    RawFrame::new(
-        mosaic,
-        [16.0; 4],
-        [max; 4],
-        CameraMetadata {
+    black_levels: [f32; 4],
+    white_levels: [f32; 4],
+    make: String,
+    model: String,
+    clipped_highlights: bool,
+}
+
+impl FixtureSpec {
+    fn new(
+        dimensions: Dimensions,
+        bit_depth: u8,
+        orientation: Orientation,
+        cfa: CfaPattern,
+    ) -> Self {
+        Self {
+            dimensions,
+            bit_depth,
+            orientation,
+            cfa,
+            black_levels: [16.0; 4],
+            white_levels: [((1_u32 << bit_depth.min(16)) - 1) as f32; 4],
             make: "RawWeave Test".to_owned(),
             model: format!("Fixture {bit_depth}-bit"),
-            orientation,
-            ..CameraMetadata::default()
-        },
-        CameraProfile::identity("RawWeave Test", format!("Fixture {bit_depth}-bit")),
-        None,
-        None,
-        ExifMetadata::default(),
+            clipped_highlights: false,
+        }
+    }
+
+    fn levels(mut self, black_levels: [f32; 4], white_levels: [f32; 4]) -> Self {
+        self.black_levels = black_levels;
+        self.white_levels = white_levels;
+        self
+    }
+
+    fn camera(mut self, make: &str, model: &str) -> Self {
+        self.make = make.to_owned();
+        self.model = model.to_owned();
+        self
+    }
+
+    fn with_clipped_highlights(mut self) -> Self {
+        self.clipped_highlights = true;
+        self
+    }
+
+    fn build(self) -> RawFrame {
+        let pixel_count = self
+            .dimensions
+            .pixel_count()
+            .expect("fixture dimensions are small");
+        let max = ((1_u32 << self.bit_depth.min(16)) - 1) as f32;
+        let mut samples: Vec<f32> = (0..pixel_count)
+            .map(|index| (index as f32 * 37.0 + 11.0) % max)
+            .collect();
+        if self.clipped_highlights {
+            samples[0] = self.white_levels[0] + 250.0;
+            samples[pixel_count - 1] = self.white_levels[2] + 500.0;
+        }
+        let mosaic = Mosaic::new(
+            self.dimensions,
+            samples,
+            self.bit_depth,
+            self.cfa,
+            self.orientation,
+        )
+        .expect("fixture mosaic is valid");
+        RawFrame::new(
+            mosaic,
+            self.black_levels,
+            self.white_levels,
+            CameraMetadata {
+                make: self.make.clone(),
+                model: self.model.clone(),
+                orientation: self.orientation,
+                dimensions: Some(self.dimensions),
+                ..CameraMetadata::default()
+            },
+            CameraProfile::identity(self.make, self.model),
+            None,
+            None,
+            ExifMetadata::default(),
+        )
+        .expect("fixture frame is valid")
+    }
+}
+
+/// Deterministic fixtures covering the RAW cases needed before camera files are available.
+pub struct DeterministicCorpus;
+
+impl DeterministicCorpus {
+    /// A small 12-bit Canon Bayer frame.
+    pub fn bayer_12_bit() -> RawFrame {
+        FixtureSpec::new(
+            Dimensions::new(4, 2),
+            12,
+            Orientation::Normal,
+            bayer_pattern(CfaColor::Red, CfaColor::Blue),
+        )
+        .levels([16.0, 20.0, 24.0, 28.0], [4095.0; 4])
+        .camera("Canon", "EOS R5")
+        .build()
+    }
+
+    /// A 14-bit Fujifilm X-Trans frame with a true 6x6 sensor extent.
+    pub fn xtrans_14_bit() -> RawFrame {
+        FixtureSpec::new(
+            Dimensions::new(6, 6),
+            14,
+            Orientation::Rotate180,
+            xtrans_pattern(),
+        )
+        .levels([32.0, 36.0, 40.0, 44.0], [16383.0; 4])
+        .camera("Fujifilm", "X-T5")
+        .build()
+    }
+
+    /// A 16-bit Sony Bayer frame with a 90-degree orientation tag.
+    pub fn rotated_16_bit() -> RawFrame {
+        FixtureSpec::new(
+            Dimensions::new(2, 3),
+            16,
+            Orientation::Rotate90,
+            bayer_pattern(CfaColor::Blue, CfaColor::Red),
+        )
+        .levels([256.0, 260.0, 264.0, 268.0], [65535.0; 4])
+        .camera("Sony", "ILCE-7RM5")
+        .build()
+    }
+
+    /// A 12-bit Olympus Bayer frame with intentional samples above white level.
+    pub fn clipped_highlights() -> RawFrame {
+        FixtureSpec::new(
+            Dimensions::new(4, 4),
+            12,
+            Orientation::Rotate270,
+            bayer_pattern(CfaColor::Green, CfaColor::Red),
+        )
+        .levels(
+            [128.0, 132.0, 136.0, 140.0],
+            [4000.0, 4095.0, 4050.0, 4095.0],
+        )
+        .camera("OM Digital Solutions", "OM-1")
+        .with_clipped_highlights()
+        .build()
+    }
+
+    /// Return all deterministic fixtures in a stable order.
+    pub fn all() -> Vec<RawFrame> {
+        vec![
+            Self::bayer_12_bit(),
+            Self::xtrans_14_bit(),
+            Self::rotated_16_bit(),
+            Self::clipped_highlights(),
+        ]
+    }
+
+    /// Compatibility alias for callers that refer to the fixtures as a corpus.
+    pub fn fixtures() -> Vec<RawFrame> {
+        Self::all()
+    }
+}
+
+fn bayer_pattern(first: CfaColor, fourth: CfaColor) -> CfaPattern {
+    CfaPattern::new(2, 2, vec![first, CfaColor::Green, CfaColor::Green, fourth])
+        .expect("fixture CFA is valid")
+}
+
+fn xtrans_pattern() -> CfaPattern {
+    CfaPattern::new(
+        6,
+        6,
+        vec![
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Red,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Red,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Blue,
+            CfaColor::Blue,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Blue,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Red,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Red,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+        ],
     )
-    .expect("fixture frame is valid")
+    .expect("fixture CFA is valid")
 }
 
 #[cfg(test)]

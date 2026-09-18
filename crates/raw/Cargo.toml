@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+exif = { package = "kamadak-exif", version = "0.6.1" }
 rawloader = "0.37.2"
 rawweave-image.workspace = true
 serde.workspace = true

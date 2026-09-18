@@ -116,6 +116,7 @@ fn decode_is_deterministic_and_returns_frame_mosaic_and_metadata() {
         first.outputs.get("exif"),
         Some(Value::ExifMetadata(_))
     ));
+    assert!(!first.outputs.contains_key("preview"));
 }
 
 #[test]

@@ -286,28 +286,26 @@ impl NodeInstance for RawDecode {
                     .unwrap_or_else(|| "Unknown lens".to_owned()),
             )
         });
-        Ok(NodeResult::new(
-            [
-                ("frame".to_owned(), Value::RawFrame(frame.clone())),
-                ("mosaic".to_owned(), Value::Mosaic(frame.mosaic().clone())),
-                (
-                    "camera".to_owned(),
-                    Value::CameraMetadata(frame.camera().clone()),
-                ),
-                (
-                    "camera_profile".to_owned(),
-                    Value::CameraProfile(frame.profile().clone()),
-                ),
-                ("lens_profile".to_owned(), Value::LensProfile(lens_profile)),
-                ("exif".to_owned(), Value::ExifMetadata(frame.exif().clone())),
-                (
-                    "preview".to_owned(),
-                    Value::Bytes(frame.embedded_preview().unwrap_or_default().to_vec()),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        ))
+        let mut outputs = [
+            ("frame".to_owned(), Value::RawFrame(frame.clone())),
+            ("mosaic".to_owned(), Value::Mosaic(frame.mosaic().clone())),
+            (
+                "camera".to_owned(),
+                Value::CameraMetadata(frame.camera().clone()),
+            ),
+            (
+                "camera_profile".to_owned(),
+                Value::CameraProfile(frame.profile().clone()),
+            ),
+            ("lens_profile".to_owned(), Value::LensProfile(lens_profile)),
+            ("exif".to_owned(), Value::ExifMetadata(frame.exif().clone())),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(preview) = frame.embedded_preview() {
+            outputs.insert("preview".to_owned(), Value::Bytes(preview.to_vec()));
+        }
+        Ok(NodeResult::new(outputs))
     }
 }
 

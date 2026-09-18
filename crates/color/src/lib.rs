@@ -47,6 +47,22 @@ pub enum ColorError {
     /// A color sample must be finite.
     #[error("color sample at pixel {pixel}, channel {channel} is not finite")]
     NonFiniteSample { pixel: usize, channel: usize },
+    /// A conversion needs a working-space definition that is not available here.
+    #[error("unsupported working-space conversion from {from:?} to {to:?}")]
+    UnsupportedWorkingSpace {
+        /// Source working space.
+        from: WorkingSpace,
+        /// Destination working space.
+        to: WorkingSpace,
+    },
+    /// A native color backend is represented but not linked into this build.
+    #[error("color backend {backend:?} is unavailable: {operation}")]
+    BackendUnavailable {
+        /// Backend that would perform the operation.
+        backend: ColorTransformBackend,
+        /// Operation that could not be performed.
+        operation: String,
+    },
 }
 
 fn validate_pixels(dimensions: Dimensions, pixels: &[[f32; 3]]) -> Result<(), ColorError> {
@@ -210,12 +226,13 @@ pub struct SrgbDisplayTransform;
 
 impl DisplayTransform for SrgbDisplayTransform {
     fn transform(&self, scene: &SceneLinearRGB) -> Result<DisplayRGB, ColorError> {
-        let pixels = scene
+        let srgb_scene = MatrixWorkingSpaceTransform::new(WorkingSpace::Srgb).transform(scene)?;
+        let pixels = srgb_scene
             .pixels()
             .iter()
-            .map(|pixel| pixel.map(encode_srgb))
+            .map(|pixel| fit_srgb_gamut(*pixel).map(encode_srgb))
             .collect();
-        DisplayRGB::new(scene.dimensions(), pixels, WorkingSpace::Srgb)
+        DisplayRGB::new(srgb_scene.dimensions(), pixels, WorkingSpace::Srgb)
     }
 
     fn name(&self) -> &'static str {
@@ -244,6 +261,264 @@ impl SceneTransform for IdentitySceneTransform {
     fn name(&self) -> &'static str {
         "identity scene transform"
     }
+}
+
+/// A named color backend, kept separate from the scene graph value types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorTransformBackend {
+    /// OpenColorIO, when the application is built with native OCIO support.
+    Ocio,
+    /// LittleCMS, when the application is built with native ICC support.
+    IccLittleCms,
+}
+
+/// An external profile/configuration reference owned by a native backend.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorProfileRef {
+    /// A color space in an OCIO configuration.
+    Ocio {
+        /// OCIO configuration handle, commonly a path or registry key.
+        config: String,
+        /// Color-space name in the configuration.
+        color_space: String,
+    },
+    /// An ICC profile handle, commonly a path or registry key.
+    Icc {
+        /// ICC profile handle.
+        profile: String,
+    },
+}
+
+impl ColorProfileRef {
+    /// Refer to a color space in an OCIO configuration.
+    pub fn ocio(config: impl Into<String>, color_space: impl Into<String>) -> Self {
+        Self::Ocio {
+            config: config.into(),
+            color_space: color_space.into(),
+        }
+    }
+
+    /// Refer to an ICC profile.
+    pub fn icc(profile: impl Into<String>) -> Self {
+        Self::Icc {
+            profile: profile.into(),
+        }
+    }
+}
+
+/// OCIO transform boundary. Native OCIO support can be added without changing callers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OcioBackend {
+    config: String,
+}
+
+impl OcioBackend {
+    /// Create an OCIO backend handle without loading native libraries.
+    pub fn new(config: impl Into<String>) -> Self {
+        Self {
+            config: config.into(),
+        }
+    }
+
+    /// Backend represented by this handle.
+    pub const fn backend(&self) -> ColorTransformBackend {
+        ColorTransformBackend::Ocio
+    }
+
+    /// OCIO configuration handle.
+    pub fn config_handle(&self) -> &str {
+        &self.config
+    }
+
+    /// Transform through OCIO when native integration is enabled.
+    pub fn transform(
+        &self,
+        _scene: &SceneLinearRGB,
+        _source: &ColorProfileRef,
+        _destination: &ColorProfileRef,
+    ) -> Result<SceneLinearRGB, ColorError> {
+        Err(ColorError::BackendUnavailable {
+            backend: self.backend(),
+            operation: format!("OCIO config {} is not linked", self.config),
+        })
+    }
+}
+
+/// ICC/LittleCMS transform boundary. Native support is intentionally optional.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IccLittleCmsBackend {
+    profile: String,
+}
+
+impl IccLittleCmsBackend {
+    /// Create an ICC backend handle without loading native libraries.
+    pub fn new(profile: impl Into<String>) -> Self {
+        Self {
+            profile: profile.into(),
+        }
+    }
+
+    /// Backend represented by this handle.
+    pub const fn backend(&self) -> ColorTransformBackend {
+        ColorTransformBackend::IccLittleCms
+    }
+
+    /// ICC profile handle.
+    pub fn profile_handle(&self) -> &str {
+        &self.profile
+    }
+
+    /// Transform through LittleCMS when native integration is enabled.
+    pub fn transform(
+        &self,
+        _scene: &SceneLinearRGB,
+        _source: &ColorProfileRef,
+        _destination: &ColorProfileRef,
+    ) -> Result<SceneLinearRGB, ColorError> {
+        Err(ColorError::BackendUnavailable {
+            backend: self.backend(),
+            operation: format!("ICC profile {} is not linked", self.profile),
+        })
+    }
+}
+
+/// Matrix-based conversion between the built-in RGB working spaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatrixWorkingSpaceTransform {
+    destination: WorkingSpace,
+}
+
+impl MatrixWorkingSpaceTransform {
+    /// Create a transform to a built-in destination working space.
+    pub fn new(destination: WorkingSpace) -> Self {
+        Self { destination }
+    }
+
+    /// Destination working space.
+    pub fn destination(&self) -> WorkingSpace {
+        self.destination.clone()
+    }
+}
+
+impl SceneTransform for MatrixWorkingSpaceTransform {
+    fn transform(&self, scene: &SceneLinearRGB) -> Result<SceneLinearRGB, ColorError> {
+        let source = scene.working_space();
+        if source == self.destination {
+            return Ok(scene.clone());
+        }
+        let source_to_xyz =
+            working_space_to_xyz(&source).ok_or_else(|| ColorError::UnsupportedWorkingSpace {
+                from: source.clone(),
+                to: self.destination.clone(),
+            })?;
+        let xyz_to_destination =
+            invert_matrix(working_space_to_xyz(&self.destination).ok_or_else(|| {
+                ColorError::UnsupportedWorkingSpace {
+                    from: source.clone(),
+                    to: self.destination.clone(),
+                }
+            })?)
+            .ok_or_else(|| ColorError::UnsupportedWorkingSpace {
+                from: source.clone(),
+                to: self.destination.clone(),
+            })?;
+        let conversion = multiply_matrix(xyz_to_destination, source_to_xyz);
+        let pixels = scene
+            .pixels()
+            .iter()
+            .map(|pixel| multiply_vector(conversion, *pixel))
+            .collect();
+        SceneLinearRGB::new(scene.dimensions(), pixels, self.destination.clone())
+    }
+
+    fn name(&self) -> &'static str {
+        "matrix working-space transform"
+    }
+}
+
+// The matrices use a D65 XYZ reference. ProPhoto's native D50 primaries are
+// Bradford-adapted here so all built-in spaces share one conversion boundary.
+fn working_space_to_xyz(space: &WorkingSpace) -> Option<[[f32; 3]; 3]> {
+    match space {
+        WorkingSpace::Srgb => Some([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.119_192, 0.9503041],
+        ]),
+        WorkingSpace::DisplayP3 => Some([
+            [0.48657095, 0.26566769, 0.19821729],
+            [0.22897456, 0.69173852, 0.07928691],
+            [0.0, 0.04511338, 1.043_944_4],
+        ]),
+        WorkingSpace::ProPhoto => Some([
+            [0.797_766_6, 0.135_181_3, 0.03134773],
+            [0.28807483, 0.71183515, 0.00008902],
+            [0.0, 0.0, 0.825_104_6],
+        ]),
+        WorkingSpace::Rec2020 => Some([
+            [0.63695805, 0.144_616_9, 0.16888098],
+            [0.262_700_2, 0.67799807, 0.05930172],
+            [0.0, 0.02807269, 1.060_985_1],
+        ]),
+        WorkingSpace::CameraNative | WorkingSpace::Custom(_) => None,
+    }
+}
+
+fn multiply_matrix(left: [[f32; 3]; 3], right: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    std::array::from_fn(|row| {
+        std::array::from_fn(|column| {
+            (0..3)
+                .map(|index| left[row][index] * right[index][column])
+                .sum()
+        })
+    })
+}
+
+fn multiply_vector(matrix: [[f32; 3]; 3], vector: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|row| {
+        matrix[row][0] * vector[0] + matrix[row][1] * vector[1] + matrix[row][2] * vector[2]
+    })
+}
+
+fn invert_matrix(matrix: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let [a, b, c] = matrix[0];
+    let [d, e, f] = matrix[1];
+    let [g, h, i] = matrix[2];
+    let determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if determinant.abs() <= f32::EPSILON {
+        return None;
+    }
+    let inverse_determinant = 1.0 / determinant;
+    Some([
+        [
+            (e * i - f * h) * inverse_determinant,
+            (c * h - b * i) * inverse_determinant,
+            (b * f - c * e) * inverse_determinant,
+        ],
+        [
+            (f * g - d * i) * inverse_determinant,
+            (a * i - c * g) * inverse_determinant,
+            (c * d - a * f) * inverse_determinant,
+        ],
+        [
+            (d * h - e * g) * inverse_determinant,
+            (b * g - a * h) * inverse_determinant,
+            (a * e - b * d) * inverse_determinant,
+        ],
+    ])
+}
+
+fn fit_srgb_gamut(mut pixel: [f32; 3]) -> [f32; 3] {
+    let minimum = pixel.iter().copied().fold(0.0, f32::min);
+    if minimum < 0.0 {
+        pixel.iter_mut().for_each(|value| *value -= minimum);
+        let maximum = pixel.iter().copied().fold(1.0, f32::max);
+        if maximum > 1.0 {
+            pixel.iter_mut().for_each(|value| *value /= maximum);
+        }
+        return pixel.map(|value| value.clamp(0.0, 1.0));
+    }
+    pixel
 }
 
 fn encode_srgb(value: f32) -> f32 {
