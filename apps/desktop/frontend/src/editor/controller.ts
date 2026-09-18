@@ -29,6 +29,7 @@ export class EditorController {
     descriptors: [],
     nodes: [],
     edges: [],
+    revision: 0,
     selectedNodeId: null,
     error: null,
     notification: null,
@@ -96,7 +97,12 @@ export class EditorController {
     const selectedNodeId = nodes.some((node) => node.id === this.state.selectedNodeId)
       ? this.state.selectedNodeId
       : null;
-    this.setState({ nodes, edges, selectedNodeId });
+    this.setState({
+      nodes,
+      edges,
+      revision: snapshot.revision ?? this.state.revision,
+      selectedNodeId,
+    });
   }
 
   private async command(action: () => Promise<void>): Promise<void> {

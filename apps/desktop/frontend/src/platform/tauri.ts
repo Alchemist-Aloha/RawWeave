@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   EditorPlatform,
+  ExecutionCapability,
   NodeDescriptor,
   ParameterType,
   ParameterValue,
@@ -30,6 +31,7 @@ interface RustDescriptor {
   inputs: RustPort[];
   outputs: RustPort[];
   parameters: RustParameter[];
+  capabilities?: string[];
 }
 
 type RustValue = { Float: number } | { Boolean: boolean } | { String: string };
@@ -71,7 +73,23 @@ function mapDescriptor(descriptor: RustDescriptor): NodeDescriptor {
       min: parameter.min,
       max: parameter.max,
     })),
+    capabilities: descriptor.capabilities?.map(mapCapability),
   };
+}
+
+function mapCapability(capability: string): ExecutionCapability {
+  switch (capability) {
+    case 'Gpu':
+      return 'GPU';
+    case 'TileLocal':
+      return 'TileLocal';
+    case 'RegionAware':
+      return 'RegionAware';
+    case 'FullFrame':
+      return 'FullFrame';
+    default:
+      return 'CPU';
+  }
 }
 
 function message(error: unknown): Error {
@@ -85,6 +103,7 @@ async function readSnapshot(): Promise<PlatformSnapshot> {
   const graph = JSON.parse(serialized) as {
     nodes: Record<string, { type_id: string; parameters: Record<string, RustValue> }>;
     edges: Array<{ from_node: string; from_port: string; to_node: string; to_port: string }>;
+    revision?: number;
   };
   return {
     nodes: Object.entries(graph.nodes ?? {}).map(([id, node]) => ({
@@ -100,6 +119,7 @@ async function readSnapshot(): Promise<PlatformSnapshot> {
       toNode: edge.to_node,
       toPort: edge.to_port,
     })),
+    revision: typeof graph.revision === 'number' ? graph.revision : undefined,
   };
 }
 

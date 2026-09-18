@@ -9,8 +9,12 @@ build = "build.rs"
 tauri-build = { version = "2" }
 
 [dependencies]
+rawweave-image = { path = "../../../crates/image" }
 rawweave-node-api = { path = "../../../crates/node-api" }
 rawweave-project = { path = "../../../crates/project" }
+rawweave-rendering = { path = "../../../crates/rendering" }
+png = "0.17"
+serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2" }
 
 [workspace]

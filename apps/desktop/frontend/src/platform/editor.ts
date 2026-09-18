@@ -1,5 +1,6 @@
 import type {
   EditorPlatform,
+  ExecutionCapability,
   NodeDescriptor,
   ParameterValue,
   PlatformEdge,
@@ -10,57 +11,107 @@ import { createTauriPlatform } from './tauri';
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-const imageInput: NodeDescriptor = {
-  typeId: 'core.image-input',
-  name: 'Image Input',
-  version: 1,
-  inputs: [],
-  outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
-  parameters: [],
-};
+const imageCapabilities: ExecutionCapability[] = ['CPU', 'RegionAware'];
+const tileCapabilities: ExecutionCapability[] = ['CPU', 'TileLocal', 'RegionAware'];
+const fullFrameCapabilities: ExecutionCapability[] = ['CPU', 'FullFrame', 'RegionAware'];
 
-const exposure: NodeDescriptor = {
-  typeId: 'core.exposure',
-  name: 'Exposure',
-  version: 1,
-  inputs: [
-    { id: 'image', name: 'Image', dataType: 'core.Image', required: true },
-    { id: 'exposure', name: 'Exposure', dataType: 'value.Float', required: false },
-  ],
-  outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
-  parameters: [
-    { id: 'exposure', name: 'Exposure', parameterType: 'Float', default: 0, min: null, max: null },
-  ],
-};
+function imageInputDescriptor(): NodeDescriptor {
+  return {
+    typeId: 'core.image-input',
+    name: 'Image Input',
+    version: 1,
+    inputs: [],
+    outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
+    parameters: [],
+    capabilities: imageCapabilities,
+  };
+}
 
-const invert: NodeDescriptor = {
-  typeId: 'core.invert',
-  name: 'Invert',
-  version: 1,
-  inputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: true }],
-  outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
-  parameters: [],
-};
+function imageProcessingDescriptor(typeId: string, name: string): NodeDescriptor {
+  return {
+    typeId,
+    name,
+    version: 1,
+    inputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: true }],
+    outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
+    parameters: [],
+    capabilities: imageCapabilities,
+  };
+}
 
-const output: NodeDescriptor = {
-  typeId: 'core.output',
-  name: 'Output',
-  version: 1,
-  inputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: true }],
-  outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: false }],
-  parameters: [],
-};
+function parameter(id: string, name: string, defaultValue: number, min: number | null = null, max: number | null = null) {
+  return { id, name, parameterType: 'Float' as const, default: defaultValue, min, max };
+}
 
+const imageInput = imageInputDescriptor();
 const constantFloat: NodeDescriptor = {
   typeId: 'core.constant-float',
   name: 'Constant Float',
   version: 1,
   inputs: [],
   outputs: [{ id: 'value', name: 'Value', dataType: 'value.Float', required: false }],
-  parameters: [{ id: 'value', name: 'Value', parameterType: 'Float', default: 0, min: null, max: null }],
+  parameters: [parameter('value', 'Value', 0)],
 };
 
-export const builtInDescriptors: NodeDescriptor[] = [imageInput, constantFloat, exposure, invert, output];
+const exposure = imageProcessingDescriptor('core.exposure', 'Exposure');
+exposure.inputs.push({ id: 'exposure', name: 'Exposure', dataType: 'value.Float', required: false });
+exposure.parameters.push(parameter('exposure', 'Exposure', 0));
+exposure.capabilities = tileCapabilities;
+
+const invert = imageProcessingDescriptor('core.invert', 'Invert');
+const output = imageProcessingDescriptor('core.output', 'Output');
+
+const resize = imageProcessingDescriptor('core.resize', 'Resize');
+resize.parameters.push(parameter('width', 'Width', 1, 1));
+resize.parameters.push(parameter('height', 'Height', 1, 1));
+
+const crop = imageProcessingDescriptor('core.crop', 'Crop');
+crop.parameters.push(parameter('x', 'X', 0, 0));
+crop.parameters.push(parameter('y', 'Y', 0, 0));
+crop.parameters.push(parameter('width', 'Width', 1, 1));
+crop.parameters.push(parameter('height', 'Height', 1, 1));
+
+const blur = imageProcessingDescriptor('core.blur', 'Blur');
+blur.parameters.push(parameter('radius', 'Radius', 1, 0, 64));
+blur.capabilities = fullFrameCapabilities;
+
+const levels = imageProcessingDescriptor('core.levels', 'Levels');
+levels.parameters.push(parameter('black_point', 'Black Point', 0));
+levels.parameters.push(parameter('white_point', 'White Point', 1));
+levels.parameters.push(parameter('gamma', 'Gamma', 1, 0.0001));
+
+const curves = imageProcessingDescriptor('core.curves', 'Curves');
+curves.parameters.push(parameter('gamma', 'Gamma', 1, 0.0001));
+
+const colorMatrix = imageProcessingDescriptor('core.color-matrix', 'Color Matrix');
+colorMatrix.capabilities = ['CPU', 'GPU', 'TileLocal', 'RegionAware'];
+for (let row = 0; row < 4; row += 1) {
+  for (let column = 0; column < 4; column += 1) {
+    colorMatrix.parameters.push(parameter(`m${row}${column}`, `Matrix ${row}${column}`, row === column ? 1 : 0));
+  }
+}
+for (const [id, name] of [
+  ['offset_r', 'Red Offset'],
+  ['offset_g', 'Green Offset'],
+  ['offset_b', 'Blue Offset'],
+  ['offset_a', 'Alpha Offset'],
+] as const) {
+  colorMatrix.parameters.push(parameter(id, name, 0));
+}
+
+export const builtInDescriptors: NodeDescriptor[] = [
+  imageInput,
+  constantFloat,
+  exposure,
+  invert,
+  resize,
+  crop,
+  blur,
+  levels,
+  curves,
+  colorMatrix,
+  output,
+];
 
 function descriptorFor(descriptors: NodeDescriptor[], typeId: string): NodeDescriptor {
   const descriptor = descriptors.find((candidate) => candidate.typeId === typeId);
@@ -104,10 +155,12 @@ export function createMemoryPlatform(): EditorPlatform {
   const descriptors = clone(builtInDescriptors);
   const nodes = new Map<string, PlatformNode>();
   let edges: PlatformEdge[] = [];
+  let revision = 0;
 
   const snapshot = (): PlatformSnapshot => ({
     nodes: clone([...nodes.values()]),
     edges: clone(edges),
+    revision,
   });
 
   return {
@@ -128,10 +181,12 @@ export function createMemoryPlatform(): EditorPlatform {
           descriptor.parameters.map((parameter) => [parameter.id, clone(parameter.default)]),
         ),
       });
+      revision += 1;
     },
     async removeNode(nodeId) {
       if (!nodes.delete(nodeId)) throw new Error(`node '${nodeId}' does not exist`);
       edges = edges.filter((edge) => edge.fromNode !== nodeId && edge.toNode !== nodeId);
+      revision += 1;
     },
     async connect(fromNode, fromPort, toNode, toPort) {
       const source = nodes.get(fromNode);
@@ -149,6 +204,7 @@ export function createMemoryPlatform(): EditorPlatform {
       const candidate = [...edges, { fromNode, fromPort, toNode, toPort }];
       if (hasCycle(candidate)) throw new Error('connection would create a cycle');
       edges = candidate;
+      revision += 1;
     },
     async disconnect(fromNode, fromPort, toNode, toPort) {
       const index = edges.findIndex(
@@ -160,6 +216,7 @@ export function createMemoryPlatform(): EditorPlatform {
       );
       if (index < 0) throw new Error('connection does not exist');
       edges = edges.filter((_, edgeIndex) => edgeIndex !== index);
+      revision += 1;
     },
     async setParameter(nodeId, parameterId, value: ParameterValue) {
       const node = nodes.get(nodeId);
@@ -181,6 +238,7 @@ export function createMemoryPlatform(): EditorPlatform {
         throw new Error(`parameter '${parameterId}' on node '${nodeId}' is outside its allowed range`);
       }
       node.parameters[parameterId] = value;
+      revision += 1;
     },
     async saveWorkflow() {
       return JSON.stringify(snapshot());
@@ -205,6 +263,7 @@ export function createMemoryPlatform(): EditorPlatform {
         if (sourcePort.dataType !== targetPort.dataType) throw new Error('workflow contains an invalid connection');
       }
       if (hasCycle(edges)) throw new Error('workflow contains a cycle');
+      revision += 1;
     },
   };
 }

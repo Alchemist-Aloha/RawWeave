@@ -15,6 +15,9 @@ import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
 import { NodeLibrary } from './components/NodeLibrary';
+import { Viewer } from './components/Viewer';
+import { ViewerController } from './viewer/controller';
+import { createPreviewTransport } from './platform/preview';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -30,6 +33,7 @@ function downloadWorkflow(contents: string): void {
 
 export default function App() {
   const [controller] = useState(() => new EditorController(createPlatform()));
+  const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -217,16 +221,7 @@ export default function App() {
         />
       </section>
 
-      <section className="preview-strip">
-        <div>
-          <span className="eyebrow">Viewer</span>
-          <strong>Image preview</strong>
-        </div>
-        <div className="image-viewer">
-          <span>Connect an Output node to preview an image</span>
-        </div>
-        <div className="preview-strip__hint">Backend evaluation is ready for the next step.</div>
-      </section>
+      <Viewer controller={viewerController} nodes={controller.state.nodes} revision={controller.state.revision} />
 
       {controller.state.error && (
         <div className="error-toast" role="alert">

@@ -24,7 +24,10 @@ export interface NodeDescriptor {
   inputs: PortDescriptor[];
   outputs: PortDescriptor[];
   parameters: ParameterDescriptor[];
+  capabilities?: ExecutionCapability[];
 }
+
+export type ExecutionCapability = 'CPU' | 'GPU' | 'TileLocal' | 'RegionAware' | 'FullFrame';
 
 export interface PlatformNode {
   id: string;
@@ -42,6 +45,7 @@ export interface PlatformEdge {
 export interface PlatformSnapshot {
   nodes: PlatformNode[];
   edges: PlatformEdge[];
+  revision?: number;
 }
 
 export interface EditorPlatform {
@@ -78,6 +82,7 @@ export interface EditorState {
   descriptors: NodeDescriptor[];
   nodes: EditorNode[];
   edges: EditorEdge[];
+  revision: number;
   selectedNodeId: string | null;
   error: string | null;
   notification: string | null;
