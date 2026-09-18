@@ -980,6 +980,9 @@ pub enum RawError {
     /// Decoded samples exceed the configured decoder limit.
     #[error("RAW sample count {actual} exceeds limit {max}")]
     SampleCountTooLarge { actual: usize, max: usize },
+    /// A recognized RAW container did not expose dimensions safely before decode.
+    #[error("RAW header dimensions are unavailable for {format}; refusing untrusted decode")]
+    HeaderDimensionsUnavailable { format: &'static str },
     /// A CFA has an invalid size or sample count.
     #[error("invalid CFA {width}x{height} with {colors} colors")]
     InvalidCfa {
@@ -1089,6 +1092,18 @@ impl RawDecodeLimits {
             });
         }
         Ok(())
+    }
+
+    fn validate_predecode(
+        self,
+        dimensions: Dimensions,
+        samples_per_pixel: usize,
+    ) -> Result<(), RawError> {
+        let pixels = self.validate_dimensions(dimensions)?;
+        let samples = pixels
+            .checked_mul(samples_per_pixel)
+            .ok_or(RawError::DimensionsOverflow)?;
+        self.validate_sample_count(samples)
     }
 }
 
@@ -1336,8 +1351,9 @@ impl RawloaderDecoder {
 impl RawDecoder for RawloaderDecoder {
     fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
         self.limits.validate_input_size(input.len())?;
-        if let Some(dimensions) = declared_dimensions(input) {
-            self.limits.validate_dimensions(dimensions)?;
+        if let Some((dimensions, samples_per_pixel)) = predecode_dimensions(input)? {
+            self.limits
+                .validate_predecode(dimensions, samples_per_pixel)?;
         }
         let decoded = catch_unwind(AssertUnwindSafe(|| {
             rawloader::decode(&mut Cursor::new(input))
@@ -1350,6 +1366,183 @@ impl RawDecoder for RawloaderDecoder {
     fn decode_file(&self, path: &std::path::Path) -> Result<RawFrame, RawError> {
         RawloaderDecoder::decode_file(self, path)
     }
+}
+
+fn predecode_dimensions(input: &[u8]) -> Result<Option<(Dimensions, usize)>, RawError> {
+    if has_prefix(input, b"ARRI") {
+        return probe_arri_dimensions(input).map(Some);
+    }
+    if is_mrw(input) {
+        return probe_mrw_dimensions(input).map(Some);
+    }
+    if has_prefix(input, b"FOVb") {
+        return probe_x3f_dimensions(input).map(Some);
+    }
+    if is_ciff(input) {
+        return Err(RawError::HeaderDimensionsUnavailable { format: "CIFF" });
+    }
+    if is_tiff_family(input) {
+        return declared_dimensions(input)
+            .map(|dimensions| (dimensions, 1))
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "TIFF" })
+            .map(Some);
+    }
+    Ok(declared_dimensions(input).map(|dimensions| (dimensions, 1)))
+}
+
+fn probe_arri_dimensions(input: &[u8]) -> Result<(Dimensions, usize), RawError> {
+    let width =
+        read_le_u32(input, 20).ok_or(RawError::HeaderDimensionsUnavailable { format: "ARRI" })?;
+    let height =
+        read_le_u32(input, 24).ok_or(RawError::HeaderDimensionsUnavailable { format: "ARRI" })?;
+    Ok((Dimensions::new(width, height), 1))
+}
+
+fn probe_mrw_dimensions(input: &[u8]) -> Result<(Dimensions, usize), RawError> {
+    let data_offset = read_be_u32(input, 4)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .and_then(|offset| offset.checked_add(8))
+        .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+    let scan_end = data_offset.min(input.len());
+    if scan_end < 8 {
+        return Err(RawError::HeaderDimensionsUnavailable { format: "MRW" });
+    }
+
+    let mut cursor = 8_usize;
+    while cursor.checked_add(8).is_some_and(|end| end <= scan_end) {
+        let tag = read_be_u32(input, cursor)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+        let length = read_be_u32(input, cursor + 4)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+
+        if tag == 0x0050_5244 {
+            let dimensions_end = cursor
+                .checked_add(20)
+                .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+            if dimensions_end <= scan_end {
+                let height = read_be_u16(input, cursor + 16)
+                    .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+                let width = read_be_u16(input, cursor + 18)
+                    .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+                return Ok((Dimensions::new(u32::from(width), u32::from(height)), 1));
+            }
+            return Err(RawError::HeaderDimensionsUnavailable { format: "MRW" });
+        }
+
+        let next = cursor
+            .checked_add(8)
+            .and_then(|offset| offset.checked_add(length))
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "MRW" })?;
+        if next > scan_end || next <= cursor {
+            return Err(RawError::HeaderDimensionsUnavailable { format: "MRW" });
+        }
+        cursor = next;
+    }
+
+    Err(RawError::HeaderDimensionsUnavailable { format: "MRW" })
+}
+
+fn probe_x3f_dimensions(input: &[u8]) -> Result<(Dimensions, usize), RawError> {
+    let footer_offset = input
+        .len()
+        .checked_sub(4)
+        .and_then(|offset| read_le_u32(input, offset))
+        .and_then(|offset| usize::try_from(offset).ok())
+        .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+    let directory_header_end = footer_offset
+        .checked_add(12)
+        .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+    if directory_header_end > input.len()
+        || read_le_u32(input, footer_offset + 4).is_none_or(|version| version < 0x0002_0000)
+    {
+        return Err(RawError::HeaderDimensionsUnavailable { format: "X3F" });
+    }
+    let entries = read_le_u32(input, footer_offset + 8)
+        .and_then(|entries| usize::try_from(entries).ok())
+        .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+    let available_entries = (input.len() - directory_header_end) / 12;
+    if entries > available_entries {
+        return Err(RawError::HeaderDimensionsUnavailable { format: "X3F" });
+    }
+
+    for index in 0..entries {
+        let entry_offset = footer_offset
+            .checked_add(12)
+            .and_then(|offset| {
+                index
+                    .checked_mul(12)
+                    .and_then(|delta| offset.checked_add(delta))
+            })
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        let image_offset = read_le_u32(input, entry_offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        let name_end = entry_offset
+            .checked_add(12)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        let name_start = entry_offset
+            .checked_add(8)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        let name = input
+            .get(name_start..name_end)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        if name != b"IMA2" {
+            continue;
+        }
+        let image_end = image_offset
+            .checked_add(24)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        if image_end > input.len() {
+            return Err(RawError::HeaderDimensionsUnavailable { format: "X3F" });
+        }
+        let image_type = read_le_u32(input, image_offset + 8)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        if image_type != 1 && image_type != 3 {
+            continue;
+        }
+        let width = read_le_u32(input, image_offset + 16)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        let height = read_le_u32(input, image_offset + 20)
+            .ok_or(RawError::HeaderDimensionsUnavailable { format: "X3F" })?;
+        return Ok((Dimensions::new(width, height), 3));
+    }
+
+    Err(RawError::HeaderDimensionsUnavailable { format: "X3F" })
+}
+
+fn has_prefix(input: &[u8], prefix: &[u8]) -> bool {
+    input.get(..prefix.len()) == Some(prefix)
+}
+
+fn is_mrw(input: &[u8]) -> bool {
+    read_be_u32(input, 0) == Some(0x004d_524d)
+}
+
+fn is_ciff(input: &[u8]) -> bool {
+    input.get(6..14) == Some(b"HEAPCCDR")
+}
+
+fn is_tiff_family(input: &[u8]) -> bool {
+    has_prefix(input, b"FUJIFILM") || input.get(..2) == Some(b"II") || input.get(..2) == Some(b"MM")
+}
+
+fn read_be_u16(input: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let bytes: [u8; 2] = input.get(offset..end)?.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
+}
+
+fn read_le_u32(input: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let bytes: [u8; 4] = input.get(offset..end)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn read_be_u32(input: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let bytes: [u8; 4] = input.get(offset..end)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
 }
 
 fn declared_dimensions(input: &[u8]) -> Option<Dimensions> {

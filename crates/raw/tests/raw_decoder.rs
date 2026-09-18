@@ -327,6 +327,142 @@ fn decoder_limits_reject_oversized_bytes_before_rawloader() {
     assert_eq!(file_error, error);
 }
 
+#[test]
+fn header_dimensions_reject_oversized_arri_mrw_and_x3f_before_rawloader() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 8,
+        max_pixels: 8,
+        max_width: 8,
+        max_height: 8,
+    });
+
+    for input in [
+        crafted_arri_header(9, 1),
+        crafted_mrw_header(9, 1),
+        crafted_x3f_header(9, 1),
+    ] {
+        let error = decoder.decode(&input).unwrap_err();
+        assert!(
+            matches!(error, RawError::DimensionTooLarge { .. }),
+            "expected a pre-decode dimension limit error, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn header_dimensions_reject_oversized_sample_arithmetic_before_rawloader() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 8,
+        max_pixels: 64,
+        max_width: 64,
+        max_height: 64,
+    });
+
+    let error = decoder.decode(&crafted_arri_header(3, 3)).unwrap_err();
+    assert_eq!(error, RawError::SampleCountTooLarge { actual: 9, max: 8 });
+}
+
+#[test]
+fn malformed_or_truncated_header_probes_are_panic_free() {
+    let decoder = RawloaderDecoder::default();
+    for input in [
+        b"ARRI".to_vec(),
+        b"\0MRM".to_vec(),
+        b"FOVb".to_vec(),
+        crafted_mrw_header_without_dimensions(),
+        crafted_x3f_header_without_image(),
+    ] {
+        let result = std::panic::catch_unwind(|| decoder.decode(&input));
+        assert!(result.is_ok(), "header probe panicked for {input:?}");
+        assert!(result.unwrap().is_err());
+    }
+}
+
+#[test]
+fn valid_size_header_probe_reaches_vendor_decoder() {
+    let decoder = RawloaderDecoder::with_limits(RawDecodeLimits {
+        max_input_bytes: 4096,
+        max_samples: 64,
+        max_pixels: 64,
+        max_width: 64,
+        max_height: 64,
+    });
+
+    for input in [
+        crafted_arri_header(8, 1),
+        crafted_mrw_header(8, 1),
+        crafted_x3f_header(1, 1),
+    ] {
+        let error = decoder.decode(&input).unwrap_err();
+        assert!(
+            matches!(error, RawError::Decoder(_)),
+            "expected vendor decoder error after a valid-size probe, got {error:?}"
+        );
+    }
+}
+
+fn crafted_arri_header(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 32];
+    bytes[0..4].copy_from_slice(b"ARRI");
+    put_le_u32(&mut bytes, 8, 32);
+    put_le_u32(&mut bytes, 20, width);
+    put_le_u32(&mut bytes, 24, height);
+    bytes
+}
+
+fn crafted_mrw_header(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 64];
+    put_be_u32(&mut bytes, 0, 0x004d_524d);
+    put_be_u32(&mut bytes, 4, 48);
+    put_be_u32(&mut bytes, 8, 0x0050_5244);
+    put_be_u32(&mut bytes, 12, 40);
+    put_be_u16(&mut bytes, 24, height);
+    put_be_u16(&mut bytes, 26, width);
+    bytes
+}
+
+fn crafted_mrw_header_without_dimensions() -> Vec<u8> {
+    let mut bytes = crafted_mrw_header(1, 1);
+    put_be_u32(&mut bytes, 12, 0);
+    put_be_u16(&mut bytes, 24, 0);
+    put_be_u16(&mut bytes, 26, 0);
+    bytes
+}
+
+fn crafted_x3f_header(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = crafted_x3f_header_without_image();
+    put_le_u32(&mut bytes, 72, 1);
+    put_le_u32(&mut bytes, 76, 32);
+    bytes[84..88].copy_from_slice(b"IMA2");
+    put_le_u32(&mut bytes, 40, 1);
+    put_le_u32(&mut bytes, 44, 35);
+    put_le_u32(&mut bytes, 48, width);
+    put_le_u32(&mut bytes, 52, height);
+    bytes
+}
+
+fn crafted_x3f_header_without_image() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 128];
+    bytes[0..4].copy_from_slice(b"FOVb");
+    put_le_u32(&mut bytes, 68, 0x0002_0000);
+    put_le_u32(&mut bytes, 124, 64);
+    bytes
+}
+
+fn put_le_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_be_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn put_be_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
 fn crafted_tiff_exif() -> Vec<u8> {
     let mut bytes = vec![0_u8; 360];
     bytes[0..8].copy_from_slice(b"II*\0\x08\0\0\0");
