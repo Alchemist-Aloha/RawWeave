@@ -952,6 +952,29 @@ mod tests {
     }
 
     #[test]
+    fn downloaded_common_image_dataset_decodes() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test-data/images/common");
+        let files = [
+            "beatles-press-conference.jpg",
+            "gracie-allen-portrait.jpg",
+            "pngsuite-rgb8.png",
+            "pngsuite-rgba8.png",
+            "pngsuite-gray-alpha16.png",
+            "pngsuite-indexed-transparency.png",
+            "pngsuite-interlaced-odd.png",
+            "pngsuite-1x1.png",
+        ];
+
+        for filename in files {
+            let image = decode_image_file(root.join(filename).to_string_lossy().as_ref())
+                .unwrap_or_else(|error| panic!("{filename} failed to decode: {error}"));
+            assert!(image.width() > 0, "{filename} has zero width");
+            assert!(image.height() > 0, "{filename} has zero height");
+        }
+    }
+
+    #[test]
     fn serves_stored_png_bytes_over_the_preview_protocol() {
         let manager = PreviewManager::default();
         let path = preview_path("request");
