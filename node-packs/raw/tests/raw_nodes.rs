@@ -3,7 +3,8 @@ use std::sync::Arc;
 use rawweave_color::{DisplayRGB, SceneLinearRGB, WorkingSpace};
 use rawweave_node_api::{EvaluationContext, Inputs, NodePack, NodeRegistry, Parameters, Value};
 use rawweave_raw::{
-    CameraProfile, DeterministicCorpus, DeterministicDecoder, LensProfile, RawDecoder,
+    CameraProfile, CfaColor, CfaPattern, DeterministicCorpus, DeterministicDecoder, LensProfile,
+    RawDecoder,
 };
 use rawweave_raw_nodes::{RawNodePack, register_nodes_with_decoder};
 
@@ -395,6 +396,93 @@ fn default_pack_uses_rawloader_decoder_without_needing_test_injection() {
         &EvaluationContext::default(),
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn four_channel_cfa_is_rejected_before_rgb_demosaic() {
+    let base = DeterministicCorpus::bayer_12_bit();
+    let cfa = CfaPattern::new(
+        2,
+        2,
+        vec![
+            CfaColor::Extra,
+            CfaColor::Green,
+            CfaColor::Green,
+            CfaColor::Blue,
+        ],
+    )
+    .unwrap();
+    let mosaic = rawweave_raw::Mosaic::new(
+        base.sensor_dimensions(),
+        base.mosaic().samples().to_vec(),
+        base.mosaic().bit_depth(),
+        cfa,
+        base.mosaic().orientation(),
+    )
+    .unwrap();
+    let frame = base.with_mosaic(mosaic).unwrap();
+    let mut registry = NodeRegistry::default();
+    RawNodePack::with_decoder(DeterministicDecoder::new(frame.clone()))
+        .register(&mut registry)
+        .unwrap();
+
+    let result = registry.instantiate("raw.demosaic").unwrap().evaluate(
+        &[("mosaic".to_owned(), Value::Mosaic(frame.mosaic().clone()))]
+            .into_iter()
+            .collect(),
+        &Parameters::new(),
+        &EvaluationContext::default(),
+    );
+
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("unsupported"), "{error}");
+}
+
+#[test]
+fn demosaic_expands_cfa_aware_search_at_xtrans_borders() {
+    let fixture = DeterministicCorpus::xtrans_14_bit();
+    let samples = fixture
+        .mosaic()
+        .samples()
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let x = (index as u32) % fixture.sensor_dimensions().width;
+            let y = (index as u32) / fixture.sensor_dimensions().width;
+            match fixture.mosaic().cfa().color_at(x, y).unwrap() {
+                CfaColor::Red => 10.0,
+                CfaColor::Green => 20.0,
+                CfaColor::Blue => 30.0,
+                CfaColor::Extra | CfaColor::Unknown => unreachable!(),
+            }
+        })
+        .collect();
+    let mosaic = rawweave_raw::Mosaic::new(
+        fixture.sensor_dimensions(),
+        samples,
+        fixture.mosaic().bit_depth(),
+        fixture.mosaic().cfa().clone(),
+        fixture.mosaic().orientation(),
+    )
+    .unwrap();
+    let registry = deterministic_registry();
+    let result = evaluate(
+        &registry,
+        "raw.demosaic",
+        [("mosaic".to_owned(), Value::Mosaic(mosaic))]
+            .into_iter()
+            .collect(),
+        Parameters::new(),
+    );
+    let Value::SceneLinearRGB(scene) = &result.outputs["scene"] else {
+        panic!("expected scene-linear output")
+    };
+    assert!(
+        scene
+            .pixels()
+            .iter()
+            .all(|pixel| *pixel == [10.0, 20.0, 30.0])
+    );
 }
 
 fn _assert_value_types(_: DisplayRGB, _: Arc<dyn RawDecoder>) {}

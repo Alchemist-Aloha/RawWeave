@@ -70,11 +70,28 @@ pub enum CfaColor {
 }
 
 /// A validated repeating color filter array pattern.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CfaPattern {
     width: u32,
     height: u32,
     colors: Vec<CfaColor>,
+}
+
+#[derive(Deserialize)]
+struct CfaPatternDto {
+    width: u32,
+    height: u32,
+    colors: Vec<CfaColor>,
+}
+
+impl<'de> Deserialize<'de> for CfaPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let dto = CfaPatternDto::deserialize(deserializer)?;
+        Self::new(dto.width, dto.height, dto.colors).map_err(serde::de::Error::custom)
+    }
 }
 
 impl CfaPattern {
@@ -145,13 +162,39 @@ impl CfaPattern {
 }
 
 /// Sensor mosaic samples and their layout.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Mosaic {
     dimensions: Dimensions,
     samples: Vec<f32>,
     bit_depth: u8,
     cfa: CfaPattern,
     orientation: Orientation,
+}
+
+#[derive(Deserialize)]
+struct MosaicDto {
+    dimensions: Dimensions,
+    samples: Vec<f32>,
+    bit_depth: u8,
+    cfa: CfaPattern,
+    orientation: Orientation,
+}
+
+impl<'de> Deserialize<'de> for Mosaic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let dto = MosaicDto::deserialize(deserializer)?;
+        Self::new(
+            dto.dimensions,
+            dto.samples,
+            dto.bit_depth,
+            dto.cfa,
+            dto.orientation,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl Mosaic {
@@ -163,6 +206,9 @@ impl Mosaic {
         cfa: CfaPattern,
         orientation: Orientation,
     ) -> Result<Self, RawError> {
+        if dimensions.width == 0 || dimensions.height == 0 {
+            return Err(RawError::InvalidDimensions(dimensions));
+        }
         if bit_depth == 0 || bit_depth > 32 {
             return Err(RawError::InvalidBitDepth(bit_depth));
         }
@@ -368,7 +414,7 @@ fn preview_mime_type(bytes: &[u8]) -> Option<String> {
 }
 
 /// Camera color profile metadata.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CameraProfile {
     /// Camera manufacturer.
     pub make: String,
@@ -380,8 +426,40 @@ pub struct CameraProfile {
     /// [`CameraProfile::camera_to_xyz`], never this source-direction matrix.
     pub xyz_to_camera: [[f32; 3]; 4],
     /// Validated 3x3 matrix mapping camera RGB channels into D65-referenced XYZ.
-    #[serde(default = "identity_camera_to_xyz")]
     pub camera_to_xyz: [[f32; 3]; 3],
+}
+
+#[derive(Deserialize)]
+struct CameraProfileDto {
+    make: String,
+    model: String,
+    xyz_to_camera: [[f32; 3]; 4],
+    #[serde(default)]
+    camera_to_xyz: Option<[[f32; 3]; 3]>,
+}
+
+impl<'de> Deserialize<'de> for CameraProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let dto = CameraProfileDto::deserialize(deserializer)?;
+        validate_xyz_to_camera_channels(dto.xyz_to_camera).map_err(serde::de::Error::custom)?;
+        let camera_to_xyz = match dto.camera_to_xyz {
+            Some(matrix) => {
+                invert_3x3(matrix, "camera-to-XYZ color matrix")
+                    .map_err(serde::de::Error::custom)?;
+                matrix
+            }
+            None => invert_camera_matrix(dto.xyz_to_camera).map_err(serde::de::Error::custom)?,
+        };
+        Ok(Self {
+            make: dto.make,
+            model: dto.model,
+            xyz_to_camera: dto.xyz_to_camera,
+            camera_to_xyz,
+        })
+    }
 }
 
 impl CameraProfile {
@@ -406,6 +484,7 @@ impl CameraProfile {
         model: impl Into<String>,
         xyz_to_camera: [[f32; 3]; 4],
     ) -> Result<Self, RawError> {
+        validate_xyz_to_camera_channels(xyz_to_camera)?;
         let camera_to_xyz = invert_camera_matrix(xyz_to_camera)?;
         Ok(Self {
             make: make.into(),
@@ -450,6 +529,15 @@ fn invert_camera_matrix(xyz_to_camera: [[f32; 3]; 4]) -> Result<[[f32; 3]; 3], R
         [xyz_to_camera[0], xyz_to_camera[1], xyz_to_camera[2]],
         "camera color matrix",
     )
+}
+
+fn validate_xyz_to_camera_channels(xyz_to_camera: [[f32; 3]; 4]) -> Result<(), RawError> {
+    if xyz_to_camera[3].iter().any(|value| *value != 0.0) {
+        return Err(RawError::UnsupportedData(
+            "camera profile contains an unsupported fourth channel".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn invert_3x3(matrix: [[f32; 3]; 3], label: &str) -> Result<[[f32; 3]; 3], RawError> {
@@ -623,9 +711,8 @@ impl LensProfileRegistry {
 
     /// Create the built-in calibrated table.
     ///
-    /// The RawWeave Test / Test Camera / Test Lens entry is a deterministic fixture. The Canon
-    /// EOS R5 / RF 50mm F1.2 L USM entry is a documented representative production lens; values
-    /// are intentionally small and deterministic until a full lens database is integrated.
+    /// The RawWeave Test / Test Camera / Test Lens entry is a deterministic fixture. Production
+    /// lenses are intentionally absent until their coefficients have a trusted source.
     pub fn built_in() -> Self {
         let mut registry = Self::new();
         registry.register(
@@ -637,17 +724,6 @@ impl LensProfileRegistry {
                 [0.012, -0.001, 0.0],
                 [0.0005, -0.0003],
                 [-0.08, 0.01, 0.0],
-            ),
-        );
-        registry.register(
-            "Canon",
-            "EOS R5",
-            "RF 50mm F1.2 L USM",
-            LensProfile::calibrated(
-                "Canon RF 50mm F1.2 L USM",
-                [0.018, -0.002, 0.0],
-                [0.0002, -0.0001],
-                [-0.12, 0.015, 0.0],
             ),
         );
         registry
@@ -695,7 +771,7 @@ fn normalize_profile_key(value: &str) -> String {
 }
 
 /// A decoded RAW frame and all metadata needed by the initial RAW graph stages.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RawFrame {
     mosaic: Mosaic,
     black_levels: [f32; 4],
@@ -703,9 +779,55 @@ pub struct RawFrame {
     camera: CameraMetadata,
     profile: CameraProfile,
     lens_profile: Option<LensProfile>,
-    #[serde(default)]
     embedded_preview: EmbeddedPreview,
     exif: ExifMetadata,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EmbeddedPreviewPayload {
+    Current(EmbeddedPreview),
+    Legacy(Option<Vec<u8>>),
+}
+
+#[derive(Deserialize)]
+struct RawFrameDto {
+    mosaic: Mosaic,
+    black_levels: [f32; 4],
+    white_levels: [f32; 4],
+    camera: CameraMetadata,
+    profile: CameraProfile,
+    #[serde(default)]
+    lens_profile: Option<LensProfile>,
+    #[serde(default)]
+    embedded_preview: Option<EmbeddedPreviewPayload>,
+    #[serde(default)]
+    exif: ExifMetadata,
+}
+
+impl<'de> Deserialize<'de> for RawFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let dto = RawFrameDto::deserialize(deserializer)?;
+        let embedded_preview = match dto.embedded_preview {
+            Some(EmbeddedPreviewPayload::Current(preview)) => preview,
+            Some(EmbeddedPreviewPayload::Legacy(bytes)) => EmbeddedPreview::from_bytes(bytes),
+            None => EmbeddedPreview::unavailable(),
+        };
+        Self::new(
+            dto.mosaic,
+            dto.black_levels,
+            dto.white_levels,
+            dto.camera,
+            dto.profile,
+            dto.lens_profile,
+            embedded_preview,
+            dto.exif,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RawFrame {
@@ -839,6 +961,25 @@ pub enum RawError {
     /// Dimensions could not be represented as a pixel count.
     #[error("RAW dimensions overflow")]
     DimensionsOverflow,
+    /// A RAW image has a zero dimension.
+    #[error("invalid RAW dimensions {0:?}")]
+    InvalidDimensions(Dimensions),
+    /// Input bytes exceed the configured decoder limit.
+    #[error("RAW input is too large: {actual} bytes exceeds limit {max}")]
+    InputTooLarge { actual: usize, max: usize },
+    /// Decoded dimensions exceed the configured decoder limit.
+    #[error("RAW dimensions {dimensions:?} exceed limit {max_width}x{max_height}")]
+    DimensionTooLarge {
+        dimensions: Dimensions,
+        max_width: u32,
+        max_height: u32,
+    },
+    /// Decoded pixels exceed the configured decoder limit.
+    #[error("RAW pixel count {actual} exceeds limit {max}")]
+    PixelCountTooLarge { actual: usize, max: usize },
+    /// Decoded samples exceed the configured decoder limit.
+    #[error("RAW sample count {actual} exceeds limit {max}")]
+    SampleCountTooLarge { actual: usize, max: usize },
     /// A CFA has an invalid size or sample count.
     #[error("invalid CFA {width}x{height} with {colors} colors")]
     InvalidCfa {
@@ -879,10 +1020,88 @@ pub enum RawError {
     Exif(String),
 }
 
+/// Conservative resource limits applied before and after rawloader decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawDecodeLimits {
+    /// Maximum encoded input size accepted by the adapter.
+    pub max_input_bytes: usize,
+    /// Maximum number of decoded scalar samples accepted.
+    pub max_samples: usize,
+    /// Maximum number of decoded pixels accepted.
+    pub max_pixels: usize,
+    /// Maximum decoded image width.
+    pub max_width: u32,
+    /// Maximum decoded image height.
+    pub max_height: u32,
+}
+
+impl Default for RawDecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: 128 * 1024 * 1024,
+            max_samples: 64 * 1024 * 1024,
+            max_pixels: 64 * 1024 * 1024,
+            max_width: 32_768,
+            max_height: 32_768,
+        }
+    }
+}
+
+impl RawDecodeLimits {
+    fn validate_input_size(self, actual: usize) -> Result<(), RawError> {
+        if actual > self.max_input_bytes {
+            return Err(RawError::InputTooLarge {
+                actual,
+                max: self.max_input_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_dimensions(self, dimensions: Dimensions) -> Result<usize, RawError> {
+        if dimensions.width == 0 || dimensions.height == 0 {
+            return Err(RawError::InvalidDimensions(dimensions));
+        }
+        if dimensions.width > self.max_width || dimensions.height > self.max_height {
+            return Err(RawError::DimensionTooLarge {
+                dimensions,
+                max_width: self.max_width,
+                max_height: self.max_height,
+            });
+        }
+        let pixels = dimensions
+            .pixel_count()
+            .map_err(|_| RawError::DimensionsOverflow)?;
+        if pixels > self.max_pixels {
+            return Err(RawError::PixelCountTooLarge {
+                actual: pixels,
+                max: self.max_pixels,
+            });
+        }
+        Ok(pixels)
+    }
+
+    fn validate_sample_count(self, actual: usize) -> Result<(), RawError> {
+        if actual > self.max_samples {
+            return Err(RawError::SampleCountTooLarge {
+                actual,
+                max: self.max_samples,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Decoder boundary used by graph nodes and test fixtures.
 pub trait RawDecoder: Send + Sync {
     /// Decode one complete file buffer into a validated frame.
     fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError>;
+
+    /// Decode one file while allowing adapters to enforce filesystem-level limits before reading.
+    fn decode_file(&self, path: &std::path::Path) -> Result<RawFrame, RawError> {
+        let input = std::fs::read(path).map_err(|error| RawError::Decoder(error.to_string()))?;
+        self.decode(&input)
+    }
 }
 
 /// A deterministic decoder used by tests and algorithm development.
@@ -1068,8 +1287,10 @@ fn exif_slice(bytes: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
 ///
 /// This is compile coverage for the vendor boundary. The deterministic corpus, rather than
 /// downloaded camera files, validates the RAW algorithms in this repository.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RawloaderDecoder;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RawloaderDecoder {
+    limits: RawDecodeLimits,
+}
 
 /// Compatibility spelling for callers that use the library's capitalized name.
 pub type RawLoaderDecoder = RawloaderDecoder;
@@ -1077,68 +1298,128 @@ pub type RawLoaderDecoder = RawloaderDecoder;
 pub type RawloaderAdapter = RawloaderDecoder;
 
 impl RawloaderDecoder {
-    /// Decode bytes with rawloader.
-    pub fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
+    /// Construct a decoder with explicit resource limits.
+    pub const fn with_limits(limits: RawDecodeLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Resource limits used by this decoder.
+    pub const fn limits(&self) -> RawDecodeLimits {
+        self.limits
+    }
+
+    /// Decode bytes with rawloader after applying encoded and declared-dimension limits.
+    pub fn decode_bytes(&self, input: &[u8]) -> Result<RawFrame, RawError> {
         <Self as RawDecoder>::decode(self, input)
     }
 
-    /// Decode a file through rawloader.
+    /// Decode bytes with rawloader.
+    pub fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
+        self.decode_bytes(input)
+    }
+
+    /// Decode a file through rawloader after checking its filesystem size.
     pub fn decode_file(&self, path: impl AsRef<std::path::Path>) -> Result<RawFrame, RawError> {
+        let path = path.as_ref();
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| RawError::Decoder(format!("failed to inspect RAW file: {error}")))?;
+        let file_size = usize::try_from(metadata.len()).map_err(|_| RawError::InputTooLarge {
+            actual: usize::MAX,
+            max: self.limits.max_input_bytes,
+        })?;
+        self.limits.validate_input_size(file_size)?;
         let bytes = std::fs::read(path).map_err(|error| RawError::Decoder(error.to_string()))?;
-        self.decode(&bytes)
+        self.decode_bytes(&bytes)
     }
 }
 
 impl RawDecoder for RawloaderDecoder {
     fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
+        self.limits.validate_input_size(input.len())?;
+        if let Some(dimensions) = declared_dimensions(input) {
+            self.limits.validate_dimensions(dimensions)?;
+        }
         let decoded = catch_unwind(AssertUnwindSafe(|| {
             rawloader::decode(&mut Cursor::new(input))
         }))
         .map_err(|_| RawError::Decoder("rawloader panicked while parsing input".to_owned()))?
         .map_err(|error| RawError::Decoder(error.to_string()))?;
-        adapt_rawloader_image(decoded, input)
+        adapt_rawloader_image(decoded, input, self.limits)
+    }
+
+    fn decode_file(&self, path: &std::path::Path) -> Result<RawFrame, RawError> {
+        RawloaderDecoder::decode_file(self, path)
     }
 }
 
-fn adapt_rawloader_image(image: rawloader::RawImage, input: &[u8]) -> Result<RawFrame, RawError> {
+fn declared_dimensions(input: &[u8]) -> Option<Dimensions> {
+    catch_unwind(AssertUnwindSafe(|| {
+        parse_exif_metadata(input).ok()?.camera.dimensions
+    }))
+    .ok()
+    .flatten()
+}
+
+fn adapt_rawloader_image(
+    image: rawloader::RawImage,
+    input: &[u8],
+    limits: RawDecodeLimits,
+) -> Result<RawFrame, RawError> {
     if image.cpp != 1 {
         return Err(RawError::UnsupportedData(format!(
             "rawloader returned {} components per pixel",
             image.cpp
         )));
     }
-    let samples = match image.data {
-        rawloader::RawImageData::Integer(data) => data.into_iter().map(f32::from).collect(),
-        rawloader::RawImageData::Float(data) => data,
-    };
     let dimensions = Dimensions::new(
         u32::try_from(image.width).map_err(|_| RawError::DimensionsOverflow)?,
         u32::try_from(image.height).map_err(|_| RawError::DimensionsOverflow)?,
     );
+    let pixel_count = limits.validate_dimensions(dimensions)?;
+    let sample_count = match &image.data {
+        rawloader::RawImageData::Integer(data) => data.len(),
+        rawloader::RawImageData::Float(data) => data.len(),
+    };
+    limits.validate_sample_count(sample_count)?;
+    if sample_count != pixel_count {
+        return Err(RawError::SampleCountMismatch {
+            dimensions,
+            expected: pixel_count,
+            actual: sample_count,
+        });
+    }
     let cfa_width = u32::try_from(image.cfa.width).map_err(|_| RawError::DimensionsOverflow)?;
     let cfa_height = u32::try_from(image.cfa.height).map_err(|_| RawError::DimensionsOverflow)?;
-    let cfa_colors = if cfa_width == 0 || cfa_height == 0 {
-        vec![CfaColor::Unknown]
-    } else {
-        let raw_cfa = &image.cfa;
-        (0..cfa_height)
-            .flat_map(|y| {
-                (0..cfa_width).map(move |x| match raw_cfa.color_at(y as usize, x as usize) {
-                    0 => CfaColor::Red,
-                    1 => CfaColor::Green,
-                    2 => CfaColor::Blue,
-                    3 => CfaColor::Extra,
-                    _ => CfaColor::Unknown,
-                })
+    if cfa_width == 0 || cfa_height == 0 {
+        return Err(RawError::UnsupportedData(
+            "rawloader returned an invalid CFA".to_owned(),
+        ));
+    }
+    let raw_cfa = &image.cfa;
+    let cfa_colors: Vec<_> = (0..cfa_height)
+        .flat_map(|y| {
+            (0..cfa_width).map(move |x| match raw_cfa.color_at(y as usize, x as usize) {
+                0 => CfaColor::Red,
+                1 => CfaColor::Green,
+                2 => CfaColor::Blue,
+                3 => CfaColor::Extra,
+                _ => CfaColor::Unknown,
             })
-            .collect()
-    };
-    let (cfa_width, cfa_height) = if cfa_width == 0 || cfa_height == 0 {
-        (1, 1)
-    } else {
-        (cfa_width, cfa_height)
-    };
+        })
+        .collect();
+    if cfa_colors
+        .iter()
+        .any(|color| matches!(color, CfaColor::Extra | CfaColor::Unknown))
+    {
+        return Err(RawError::UnsupportedData(
+            "rawloader returned a CFA with unsupported RGBE or unknown channels".to_owned(),
+        ));
+    }
     let cfa = CfaPattern::new(cfa_width, cfa_height, cfa_colors)?;
+    let samples = match image.data {
+        rawloader::RawImageData::Integer(data) => data.into_iter().map(f32::from).collect(),
+        rawloader::RawImageData::Float(data) => data,
+    };
     let white_levels = image.whitelevels.map(f32::from);
     let bit_depth = infer_bit_depth(white_levels);
     let mosaic = Mosaic::new(
@@ -1478,7 +1759,9 @@ mod tests {
 
     #[test]
     fn rawloader_adapter_returns_an_error_for_invalid_data() {
-        let error = RawloaderDecoder.decode(b"not a RAW file").unwrap_err();
+        let error = RawloaderDecoder::default()
+            .decode(b"not a RAW file")
+            .unwrap_err();
         assert!(error.to_string().contains("decoder"));
     }
 

@@ -269,10 +269,7 @@ impl NodeInstance for RawDecode {
                 if let Some(bytes) = context.source_bytes.as_deref() {
                     self.decoder.decode(bytes).map_err(raw_error)?
                 } else if let Some(path) = context.source_path.as_deref() {
-                    let bytes = std::fs::read(path).map_err(|error| {
-                        NodeError::Message(format!("failed to read RAW source: {error}"))
-                    })?;
-                    self.decoder.decode(&bytes).map_err(raw_error)?
+                    self.decoder.decode_file(path).map_err(raw_error)?
                 } else {
                     return Err(NodeError::MissingInput("bytes".to_owned()));
                 }
@@ -321,10 +318,11 @@ impl NodeInstance for BlackLevel {
         _context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let frame = raw_frame_input(inputs, "frame")?;
+        validate_rgb_cfa(frame.mosaic())?;
         let mosaic = frame
             .mosaic()
             .map_samples(|_, sample, color| {
-                let channel = cfa_channel(color);
+                let channel = cfa_channel(color).expect("validated RGB CFA");
                 let black = frame.black_levels()[channel];
                 let white = frame.white_levels()[channel];
                 let range = white - black;
@@ -349,13 +347,16 @@ impl NodeInstance for WhiteBalance {
         _context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let mosaic = mosaic_input(inputs, "mosaic")?;
+        validate_rgb_cfa(&mosaic)?;
         let gains = [
             parameter_alias(parameters, "red_gain", &["red"], 1.0)?,
             parameter_alias(parameters, "green_gain", &["green"], 1.0)?,
             parameter_alias(parameters, "blue_gain", &["blue"], 1.0)?,
         ];
         let balanced = mosaic
-            .map_samples(|_, sample, color| sample * gains[cfa_channel(color).min(2)])
+            .map_samples(|_, sample, color| {
+                sample * gains[cfa_channel(color).expect("validated RGB CFA")]
+            })
             .map_err(raw_error)?;
         Ok(NodeResult::single("mosaic", Value::Mosaic(balanced)))
     }
@@ -401,6 +402,7 @@ impl NodeInstance for Demosaic {
         _context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let mosaic = mosaic_input(inputs, "mosaic")?;
+        validate_rgb_cfa(&mosaic)?;
         let dimensions = mosaic.dimensions();
         let mut pixels = Vec::with_capacity(
             dimensions
@@ -410,9 +412,9 @@ impl NodeInstance for Demosaic {
         for y in 0..dimensions.height {
             for x in 0..dimensions.width {
                 pixels.push([
-                    demosaic_channel(&mosaic, x, y, CfaColor::Red),
-                    demosaic_channel(&mosaic, x, y, CfaColor::Green),
-                    demosaic_channel(&mosaic, x, y, CfaColor::Blue),
+                    demosaic_channel(&mosaic, x, y, CfaColor::Red)?,
+                    demosaic_channel(&mosaic, x, y, CfaColor::Green)?,
+                    demosaic_channel(&mosaic, x, y, CfaColor::Blue)?,
                 ]);
             }
         }
@@ -439,22 +441,30 @@ impl NodeInstance for CameraTransform {
             Some(_) => return Err(NodeError::InvalidParameter("camera_profile".to_owned())),
         };
         let transformed = match profile {
-            Some(profile) if profile.is_identity() => scene.with_working_space(working_space),
             Some(profile) => {
-                let xyz_pixels = scene
-                    .pixels()
-                    .iter()
-                    .map(|pixel| {
-                        [
-                            dot(profile.camera_to_xyz[0], *pixel),
-                            dot(profile.camera_to_xyz[1], *pixel),
-                            dot(profile.camera_to_xyz[2], *pixel),
-                        ]
-                    })
-                    .collect();
-                MatrixWorkingSpaceTransform::new(working_space)
-                    .transform_xyz(scene.dimensions(), xyz_pixels)
-                    .map_err(|error| NodeError::Message(error.to_string()))?
+                if profile.xyz_to_camera[3].iter().any(|value| *value != 0.0) {
+                    return Err(NodeError::Message(
+                        "unsupported camera profile: fourth channel is not supported".to_owned(),
+                    ));
+                }
+                if profile.is_identity() {
+                    scene.with_working_space(working_space)
+                } else {
+                    let xyz_pixels = scene
+                        .pixels()
+                        .iter()
+                        .map(|pixel| {
+                            [
+                                dot(profile.camera_to_xyz[0], *pixel),
+                                dot(profile.camera_to_xyz[1], *pixel),
+                                dot(profile.camera_to_xyz[2], *pixel),
+                            ]
+                        })
+                        .collect();
+                    MatrixWorkingSpaceTransform::new(working_space)
+                        .transform_xyz(scene.dimensions(), xyz_pixels)
+                        .map_err(|error| NodeError::Message(error.to_string()))?
+                }
             }
             None => scene.with_working_space(working_space),
         };
@@ -668,45 +678,74 @@ fn bilinear_sample(scene: &SceneLinearRGB, x: f32, y: f32) -> [f32; 3] {
     })
 }
 
-fn cfa_channel(color: CfaColor) -> usize {
+fn validate_rgb_cfa(mosaic: &Mosaic) -> Result<(), NodeError> {
+    if mosaic
+        .cfa()
+        .colors()
+        .iter()
+        .any(|color| matches!(color, CfaColor::Extra | CfaColor::Unknown))
+    {
+        return Err(NodeError::Message(
+            "unsupported CFA: RGB nodes do not accept extra or unknown channels".to_owned(),
+        ));
+    }
+    for wanted in [CfaColor::Red, CfaColor::Green, CfaColor::Blue] {
+        if !mosaic.cfa().colors().contains(&wanted) {
+            return Err(NodeError::Message(format!(
+                "unsupported CFA: missing {wanted:?} channel"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn cfa_channel(color: CfaColor) -> Option<usize> {
     match color {
-        CfaColor::Red => 0,
-        CfaColor::Green => 1,
-        CfaColor::Blue => 2,
-        CfaColor::Extra | CfaColor::Unknown => 1,
+        CfaColor::Red => Some(0),
+        CfaColor::Green => Some(1),
+        CfaColor::Blue => Some(2),
+        CfaColor::Extra | CfaColor::Unknown => None,
     }
 }
 
-fn demosaic_channel(mosaic: &Mosaic, x: u32, y: u32, wanted: CfaColor) -> f32 {
+fn demosaic_channel(mosaic: &Mosaic, x: u32, y: u32, wanted: CfaColor) -> Result<f32, NodeError> {
     if mosaic.cfa().color_at(x, y) == Some(wanted) {
-        return mosaic.sample(x, y).unwrap_or(0.0);
+        return mosaic.sample(x, y).ok_or_else(|| {
+            NodeError::Message("demosaic sample coordinate is outside the mosaic".to_owned())
+        });
     }
-    let mut total = 0.0;
-    let mut count = 0_u32;
-    for offset_y in -1_i64..=1 {
-        for offset_x in -1_i64..=1 {
-            let sample_x = x as i64 + offset_x;
-            let sample_y = y as i64 + offset_y;
-            if sample_x < 0
-                || sample_y < 0
-                || sample_x >= i64::from(mosaic.dimensions().width)
-                || sample_y >= i64::from(mosaic.dimensions().height)
-            {
-                continue;
-            }
-            let sample_x = sample_x as u32;
-            let sample_y = sample_y as u32;
-            if mosaic.cfa().color_at(sample_x, sample_y) == Some(wanted) {
-                total += mosaic.sample(sample_x, sample_y).unwrap_or(0.0);
-                count += 1;
+
+    let dimensions = mosaic.dimensions();
+    let max_radius = dimensions.width.max(dimensions.height);
+    for radius in 1..=max_radius {
+        let min_x = x.saturating_sub(radius);
+        let max_x = x.saturating_add(radius).min(dimensions.width - 1);
+        let min_y = y.saturating_sub(radius);
+        let max_y = y.saturating_add(radius).min(dimensions.height - 1);
+        let mut total = 0.0;
+        let mut count = 0_u32;
+        for sample_y in min_y..=max_y {
+            for sample_x in min_x..=max_x {
+                let on_ring = sample_x == min_x
+                    || sample_x == max_x
+                    || sample_y == min_y
+                    || sample_y == max_y;
+                if on_ring
+                    && mosaic.cfa().color_at(sample_x, sample_y) == Some(wanted)
+                    && let Some(sample) = mosaic.sample(sample_x, sample_y)
+                {
+                    total += sample;
+                    count += 1;
+                }
             }
         }
+        if count > 0 {
+            return Ok(total / count as f32);
+        }
     }
-    if count > 0 {
-        total / count as f32
-    } else {
-        mosaic.sample(x, y).unwrap_or(0.0)
-    }
+    Err(NodeError::Message(format!(
+        "unsupported CFA: no {wanted:?} sample is available for demosaic"
+    )))
 }
 
 fn float_parameter(parameters: &Parameters, id: &str, default: f32) -> Result<f32, NodeError> {
@@ -797,7 +836,7 @@ pub fn register_nodes_with_decoder_instance<D: RawDecoder + 'static>(
 
 /// Register RAW nodes with the default rawloader adapter.
 pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_api::RegistryError> {
-    register_nodes_with_decoder(registry, Arc::new(RawloaderDecoder))
+    register_nodes_with_decoder(registry, Arc::new(RawloaderDecoder::default()))
 }
 
 /// Node pack containing the initial RAW pipeline stages.
@@ -808,7 +847,7 @@ pub struct RawNodePack {
 impl Default for RawNodePack {
     fn default() -> Self {
         Self {
-            decoder: Arc::new(RawloaderDecoder),
+            decoder: Arc::new(RawloaderDecoder::default()),
         }
     }
 }

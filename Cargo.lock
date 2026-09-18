@@ -796,6 +796,7 @@ dependencies = [
  "rawloader",
  "rawweave-image",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

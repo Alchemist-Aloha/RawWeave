@@ -2,8 +2,10 @@ use rawweave_image::Dimensions;
 use rawweave_raw::{
     CameraMetadata, CameraProfile, CfaColor, CfaPattern, DeterministicCorpus, DeterministicDecoder,
     EmbeddedPreview, ExifMetadata, LensProfile, LensProfileProvider, LensProfileRegistry, Mosaic,
-    Orientation, RawDecoder, RawFrame, parse_exif_metadata,
+    Orientation, RawDecodeLimits, RawDecoder, RawError, RawFrame, RawloaderDecoder,
+    parse_exif_metadata,
 };
+use serde_json::json;
 
 fn fixture_frame() -> RawFrame {
     let mosaic = Mosaic::new(
@@ -214,6 +216,16 @@ fn built_in_lens_profiles_normalize_keys_and_mark_unknown_lenses_unavailable() {
     assert!(
         registry
             .profile_for(&CameraMetadata {
+                make: "Canon".to_owned(),
+                model: "EOS R5".to_owned(),
+                lens: Some("RF 50mm F1.2 L USM".to_owned()),
+                ..CameraMetadata::default()
+            })
+            .is_none()
+    );
+    assert!(
+        registry
+            .profile_for(&CameraMetadata {
                 make: "Unknown".to_owned(),
                 model: "Body".to_owned(),
                 lens: Some("Lens".to_owned()),
@@ -236,6 +248,83 @@ fn embedded_preview_preserves_availability_and_mime_type() {
     let available = EmbeddedPreview::new(Some(vec![0xff, 0xd8]), Some("image/jpeg"));
     assert_eq!(available.bytes(), Some(&[0xff, 0xd8][..]));
     assert_eq!(available.mime_type(), Some("image/jpeg"));
+}
+
+#[test]
+fn serde_rejects_empty_cfa_and_invalid_mosaic_dimensions() {
+    let empty_cfa = json!({
+        "width": 0,
+        "height": 0,
+        "colors": []
+    });
+    assert!(serde_json::from_value::<CfaPattern>(empty_cfa).is_err());
+
+    let invalid_mosaic = json!({
+        "dimensions": {"width": 0, "height": 2},
+        "samples": [],
+        "bit_depth": 12,
+        "cfa": {"width": 1, "height": 1, "colors": ["Red"]},
+        "orientation": "Normal"
+    });
+    assert!(serde_json::from_value::<Mosaic>(invalid_mosaic).is_err());
+}
+
+#[test]
+fn camera_profile_legacy_payload_derives_camera_to_xyz_from_source_matrix() {
+    let payload = json!({
+        "make": "Legacy",
+        "model": "Camera",
+        "xyz_to_camera": [
+            [2.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 0.0, 5.0],
+            [0.0, 0.0, 0.0]
+        ]
+    });
+    let profile: CameraProfile = serde_json::from_value(payload).unwrap();
+    assert_eq!(
+        profile.camera_to_xyz,
+        [[0.5, 0.0, 0.0], [0.0, 0.25, 0.0], [0.0, 0.0, 0.2]]
+    );
+}
+
+#[test]
+fn raw_frame_legacy_preview_and_invalid_levels_are_migrated_or_rejected() {
+    let mut legacy = serde_json::to_value(fixture_frame()).unwrap();
+    legacy["embedded_preview"] = json!([0xff, 0xd8, 0xff, 0xd9]);
+    let migrated: RawFrame = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+        migrated.embedded_preview_bytes(),
+        Some(&[0xff, 0xd8, 0xff, 0xd9][..])
+    );
+
+    let mut invalid = serde_json::to_value(fixture_frame()).unwrap();
+    invalid["black_levels"] = json!([4096.0, 64.0, 64.0, 64.0]);
+    assert!(serde_json::from_value::<RawFrame>(invalid).is_err());
+}
+
+#[test]
+fn decoder_limits_reject_oversized_bytes_before_rawloader() {
+    let limits = RawDecodeLimits {
+        max_input_bytes: 3,
+        max_samples: 8,
+        max_pixels: 8,
+        max_width: 8,
+        max_height: 8,
+    };
+    let decoder = RawloaderDecoder::with_limits(limits);
+    let error = decoder.decode_bytes(b"1234").unwrap_err();
+    assert_eq!(error, RawError::InputTooLarge { actual: 4, max: 3 });
+
+    let path = std::env::temp_dir().join(format!(
+        "rawweave-limit-test-{}-{}.raw",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::write(&path, b"1234").unwrap();
+    let file_error = decoder.decode_file(&path).unwrap_err();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(file_error, error);
 }
 
 fn crafted_tiff_exif() -> Vec<u8> {

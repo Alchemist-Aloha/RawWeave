@@ -10,3 +10,6 @@ rawloader = "0.37.2"
 rawweave-image.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
