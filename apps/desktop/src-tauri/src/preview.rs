@@ -434,9 +434,40 @@ pub fn render_preview(
         let source_image = source_image.ok_or_else(|| {
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
+        let full_frame = editor
+            .evaluate(
+                &request.node_id,
+                &request.output_port,
+                EvaluationContext::with_source_image(source_image.clone()),
+            )
+            .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
+        let Value::Image(full_frame) = full_frame else {
+            return Err(format!(
+                "preview output '{}:{}' is not an image",
+                request.node_id, request.output_port
+            ));
+        };
+        let full_width = full_frame.width();
+        let full_height = full_frame.height();
+        let full_origin = full_frame.origin();
+        let requested_region = Region::new(
+            full_origin
+                .0
+                .checked_add(request.region.x)
+                .ok_or_else(|| "preview region x overflowed the output origin".to_owned())?,
+            full_origin
+                .1
+                .checked_add(request.region.y)
+                .ok_or_else(|| "preview region y overflowed the output origin".to_owned())?,
+            request.region.width,
+            request.region.height,
+        );
+        if manager.is_cancelled(&request.request_id) {
+            return Err("preview cancelled".to_owned());
+        }
         let context = EvaluationContext::with_source_image(source_image).with_tile_request(
             TileRequest::new(
-                request.region.into(),
+                requested_region,
                 request.tile.into(),
                 request.mip,
                 request.quality.into(),
@@ -454,9 +485,7 @@ pub fn render_preview(
                 request.node_id, request.output_port
             ));
         };
-        let full_width = image.width();
-        let full_height = image.height();
-        let image = select_preview_image(&image, request.region.into(), request.mip)?;
+        let image = select_preview_image(&image, requested_region, request.mip)?;
         let latest_revision = current_editor
             .lock()
             .map_err(|_| "editor state is unavailable".to_owned())?
@@ -651,6 +680,89 @@ mod tests {
         assert_eq!((metadata.width, metadata.height), (2, 2));
         assert_eq!((metadata.full_width, metadata.full_height), (2, 2));
         assert!(manager.store.get(&preview_path("open-render")).is_some());
+    }
+
+    #[test]
+    fn reports_full_logical_dimensions_for_region_limited_intermediate_outputs() {
+        let source = Image::new(4, 3).unwrap();
+        let manager = PreviewManager::default();
+
+        let cases = [
+            ("exposure", "core.exposure", vec![("exposure", 1.0_f32)]),
+            (
+                "crop",
+                "core.crop",
+                vec![("x", 1.0), ("y", 1.0), ("width", 2.0), ("height", 2.0)],
+            ),
+            (
+                "resize",
+                "core.resize",
+                vec![("width", 8.0), ("height", 6.0)],
+            ),
+        ];
+
+        for (request_id, type_id, parameters) in cases {
+            let mut editor = EditorCore::default();
+            editor.add_node("input", "core.image-input").unwrap();
+            editor.add_node("target", type_id).unwrap();
+            editor
+                .connect("input", "image", "target", "image")
+                .unwrap();
+            for (parameter_id, value) in parameters {
+                editor
+                    .set_node_parameter("target", parameter_id, value.into())
+                    .unwrap();
+            }
+            let revision = editor.graph().revision();
+            let request = PreviewRequest {
+                request_id: request_id.to_owned(),
+                revision,
+                node_id: "target".to_owned(),
+                output_port: "image".to_owned(),
+                quality: PreviewQualityRequest::Preview,
+                region: match request_id {
+                    "resize" => PreviewRegionRequest {
+                        x: 2,
+                        y: 1,
+                        width: 4,
+                        height: 3,
+                    },
+                    _ => PreviewRegionRequest {
+                        x: 0,
+                        y: 0,
+                        width: 2,
+                        height: 2,
+                    },
+                },
+                tile: PreviewTileRequest { x: 0, y: 0 },
+                mip: 0,
+            };
+            let current_editor = Arc::new(Mutex::new(editor.clone()));
+            let metadata = render_preview(
+                &manager,
+                &editor,
+                &current_editor,
+                Some(source.clone()),
+                request,
+            )
+            .unwrap();
+
+            match request_id {
+                "exposure" => {
+                    assert_eq!((metadata.full_width, metadata.full_height), (4, 3));
+                    assert_eq!((metadata.width, metadata.height), (2, 2));
+                }
+                "crop" => {
+                    assert_eq!((metadata.full_width, metadata.full_height), (2, 2));
+                    assert_eq!((metadata.width, metadata.height), (2, 2));
+                }
+                "resize" => {
+                    assert_eq!((metadata.full_width, metadata.full_height), (8, 6));
+                    assert_eq!((metadata.width, metadata.height), (4, 3));
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

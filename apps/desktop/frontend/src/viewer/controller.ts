@@ -27,6 +27,7 @@ function paneState(): ViewerPaneState {
     error: null,
     requestId: null,
     zoom: 1,
+    displayScale: 1,
     zoomMode: 'fit',
     pan: { x: 0, y: 0 },
   };
@@ -37,8 +38,15 @@ function clampZoom(value: number): number {
 }
 
 const TILE_SIZE = 32;
+const MAX_MIP = 8;
 const DEFAULT_DIMENSIONS: ImageDimensions = { width: 1, height: 1 };
 const DEFAULT_VIEWPORT: ImageDimensions = { width: 1, height: 1 };
+
+interface RequestPlan {
+  region: PreviewRegion;
+  mip: number;
+  zoom: number;
+}
 
 function clampInteger(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, Math.floor(value)));
@@ -59,8 +67,21 @@ function visibleRegion(
   return { x, y, width, height };
 }
 
+function fitZoom(dimensions: ImageDimensions, viewport: ImageDimensions): number {
+  return clampZoom(Math.min(viewport.width / dimensions.width, viewport.height / dimensions.height));
+}
+
 function mipForZoom(zoom: number): number {
-  return Math.min(8, Math.max(0, Math.floor(Math.log2(1 / zoom))));
+  return Math.min(MAX_MIP, Math.max(0, Math.floor(Math.log2(1 / zoom))));
+}
+
+function sameRegion(first: PreviewRegion, second: PreviewRegion): boolean {
+  return (
+    first.x === second.x &&
+    first.y === second.y &&
+    first.width === second.width &&
+    first.height === second.height
+  );
 }
 
 export class ViewerController {
@@ -123,12 +144,17 @@ export class ViewerController {
     this.startRequest(viewer, target);
   }
 
-  private requestRegion(viewer: ViewerId): { region: PreviewRegion; mip: number } {
+  private requestPlan(viewer: ViewerId): RequestPlan {
     const pane = this.state.panes[viewer];
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
     const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
-    const mip = mipForZoom(pane.zoom);
-    return { region: visibleRegion(dimensions, viewport, pane.zoom, pane.pan), mip };
+    const zoom = pane.zoomMode === 'fit' ? fitZoom(dimensions, viewport) : pane.zoom;
+    const mip = mipForZoom(zoom);
+    const region =
+      pane.zoomMode === 'fit'
+        ? { x: 0, y: 0, width: dimensions.width, height: dimensions.height }
+        : visibleRegion(dimensions, viewport, zoom, pane.pan);
+    return { region, mip, zoom };
   }
 
   public setSourceDimensions(dimensions: ImageDimensions): void {
@@ -206,19 +232,26 @@ export class ViewerController {
   }
 
   private startRequest(viewer: ViewerId, target: PreviewTarget): void {
-    const { region, mip } = this.requestRegion(viewer);
+    const plan = this.requestPlan(viewer);
     const request: PreviewRequest = {
       requestId: this.requestId(viewer),
       revision: this.state.currentRevision,
       nodeId: target.nodeId,
       outputPort: target.outputPort,
-      quality: mip > 0 ? 'draft' : 'preview',
-      region,
-      tile: { x: Math.floor(region.x / TILE_SIZE), y: Math.floor(region.y / TILE_SIZE) },
-      mip,
+      quality: plan.mip > 0 ? 'draft' : 'preview',
+      region: plan.region,
+      tile: { x: Math.floor(plan.region.x / TILE_SIZE), y: Math.floor(plan.region.y / TILE_SIZE) },
+      mip: plan.mip,
     };
     this.active.set(viewer, { request });
-    this.setPane(viewer, { status: 'loading', requestId: request.requestId, progress: 0, error: null });
+    this.setPane(viewer, {
+      zoom: plan.zoom,
+      displayScale: plan.zoom * 2 ** plan.mip,
+      status: 'loading',
+      requestId: request.requestId,
+      progress: 0,
+      error: null,
+    });
     void this.transport
       .requestPreview(request, (progress) => {
         if (this.active.get(viewer)?.request.requestId !== request.requestId) return;
@@ -240,6 +273,16 @@ export class ViewerController {
           width: Math.max(1, result.fullWidth),
           height: Math.max(1, result.fullHeight),
         });
+        const nextPlan = this.requestPlan(viewer);
+        if (
+          this.state.panes[viewer].zoomMode === 'fit' &&
+          (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip)
+        ) {
+          void this.transport.releasePreview(result.url).catch(() => undefined);
+          this.setPane(viewer, { imageUrl: null, width: null, height: null });
+          this.startRequest(viewer, target);
+          return;
+        }
         this.setPane(viewer, {
           imageUrl: result.url,
           width: result.width,

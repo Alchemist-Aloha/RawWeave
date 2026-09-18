@@ -76,11 +76,13 @@ pub struct CacheKey {
     pub node_id: String,
     pub implementation_version: u32,
     pub parameter_hash: u64,
+    pub output_schema_hash: u64,
     pub upstream_hash: u64,
     pub region: Region,
     pub tile: TileCoord,
     pub mip_level: u8,
     pub quality: PreviewQuality,
+    pub backend_identity: u64,
 }
 
 impl CacheKey {
@@ -89,21 +91,25 @@ impl CacheKey {
         node_id: impl Into<String>,
         implementation_version: u32,
         parameter_hash: u64,
+        output_schema_hash: u64,
         upstream_hash: u64,
         region: Region,
         tile: TileCoord,
         mip_level: u8,
         quality: PreviewQuality,
+        backend_identity: u64,
     ) -> Self {
         Self {
             node_id: node_id.into(),
             implementation_version,
             parameter_hash,
+            output_schema_hash,
             upstream_hash,
             region,
             tile,
             mip_level,
             quality,
+            backend_identity,
         }
     }
 }

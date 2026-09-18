@@ -166,17 +166,22 @@ async fn request_preview(
     result
 }
 
-#[tauri::command]
-fn open_image(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<preview::OpenImageMetadata, String> {
-    let image = preview::decode_image_file(&path)?;
+fn open_image_file(path: &str) -> Result<(Image, preview::OpenImageMetadata), String> {
+    let image = preview::decode_image_file(path)?;
     let metadata = preview::OpenImageMetadata {
         width: image.width(),
         height: image.height(),
         revision: image.revision(),
     };
+    Ok((image, metadata))
+}
+
+#[tauri::command]
+fn open_image(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<preview::OpenImageMetadata, String> {
+    let (image, metadata) = open_image_file(&path)?;
     *state
         .source_image
         .lock()
@@ -223,4 +228,39 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running RawWeave");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use png::{BitDepth, ColorType, Encoder};
+    use std::io::Cursor;
+
+    #[test]
+    fn open_image_file_returns_source_dimensions_and_revision() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-open-image-helper-{}.png",
+            std::process::id()
+        ));
+        let mut bytes = Vec::new();
+        let mut encoder = Encoder::new(Cursor::new(&mut bytes), 3, 2);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                128, 128, 128, 255, 0, 0, 0, 255,
+            ])
+            .unwrap();
+        writer.finish().unwrap();
+        std::fs::write(&path, bytes).unwrap();
+
+        let (image, metadata) = open_image_file(path.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!((image.width(), image.height()), (3, 2));
+        assert_eq!((metadata.width, metadata.height), (3, 2));
+        assert_eq!(metadata.revision, image.revision());
+    }
 }

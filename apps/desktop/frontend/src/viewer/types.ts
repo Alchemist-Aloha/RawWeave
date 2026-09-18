@@ -59,6 +59,7 @@ export interface ViewerPaneState {
   error: string | null;
   requestId: string | null;
   zoom: number;
+  displayScale: number;
   zoomMode: ViewerZoomMode;
   pan: { x: number; y: number };
 }

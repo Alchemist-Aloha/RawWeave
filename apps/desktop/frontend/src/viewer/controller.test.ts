@@ -40,15 +40,21 @@ class FakeTransport implements PreviewTransport {
   }
 }
 
-function result(request: PreviewRequest, revision = request.revision): PreviewResult {
+function result(
+  request: PreviewRequest,
+  dimensions: Partial<{ width: number; height: number; fullWidth?: number; fullHeight?: number }> = {},
+  revision = request.revision,
+): PreviewResult {
+  const width = dimensions.width ?? 1;
+  const height = dimensions.height ?? 1;
   return {
     requestId: request.requestId,
     revision,
     url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
-    width: 2,
-    height: 2,
-    fullWidth: 2,
-    fullHeight: 2,
+    width,
+    height,
+    fullWidth: dimensions.fullWidth ?? width,
+    fullHeight: dimensions.fullHeight ?? height,
     mimeType: 'image/png',
   };
 }
@@ -82,7 +88,7 @@ describe('viewer controller', () => {
     const request = transport.requests[0];
 
     viewer.setRevision(11);
-    transport.pending.get(request.requestId)!.resolve(result(request, 10));
+    transport.pending.get(request.requestId)!.resolve(result(request, {}, 10));
     await Promise.resolve();
 
     expect(viewer.state.panes.B.imageUrl).toBeNull();
@@ -122,6 +128,7 @@ describe('viewer controller', () => {
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
     viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.viewAt100('A');
     viewer.setTarget('A', target('output'));
 
     expect(transport.requests[0]).toMatchObject({
@@ -139,6 +146,63 @@ describe('viewer controller', () => {
       tile: { x: 3, y: 2 },
       quality: 'draft',
     });
+  });
+
+  it('fits the complete image by requesting the full frame at viewport resolution', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.setTarget('A', target('output'));
+
+    expect(transport.requests[0]).toMatchObject({
+      region: { x: 0, y: 0, width: 400, height: 300 },
+      mip: 2,
+      quality: 'draft',
+    });
+    expect(viewer.state.panes.A.zoom).toBe(0.25);
+    expect(viewer.state.panes.A.displayScale).toBe(1);
+  });
+
+  it('compensates a zoomed-out mip in the image display scale', async () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.viewAt100('A');
+    viewer.setTarget('A', target('output'));
+    viewer.setZoom('A', 0.5);
+
+    const request = transport.requests.at(-1)!;
+    expect(request).toMatchObject({
+      region: { x: 100, y: 70, width: 200, height: 160 },
+      mip: 1,
+    });
+    transport.pending.get(request.requestId)!.resolve(result(request, { width: 100, height: 80, fullWidth: 400, fullHeight: 300 }));
+    await Promise.resolve();
+
+    expect(viewer.state.panes.A.width).toBe(100);
+    expect(viewer.state.panes.A.height).toBe(80);
+    expect(viewer.state.panes.A.displayScale).toBe(1);
+  });
+
+  it('re-fits and keeps true output dimensions for an intermediate resize', async () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.setTarget('A', target('resize'));
+
+    const first = transport.requests[0];
+    transport.pending.get(first.requestId)!.resolve(result(first, { width: 100, height: 75, fullWidth: 800, fullHeight: 600 }));
+    await Promise.resolve();
+
+    expect(transport.requests.at(-1)).toMatchObject({
+      region: { x: 0, y: 0, width: 800, height: 600 },
+      mip: 3,
+    });
+    expect(viewer.state.panes.A.zoom).toBe(0.125);
+    expect(viewer.state.panes.A.displayScale).toBe(1);
   });
 
   it('releases an old protocol URL when a pane replaces its preview', async () => {

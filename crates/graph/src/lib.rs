@@ -489,11 +489,13 @@ impl Graph {
             node.id.as_str(),
             node.descriptor.version,
             hash_parameters(&node.parameters),
+            hash_output_schema(node),
             upstream_hasher.finish(),
             execution_context.requested_region().unwrap_or_default(),
             execution_context.tile(),
             execution_context.mip_level(),
             execution_context.quality(),
+            backend_identity_hash(&execution_context),
         );
         let current_revision = self.graph_revision();
         let cached = self
@@ -574,6 +576,12 @@ fn backend_identity(context: &EvaluationContext) -> BackendIdentity {
     }
 }
 
+fn backend_identity_hash(context: &EvaluationContext) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    backend_identity(context).hash(&mut hasher);
+    hasher.finish()
+}
+
 fn cached_node_result(node: &GraphNode, cached: RenderResult) -> Option<NodeResult> {
     let output = node.descriptor.outputs.first()?;
     (node.descriptor.outputs.len() == 1 && output.data_type == "core.Image").then(|| {
@@ -592,6 +600,16 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
             Value::Image(image) => Some(image),
             Value::Float(_) => None,
         })
+}
+
+fn hash_output_schema(node: &GraphNode) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for output in &node.descriptor.outputs {
+        output.id.hash(&mut hasher);
+        output.name.hash(&mut hasher);
+        output.data_type.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn hash_parameters(parameters: &rawweave_node_api::Parameters) -> u64 {

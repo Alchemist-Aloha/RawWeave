@@ -117,7 +117,7 @@ function Pane({ viewer, pane, options, controller }: {
             height={pane.height ?? undefined}
             src={pane.imageUrl}
             style={{
-              transform: `translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.zoom})`,
+              transform: `translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
             }}
             width={pane.width ?? undefined}
           />

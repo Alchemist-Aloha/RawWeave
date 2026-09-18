@@ -8,16 +8,18 @@ fn image() -> Image {
 }
 
 fn key(quality: PreviewQuality) -> CacheKey {
-    CacheKey {
-        node_id: "resize-node".to_owned(),
-        implementation_version: 1,
-        parameter_hash: 11,
-        upstream_hash: 22,
-        region: Region::new(0, 0, 1, 1),
-        tile: TileCoord::new(0, 0),
-        mip_level: 0,
+    CacheKey::new(
+        "resize-node",
+        1,
+        11,
+        33,
+        22,
+        Region::new(0, 0, 1, 1),
+        TileCoord::new(0, 0),
+        0,
         quality,
-    }
+        44,
+    )
 }
 
 #[test]
