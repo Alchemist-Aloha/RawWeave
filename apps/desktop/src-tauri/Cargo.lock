@@ -2839,6 +2839,8 @@ dependencies = [
  "image",
  "png 0.17.16",
  "rawweave-color",
+ "rawweave-core",
+ "rawweave-graph",
  "rawweave-image",
  "rawweave-node-api",
  "rawweave-project",
@@ -2862,6 +2864,7 @@ dependencies = [
  "rawweave-rendering",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.20",
 ]
 
