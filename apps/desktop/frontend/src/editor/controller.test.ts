@@ -330,4 +330,18 @@ describe('editor controller', () => {
     await reopened.setParameter('output', 'missing', 'value').catch(() => undefined);
     expect(reopened.state.workflowHash).toBe(firstHash);
   });
+
+  it('preserves the imported blueprint identity when instantiating', async () => {
+    const editor = await controller();
+    const exported = await editor.exportBlueprint();
+    const blueprint = JSON.parse(exported) as Record<string, unknown>;
+    blueprint.identity = { id: 'looks.exposure', version: '2.0.0' };
+    blueprint.metadata = { name: 'Exposure look' };
+
+    await editor.importBlueprint(JSON.stringify(blueprint));
+    await editor.instantiateBlueprint();
+
+    const saved = JSON.parse(await editor.saveBlueprint()) as { identity: { id: string; version: string } };
+    expect(saved.identity).toEqual({ id: 'looks.exposure', version: '2.0.0' });
+  });
 });

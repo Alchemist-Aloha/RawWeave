@@ -303,7 +303,11 @@ export default function App() {
   const navigateToScope = useCallback(
     async (index: number) => {
       while (controller.state.scopePath.length - 1 > index) {
-        await controller.returnToParent().catch(() => undefined);
+        try {
+          await controller.returnToParent();
+        } catch {
+          return;
+        }
       }
     },
     [controller],
@@ -498,6 +502,23 @@ export default function App() {
                   </span>
                 ))}
               </nav>
+              {controller.state.nestedSubgraphs.length > 0 && (
+                <div aria-label="Nested subgraphs" className="nested-subgraphs">
+                  <span className="eyebrow">Nested</span>
+                  {controller.state.nestedSubgraphs.map((subgraph) => (
+                    <button
+                      aria-label={`Open ${subgraph.name} subgraph`}
+                      className="button button--small"
+                      key={subgraph.id}
+                      onClick={() => openNestedSubgraph(subgraph.id)}
+                      title={`${subgraph.name} · ${subgraph.version}`}
+                      type="button"
+                    >
+                      {subgraph.name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="canvas-panel__status">
               <span className="canvas-panel__meta">
@@ -543,8 +564,12 @@ export default function App() {
         </section>
         <Inspector
           node={selectedNode}
+          selectedNodeIds={controller.state.selectedNodeIds}
+          workflowInputs={controller.state.workflowInputs}
+          workflowOutputs={controller.state.workflowOutputs}
           onChange={onParameterChange}
           onToggleExposed={onToggleExposed}
+          onToggleInput={onToggleInput}
           onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
         />
       </section>

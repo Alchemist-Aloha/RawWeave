@@ -5,6 +5,7 @@ import type {
   DependencyStatus,
   EditorPlatform,
   ExecutionCapability,
+  LazyInputGate,
   NodeDescriptor,
   OpenImageResult,
   ParameterType,
@@ -42,6 +43,7 @@ interface RustDescriptor {
   outputs: RustPort[];
   parameters: RustParameter[];
   capabilities?: string[];
+  lazy_inputs?: LazyInputGate[];
 }
 
 interface RustOpenImageResult {
@@ -223,6 +225,7 @@ function mapDescriptor(descriptor: RustDescriptor): NodeDescriptor {
       max: parameter.max,
     })),
     capabilities: descriptor.capabilities?.map(mapCapability),
+    lazyInputs: descriptor.lazy_inputs,
   };
 }
 
@@ -439,6 +442,11 @@ export function createTauriPlatform(): EditorPlatform {
       }];
     }
   };
+  const refreshActiveDefinition = async (): Promise<void> => {
+    if (!activeDefinition) return;
+    const serialized = await invoke<string>('save_blueprint');
+    rememberDefinition(mapWorkflowDefinition(JSON.parse(serialized) as RustWorkflowDefinition));
+  };
   return {
     async nodeDescriptors() {
       try {
@@ -476,6 +484,7 @@ export function createTauriPlatform(): EditorPlatform {
     async addNode(nodeId, typeId) {
       try {
         await invoke('add_node', { nodeId, typeId });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -483,6 +492,7 @@ export function createTauriPlatform(): EditorPlatform {
     async removeNode(nodeId) {
       try {
         await invoke('remove_node', { nodeId });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -490,6 +500,7 @@ export function createTauriPlatform(): EditorPlatform {
     async connect(fromNode, fromPort, toNode, toPort) {
       try {
         await invoke('connect_nodes', { fromNode, fromPort, toNode, toPort });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -497,6 +508,7 @@ export function createTauriPlatform(): EditorPlatform {
     async disconnect(fromNode, fromPort, toNode, toPort) {
       try {
         await invoke('disconnect_nodes', { fromNode, fromPort, toNode, toPort });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -512,6 +524,7 @@ export function createTauriPlatform(): EditorPlatform {
           parameterId,
           value: toRustValue(value, parameterType),
         });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -519,6 +532,7 @@ export function createTauriPlatform(): EditorPlatform {
     async exposeParameter(nodeId, parameterId) {
       try {
         await invoke('expose_parameter', { nodeId, parameterId });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -526,6 +540,7 @@ export function createTauriPlatform(): EditorPlatform {
     async unexposeParameter(nodeId, parameterId) {
       try {
         await invoke('unexpose_parameter', { nodeId, parameterId });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }
@@ -652,6 +667,7 @@ export function createTauriPlatform(): EditorPlatform {
     async instantiateBlueprint(serialized) {
       try {
         await invoke('instantiate_blueprint', { serialized });
+        await refreshActiveDefinition();
       } catch (error) {
         throw message(error);
       }

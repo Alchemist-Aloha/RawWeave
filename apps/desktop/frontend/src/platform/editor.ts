@@ -233,8 +233,9 @@ function controlDescriptor(
   inputs: PortDescriptor[],
   outputs: PortDescriptor[],
   parameters: NodeDescriptor['parameters'] = [],
+  lazyInputs: NodeDescriptor['lazyInputs'] = [],
 ): NodeDescriptor {
-  return { typeId, name, version: 1, inputs, outputs, parameters, capabilities: ['CPU'] };
+  return { typeId, name, version: 1, inputs, outputs, parameters, capabilities: ['CPU'], lazyInputs };
 }
 
 const conditionInput = input('value', 'Value', 'value.Condition', true);
@@ -313,6 +314,15 @@ const logicDescriptors: NodeDescriptor[] = [
       input('false', 'False', 'core.Any', false),
     ],
     [outputPort('value', 'Value', 'core.Any')],
+    [],
+    [{
+      selector: 'condition',
+      required: ['condition'],
+      branches: [
+        { condition: 'True', inputs: ['true'] },
+        { condition: 'False', inputs: ['false'] },
+      ],
+    }],
   ),
   controlDescriptor(
     'core.select',
@@ -325,6 +335,17 @@ const logicDescriptors: NodeDescriptor[] = [
       input('d', 'D', 'core.Any', false),
     ],
     [outputPort('value', 'Value', 'core.Any')],
+    [],
+    [{
+      selector: 'index',
+      required: ['index'],
+      branches: [
+        { condition: { Index: 0 }, inputs: ['a'] },
+        { condition: { Index: 1 }, inputs: ['b'] },
+        { condition: { Index: 2 }, inputs: ['c'] },
+        { condition: { Index: 3 }, inputs: ['d'] },
+      ],
+    }],
   ),
   controlDescriptor(
     'core.enum-select',
@@ -491,28 +512,93 @@ function hasCycle(edges: PlatformEdge[]): boolean {
   return [...new Set(edges.flatMap((edge) => [edge.fromNode, edge.toNode]))].some(visit);
 }
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, item]) => item !== undefined)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`;
+function rotateRight(value: number, amount: number): number {
+  return (value >>> amount) | (value << (32 - amount));
 }
 
-async function stableHash(value: unknown): Promise<string> {
-  const serialized = stableStringify(value);
+function sha256Fallback(bytes: Uint8Array): string {
+  const constants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const bitLength = bytes.length * 8;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLength - 4, bitLength >>> 0);
+  view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000));
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const words = new Uint32Array(64);
+
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4);
+    for (let index = 16; index < 64; index += 1) {
+      const s0 = rotateRight(words[index - 15], 7) ^ rotateRight(words[index - 15], 18) ^ (words[index - 15] >>> 3);
+      const s1 = rotateRight(words[index - 2], 17) ^ rotateRight(words[index - 2], 19) ^ (words[index - 2] >>> 10);
+      words[index] = (words[index - 16] + s0 + words[index - 7] + s1) >>> 0;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let index = 0; index < 64; index += 1) {
+      const s1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
+      const choice = (e & f) ^ (~e & g);
+      const temp1 = (h + s1 + choice + constants[index] + words[index]) >>> 0;
+      const s0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (s0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((word) => word.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+async function stableHash(serialized: string): Promise<string> {
   const bytes = new TextEncoder().encode(serialized);
   if (globalThis.crypto?.subtle) {
     const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
     return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
   }
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return hash.toString(16).padStart(16, '0');
+  return sha256Fallback(bytes);
 }
 
 function emptyDependencyReport(): DependencyReport {
@@ -555,8 +641,166 @@ function workflowDocument(definition: WorkflowDefinition): Omit<WorkflowDefiniti
   return document;
 }
 
-async function definitionHash(definition: WorkflowDefinition): Promise<string> {
-  return stableHash(workflowDocument(definition));
+function rustParameterValue(value: ParameterValue, parameterType: ParameterType): Record<string, unknown> {
+  if (parameterType === 'Float') return { Float: typeof value === 'number' ? Math.fround(value) : value };
+  if (parameterType === 'Integer') return { Integer: typeof value === 'number' ? Math.trunc(value) : value };
+  if (parameterType === 'Boolean') return { Boolean: Boolean(value) };
+  return { String: String(value) };
+}
+
+function rustCapability(capability: ExecutionCapability): string {
+  switch (capability) {
+    case 'GPU': return 'Gpu';
+    case 'TileLocal': return 'TileLocal';
+    case 'RegionAware': return 'RegionAware';
+    case 'FullFrame': return 'FullFrame';
+    default: return 'Cpu';
+  }
+}
+
+function rustPortDescriptor(port: PortDescriptor): Record<string, unknown> {
+  return {
+    id: port.id,
+    name: port.name,
+    data_type: port.dataType,
+    required: port.required,
+  };
+}
+
+function rustParameterDescriptor(parameter: NodeDescriptor['parameters'][number]): Record<string, unknown> {
+  return {
+    id: parameter.id,
+    name: parameter.name,
+    parameter_type: parameter.parameterType,
+    default: rustParameterValue(parameter.default, parameter.parameterType),
+    min: parameter.min,
+    max: parameter.max,
+  };
+}
+
+function rustNodeDescriptor(descriptor: NodeDescriptor): Record<string, unknown> {
+  return {
+    type_id: descriptor.typeId,
+    name: descriptor.name,
+    version: descriptor.version,
+    inputs: descriptor.inputs.map(rustPortDescriptor),
+    outputs: descriptor.outputs.map(rustPortDescriptor),
+    parameters: descriptor.parameters.map(rustParameterDescriptor),
+    capabilities: (descriptor.capabilities ?? []).map(rustCapability),
+    ...(descriptor.lazyInputs && descriptor.lazyInputs.length > 0
+      ? { lazy_inputs: descriptor.lazyInputs }
+      : {}),
+  };
+}
+
+function stringCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function rustGraphNode(node: PlatformNode, descriptors: NodeDescriptor[]): Record<string, unknown> {
+  const descriptor = descriptorFor(descriptors, node.typeId);
+  const parameters = Object.fromEntries(
+    Object.entries(node.parameters)
+      .sort(([left], [right]) => stringCompare(left, right))
+      .map(([id, value]) => {
+        const parameterType = descriptor.parameters.find((candidate) => candidate.id === id)?.parameterType ?? 'String';
+        return [id, rustParameterValue(value, parameterType)];
+      }),
+  );
+  return {
+    id: node.id,
+    type_id: node.typeId,
+    descriptor: rustNodeDescriptor(descriptor),
+    parameters,
+    exposed_parameters: [...new Set(node.exposedParameters ?? [])].sort(stringCompare),
+  };
+}
+
+function rustWorkflowPort(port: WorkflowPort): Record<string, unknown> {
+  return {
+    id: port.id,
+    name: port.name,
+    direction: port.direction,
+    node_id: port.nodeId,
+    port_id: port.portId,
+    data_type: port.dataType,
+    required: port.required,
+  };
+}
+
+function rustWorkflowParameter(parameter: WorkflowParameter): Record<string, unknown> {
+  return {
+    id: parameter.id,
+    name: parameter.name,
+    node_id: parameter.nodeId,
+    parameter_id: parameter.parameterId,
+    parameter_type: parameter.parameterType,
+    default: rustParameterValue(parameter.default, parameter.parameterType),
+  };
+}
+
+function canonicalHashDocument(
+  definition: WorkflowDefinition,
+  descriptors: NodeDescriptor[],
+  nestedHashes: Record<string, string>,
+): Record<string, unknown> {
+  const nodes = Object.fromEntries(
+    definition.graph.nodes
+      .slice()
+      .sort((left, right) => stringCompare(left.id, right.id))
+      .map((node) => [node.id, rustGraphNode(node, descriptors)]),
+  );
+  const parameters = Object.fromEntries(
+    definition.parameters
+      .slice()
+      .sort((left, right) => stringCompare(left.id, right.id))
+      .map((parameter) => [parameter.id, rustWorkflowParameter(parameter)]),
+  );
+  const sortPorts = (left: WorkflowPort, right: WorkflowPort) => stringCompare(left.id, right.id);
+  const sortEdges = (left: PlatformEdge, right: PlatformEdge) =>
+    stringCompare(
+      `${left.fromNode}\u0000${left.fromPort}\u0000${left.toNode}\u0000${left.toPort}`,
+      `${right.fromNode}\u0000${right.fromPort}\u0000${right.toNode}\u0000${right.toPort}`,
+    );
+  return {
+    identity: { id: definition.identity.id, version: definition.identity.version },
+    nodes,
+    edges: definition.graph.edges
+      .slice()
+      .sort(sortEdges)
+      .map((edge) => ({
+        from_node: edge.fromNode,
+        from_port: edge.fromPort,
+        to_node: edge.toNode,
+        to_port: edge.toPort,
+      })),
+    parameters,
+    inputs: definition.inputs.slice().sort(sortPorts).map(rustWorkflowPort),
+    outputs: definition.outputs.slice().sort(sortPorts).map(rustWorkflowPort),
+    subgraph_dependencies: definition.subgraphDependencies
+      .slice()
+      .sort((left, right) => stringCompare(`${left.id}\u0000${left.version}\u0000${left.hash ?? ''}`, `${right.id}\u0000${right.version}\u0000${right.hash ?? ''}`))
+      .map((dependency) => ({ id: dependency.id, version: dependency.version, hash: dependency.hash ?? '' })),
+    node_pack_dependencies: definition.nodePackDependencies
+      .slice()
+      .sort((left, right) => stringCompare(`${left.id}\u0000${left.version}`, `${right.id}\u0000${right.version}`))
+      .map((dependency) => ({ id: dependency.id, version: dependency.version })),
+    nested_hashes: Object.fromEntries(
+      Object.entries(nestedHashes).sort(([left], [right]) => stringCompare(left, right)),
+    ),
+  };
+}
+
+async function definitionHash(definition: WorkflowDefinition, descriptors: NodeDescriptor[]): Promise<string> {
+  const nestedHashes = Object.fromEntries(
+    await Promise.all(
+      Object.entries(definition.nestedSubgraphs).map(async ([id, nested]) => [
+        id,
+        await definitionHash(nested, descriptors),
+      ] as const),
+    ),
+  );
+  return stableHash(JSON.stringify(canonicalHashDocument(definition, descriptors, nestedHashes)));
 }
 
 function newDefinition(
@@ -903,7 +1147,7 @@ export function createMemoryPlatform(): EditorPlatform {
             : [];
         });
       });
-      child.hash = await definitionHash(child);
+      child.hash = await definitionHash(child, descriptors);
       if (currentDefinition().nestedSubgraphs[child.identity.id]) {
         throw new Error(`workflow dependency '${child.identity.id}' already exists`);
       }
@@ -926,13 +1170,13 @@ export function createMemoryPlatform(): EditorPlatform {
     async returnToParent() {
       if (scopeStack.length <= 1) throw new Error('already at the root workflow scope');
       syncDefinition();
-      currentDefinition().hash = await definitionHash(currentDefinition());
+      currentDefinition().hash = await definitionHash(currentDefinition(), descriptors);
       scopeStack.pop();
       loadDefinitionGraph(currentDefinition());
     },
     async saveBlueprint() {
       syncDefinition();
-      currentDefinition().hash = await definitionHash(currentDefinition());
+      currentDefinition().hash = await definitionHash(currentDefinition(), descriptors);
       return JSON.stringify(workflowDocument(currentDefinition()), null, 2);
     },
     async exportBlueprint() {
@@ -951,7 +1195,7 @@ export function createMemoryPlatform(): EditorPlatform {
       definition.subgraphDependencies ??= [];
       definition.nodePackDependencies ??= [];
       definition.nestedSubgraphs ??= {};
-      definition.hash = await definitionHash(definition);
+      definition.hash = await definitionHash(definition, descriptors);
       return definition;
     },
     async importBlueprint(serialized) {
@@ -959,6 +1203,7 @@ export function createMemoryPlatform(): EditorPlatform {
     },
     async instantiateBlueprint(serialized) {
       const definition = await this.loadBlueprint(serialized);
+      currentDefinition().identity = clone(definition.identity);
       currentDefinition().graph = clone(definition.graph);
       currentDefinition().parameters = clone(definition.parameters);
       currentDefinition().inputs = clone(definition.inputs);
@@ -967,6 +1212,7 @@ export function createMemoryPlatform(): EditorPlatform {
       currentDefinition().nodePackDependencies = clone(definition.nodePackDependencies);
       currentDefinition().metadata = clone(definition.metadata);
       currentDefinition().nestedSubgraphs = clone(definition.nestedSubgraphs);
+      currentDefinition().hash = definition.hash;
       loadDefinitionGraph(currentDefinition());
       revision += 1;
     },
@@ -976,7 +1222,7 @@ export function createMemoryPlatform(): EditorPlatform {
     },
     async workflowHash() {
       syncDefinition();
-      currentDefinition().hash = await definitionHash(currentDefinition());
+      currentDefinition().hash = await definitionHash(currentDefinition(), descriptors);
       return currentDefinition().hash;
     },
     async saveWorkflow() {

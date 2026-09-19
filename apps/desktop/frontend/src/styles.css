@@ -63,6 +63,14 @@ button { cursor: pointer; }
 .canvas-panel { display: grid; grid-template-rows: 58px minmax(0, 1fr) 36px; min-width: 0; min-height: 0; background: #0d1117; }
 .canvas-panel__toolbar { justify-content: space-between; border-bottom: 1px solid #1c2430; padding: 0 18px; }
 .canvas-panel__toolbar strong { display: block; margin-top: 3px; font-size: 12px; }
+.scope-header { min-width: 0; }
+.breadcrumbs { display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+.breadcrumb { display: flex; align-items: center; gap: 5px; }
+.breadcrumb button { border: 0; padding: 0; color: #cdd8e3; background: transparent; font-size: 12px; font-weight: 700; }
+.breadcrumb button:not(:disabled):hover { color: #6ee7c7; }
+.breadcrumb button.is-current { color: #e8edf4; }
+.nested-subgraphs { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.nested-subgraphs .button--small { overflow: hidden; max-width: 150px; padding: 3px 7px; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .canvas-panel__meta, .footer-hint { color: #708094; font-family: 'DM Mono', monospace; font-size: 9px; }
 .flow-canvas { position: relative; min-height: 0; }
 .react-flow { background-color: #0d1117; }

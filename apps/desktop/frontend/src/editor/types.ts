@@ -17,6 +17,14 @@ export interface ParameterDescriptor {
   max: number | null;
 }
 
+export type LazyCondition = 'True' | 'False' | { Index: number } | { Key: string };
+
+export interface LazyInputGate {
+  selector: string;
+  required: string[];
+  branches: Array<{ condition: LazyCondition; inputs: string[] }>;
+}
+
 export interface NodeDescriptor {
   typeId: string;
   name: string;
@@ -25,6 +33,7 @@ export interface NodeDescriptor {
   outputs: PortDescriptor[];
   parameters: ParameterDescriptor[];
   capabilities?: ExecutionCapability[];
+  lazyInputs?: LazyInputGate[];
 }
 
 export type ExecutionCapability = 'CPU' | 'GPU' | 'TileLocal' | 'RegionAware' | 'FullFrame';
