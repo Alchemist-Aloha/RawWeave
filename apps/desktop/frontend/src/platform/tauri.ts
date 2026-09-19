@@ -42,6 +42,7 @@ interface RustDescriptor {
   inputs: RustPort[];
   outputs: RustPort[];
   parameters: RustParameter[];
+  evaluation_policy?: 'automatic' | 'manual_checkpoint';
   capabilities?: string[];
   lazy_inputs?: LazyInputGate[];
 }
@@ -224,6 +225,7 @@ function mapDescriptor(descriptor: RustDescriptor): NodeDescriptor {
       min: parameter.min,
       max: parameter.max,
     })),
+    evaluationPolicy: descriptor.evaluation_policy ?? 'automatic',
     capabilities: descriptor.capabilities?.map(mapCapability),
     lazyInputs: descriptor.lazy_inputs,
   };

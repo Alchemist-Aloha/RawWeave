@@ -25,6 +25,8 @@ export interface LazyInputGate {
   branches: Array<{ condition: LazyCondition; inputs: string[] }>;
 }
 
+export type EvaluationPolicy = 'automatic' | 'manual_checkpoint';
+
 export interface NodeDescriptor {
   typeId: string;
   name: string;
@@ -32,6 +34,7 @@ export interface NodeDescriptor {
   inputs: PortDescriptor[];
   outputs: PortDescriptor[];
   parameters: ParameterDescriptor[];
+  evaluationPolicy?: EvaluationPolicy;
   capabilities?: ExecutionCapability[];
   lazyInputs?: LazyInputGate[];
 }

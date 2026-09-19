@@ -1,14 +1,16 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode } from '../editor/types';
+import type { CheckpointStatus } from '../checkpoint/types';
 
 export interface RawWeaveNodeData extends Record<string, unknown> {
   node: EditorNode;
+  checkpointStatus?: CheckpointStatus | null;
 }
 
 export type RawWeaveFlowNode = Node<RawWeaveNodeData, 'rawweave'>;
 
 export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
-  const { node } = data;
+  const { node, checkpointStatus } = data;
   const exposedPorts = (node.exposedParameters ?? [])
     .filter(
       (parameterId) => !node.descriptor.inputs.some((input) => input.id === parameterId),
@@ -25,9 +27,16 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
     <div aria-label={`${node.descriptor.name} node`} className={`graph-node${selected ? ' graph-node--selected' : ''}`}>
       <div className="graph-node__title-row">
         <div className="graph-node__title">{node.descriptor.name}</div>
-        {node.descriptor.capabilities?.[0] && (
-          <span className="graph-node__badge">{node.descriptor.capabilities[0]}</span>
-        )}
+        <div className="graph-node__badges">
+          {node.descriptor.evaluationPolicy === 'manual_checkpoint' && (
+            <span className={`graph-node__badge graph-node__badge--checkpoint graph-node__badge--${checkpointStatus?.state ?? 'unknown'}`}>
+              {checkpointStatus?.state ?? 'checkpoint'}
+            </span>
+          )}
+          {node.descriptor.capabilities?.[0] && (
+            <span className="graph-node__badge">{node.descriptor.capabilities[0]}</span>
+          )}
+        </div>
       </div>
       <div className="graph-node__type">{node.typeId}</div>
       <div className="graph-node__ports">

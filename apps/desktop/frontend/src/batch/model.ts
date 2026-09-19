@@ -3,6 +3,7 @@ import type { QueueItem, WorkflowBinding } from '../browser/types';
 import type {
   BatchBitDepth,
   BatchColorSpace,
+  BatchCheckpointPolicy,
   BatchCompression,
   BatchCollisionPolicy,
   BatchFormat,
@@ -112,6 +113,7 @@ export function buildBatchJob(
   subset: BatchSubset,
   recipe: BatchRecipe,
   id: string,
+  checkpointPolicy: BatchCheckpointPolicy = 'after_each_item',
 ): BatchJob {
   if (!id.trim()) throw new Error('batch job id cannot be empty');
   const selected = selectQueueSubset(queueItems, subset);
@@ -142,7 +144,7 @@ export function buildBatchJob(
     },
     overrides: workflowOverrides(selected),
     recipes: [clone(recipe)],
-    checkpointPolicy: 'after_each_item',
+    checkpointPolicy,
     items,
     state: 'draft',
   };

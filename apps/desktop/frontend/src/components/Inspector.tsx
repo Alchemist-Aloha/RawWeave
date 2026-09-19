@@ -1,4 +1,6 @@
 import type { EditorNode, ParameterValue, WorkflowPort } from '../editor/types';
+import type { CheckpointStatus } from '../checkpoint/types';
+import { CheckpointPanel } from './CheckpointPanel';
 
 interface InspectorProps {
   node: EditorNode | undefined;
@@ -9,6 +11,10 @@ interface InspectorProps {
   onToggleExposed: (parameterId: string, exposed: boolean) => void;
   onToggleInput?: (nodeId: string, portId: string, direction: 'Input' | 'Output', exposed: boolean) => void;
   onDelete: (nodeId: string) => void;
+  checkpointStatus?: CheckpointStatus | null;
+  checkpointLoading?: boolean;
+  onGenerateCheckpoint?: () => void | Promise<void>;
+  onCancelCheckpoint?: () => void | Promise<void>;
 }
 
 export function Inspector({
@@ -20,6 +26,10 @@ export function Inspector({
   onToggleExposed,
   onToggleInput,
   onDelete,
+  checkpointStatus = null,
+  checkpointLoading = false,
+  onGenerateCheckpoint,
+  onCancelCheckpoint,
 }: InspectorProps) {
   if (selectedNodeIds.length > 1) {
     return (
@@ -169,6 +179,14 @@ export function Inspector({
           <p className="empty-state empty-state--compact">This node has no parameters.</p>
         )}
       </div>
+      {node.descriptor.evaluationPolicy === 'manual_checkpoint' && onGenerateCheckpoint && onCancelCheckpoint && (
+        <CheckpointPanel
+          loading={checkpointLoading}
+          onCancel={onCancelCheckpoint}
+          onGenerate={onGenerateCheckpoint}
+          status={checkpointStatus}
+        />
+      )}
     </aside>
   );
 }

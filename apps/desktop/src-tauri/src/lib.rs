@@ -2,22 +2,26 @@ mod browser;
 mod hosts;
 mod preview;
 
-use std::collections::BTreeMap;
+use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rawweave_batch::{
     dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore, PreflightOptions,
 };
 use rawweave_core::NodeId;
 use rawweave_graph::{
-    DependencyReport, DependencyStatus, Graph, NodePackManifest, SubgraphDependency,
+    hash_upstream_inputs, ArtifactStore, Checkpoint, CheckpointArtifact, CheckpointAvailability,
+    CheckpointPayload, CheckpointState, DependencyReport, DependencyStatus, EvaluationPolicy,
+    GenerationMetadata, Graph, NodePackManifest, Provenance, SubgraphDependency,
     WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
 };
 use rawweave_image::Image;
-use rawweave_node_api::{NodeDescriptor, ParameterValue};
+use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value};
 use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
 use serde::{Deserialize, Serialize};
@@ -241,6 +245,33 @@ pub struct AvailableNodeDto {
     version: u32,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointStatusDto {
+    pub node_id: String,
+    pub output_port: String,
+    pub state: CheckpointState,
+    pub availability: CheckpointAvailability,
+    pub current_dependency_hash: Option<String>,
+    pub committed_dependency_hash: Option<String>,
+    pub committed_artifact_id: Option<String>,
+    pub generation: Option<GenerationMetadata>,
+    pub provenance: Option<Provenance>,
+    pub failure: Option<String>,
+    pub progress: Option<f32>,
+    pub can_use_committed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckpointProgressEvent {
+    node_id: String,
+    output_port: String,
+    progress: f32,
+    phase: String,
+    message: Option<String>,
+}
+
 fn metadata_response(metadata: &WorkflowMetadata) -> WorkflowMetadataResponseDto {
     WorkflowMetadataResponseDto {
         name: metadata.name.clone(),
@@ -418,6 +449,33 @@ impl BatchManager {
     }
 }
 
+struct CheckpointRecord {
+    output_port: String,
+    checkpoint: Checkpoint,
+    progress: Option<f32>,
+}
+
+#[derive(Default)]
+struct CheckpointManager {
+    checkpoints: Mutex<BTreeMap<String, CheckpointRecord>>,
+    store: ArtifactStore,
+    cancellation_requests: Mutex<BTreeSet<String>>,
+}
+
+impl CheckpointManager {
+    fn clear(&self) -> Result<(), String> {
+        self.checkpoints
+            .lock()
+            .map_err(|_| "checkpoint state is unavailable".to_owned())?
+            .clear();
+        self.cancellation_requests
+            .lock()
+            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+            .clear();
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateBatchJobRequest {
@@ -459,6 +517,7 @@ pub struct AppState {
     blueprint: Mutex<Option<WorkflowDefinition>>,
     blueprint_stack: Mutex<Vec<WorkflowDefinition>>,
     batch: Arc<BatchManager>,
+    checkpoint: Arc<CheckpointManager>,
 }
 
 fn lock_hosts(
@@ -502,6 +561,7 @@ fn clear_blueprint(state: &AppState) -> Result<(), String> {
         .lock()
         .map_err(|_| "blueprint navigation state is unavailable".to_owned())?
         .clear();
+    state.checkpoint.clear()?;
     Ok(())
 }
 
@@ -587,6 +647,190 @@ fn current_or_flat_blueprint(state: &AppState) -> Result<WorkflowDefinition, Str
         WorkflowMetadata::new("Workflow"),
     )
     .map_err(|error| error.to_string())
+}
+
+fn hash_checkpoint_input(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn checkpoint_source_hash(source: Option<&SourceAsset>) -> String {
+    let mut hasher = DefaultHasher::new();
+    match source {
+        Some(SourceAsset::Ordinary(image)) => {
+            "ordinary".hash(&mut hasher);
+            image.width().hash(&mut hasher);
+            image.height().hash(&mut hasher);
+            image.revision().hash(&mut hasher);
+            for pixel in image.pixels() {
+                for channel in pixel {
+                    channel.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        Some(SourceAsset::Raw { bytes, path }) => {
+            "raw".hash(&mut hasher);
+            bytes.hash(&mut hasher);
+            path.hash(&mut hasher);
+        }
+        None => "none".hash(&mut hasher),
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn checkpoint_dependencies(
+    editor: &EditorCore,
+    node_id: &str,
+    output_port: &str,
+    node_version: u32,
+    source: Option<&SourceAsset>,
+) -> Result<(String, BTreeMap<String, String>), String> {
+    let workflow = editor.save_workflow().map_err(|error| error.to_string())?;
+    let upstream_hashes = BTreeMap::from([
+        (
+            "workflow".to_owned(),
+            hash_checkpoint_input(workflow.as_bytes()),
+        ),
+        ("node".to_owned(), hash_checkpoint_input(node_id.as_bytes())),
+        (
+            "output".to_owned(),
+            hash_checkpoint_input(output_port.as_bytes()),
+        ),
+        ("source".to_owned(), checkpoint_source_hash(source)),
+    ]);
+    Ok((
+        hash_upstream_inputs(&upstream_hashes, node_version),
+        upstream_hashes,
+    ))
+}
+
+fn checkpoint_context(source: Option<&SourceAsset>) -> EvaluationContext {
+    match source {
+        Some(SourceAsset::Ordinary(image)) => EvaluationContext::with_source_image(image.clone()),
+        Some(SourceAsset::Raw { bytes, path }) => EvaluationContext::default()
+            .with_source_bytes(bytes.as_ref().clone())
+            .with_source_path(path),
+        None => EvaluationContext::default(),
+    }
+}
+
+fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, String> {
+    match value {
+        Value::Image(image) => Ok(CheckpointPayload::Image(image)),
+        Value::Mask(mask) => Ok(CheckpointPayload::Mask(mask)),
+        Value::Bytes(bytes) => Ok(CheckpointPayload::SpatialData(bytes)),
+        value => Err(format!(
+            "checkpoint output type '{}' is not persistable",
+            value.data_type()
+        )),
+    }
+}
+
+fn checkpoint_status_dto(
+    checkpoint: &Checkpoint,
+    store: &ArtifactStore,
+) -> Result<CheckpointStatusDto, String> {
+    let availability = checkpoint
+        .availability_with_store(store)
+        .map_err(|error| error.to_string())?;
+    let artifact = checkpoint
+        .committed_artifact(store)
+        .map_err(|error| error.to_string())?;
+    Ok(CheckpointStatusDto {
+        node_id: checkpoint.node_id.clone(),
+        output_port: String::new(),
+        state: checkpoint.state(),
+        availability,
+        current_dependency_hash: checkpoint.current_dependency_hash().map(str::to_owned),
+        committed_dependency_hash: checkpoint.committed_dependency_hash().map(str::to_owned),
+        committed_artifact_id: checkpoint.committed_artifact_id().map(ToString::to_string),
+        generation: checkpoint.generation.clone().or_else(|| {
+            artifact
+                .as_ref()
+                .map(|artifact| artifact.generation.clone())
+        }),
+        provenance: artifact.map(|artifact| artifact.provenance),
+        failure: checkpoint.failure.clone(),
+        progress: None,
+        can_use_committed: matches!(
+            availability,
+            CheckpointAvailability::Fresh | CheckpointAvailability::Stale
+        ),
+    })
+}
+
+fn ensure_checkpoint_record<'a>(
+    records: &'a mut BTreeMap<String, CheckpointRecord>,
+    editor: &EditorCore,
+    node_id: &str,
+    output_port: Option<&str>,
+) -> Result<&'a mut CheckpointRecord, String> {
+    let node = editor
+        .graph()
+        .node(&NodeId::from(node_id))
+        .ok_or_else(|| format!("node '{node_id}' does not exist"))?;
+    if node.descriptor.evaluation_policy != EvaluationPolicy::ManualCheckpoint {
+        return Err(format!("node '{node_id}' is not a manual checkpoint"));
+    }
+    let selected_port = output_port
+        .map(str::to_owned)
+        .or_else(|| {
+            records
+                .get(node_id)
+                .map(|record| record.output_port.clone())
+        })
+        .or_else(|| node.descriptor.outputs.first().map(|port| port.id.clone()))
+        .ok_or_else(|| format!("manual checkpoint node '{node_id}' has no outputs"))?;
+    if node.descriptor.output(&selected_port).is_none() {
+        return Err(format!("output '{node_id}:{selected_port}' does not exist"));
+    }
+    let entry = records
+        .entry(node_id.to_owned())
+        .or_insert_with(|| CheckpointRecord {
+            output_port: selected_port.clone(),
+            checkpoint: Checkpoint::new(node_id, node.descriptor.version),
+            progress: None,
+        });
+    if entry.checkpoint.node_version != node.descriptor.version
+        || entry.output_port != selected_port
+    {
+        *entry = CheckpointRecord {
+            output_port: selected_port.clone(),
+            checkpoint: Checkpoint::new(node_id, node.descriptor.version),
+            progress: None,
+        };
+    } else {
+        entry.output_port = selected_port;
+    }
+    Ok(entry)
+}
+
+fn emit_checkpoint_progress(
+    app: &AppHandle,
+    node_id: &str,
+    output_port: &str,
+    progress: f32,
+    phase: &str,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "checkpoint-progress",
+        CheckpointProgressEvent {
+            node_id: node_id.to_owned(),
+            output_port: output_port.to_owned(),
+            progress,
+            phase: phase.to_owned(),
+            message,
+        },
+    );
+}
+
+fn checkpoint_timestamp() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    format!("unix-millis:{millis}")
 }
 
 fn available_manifests(packs: Vec<AvailableNodePackDto>) -> Vec<NodePackManifest> {
@@ -1818,6 +2062,292 @@ fn release_preview(state: State<'_, AppState>, url: String) -> Result<(), String
     state.preview.release(&url)
 }
 
+fn checkpoint_status_for_node(
+    state: &AppState,
+    node_id: &str,
+    output_port: Option<&str>,
+) -> Result<CheckpointStatusDto, String> {
+    let editor = lock_editor(&state.editor)?.clone();
+    let source = state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())?
+        .clone();
+    let mut records = state
+        .checkpoint
+        .checkpoints
+        .lock()
+        .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+    let record = ensure_checkpoint_record(&mut records, &editor, node_id, output_port)?;
+    let (dependency_hash, _) = checkpoint_dependencies(
+        &editor,
+        node_id,
+        &record.output_port,
+        record.checkpoint.node_version,
+        source.as_ref(),
+    )?;
+    record.checkpoint.set_dependency_hash(dependency_hash);
+    let mut status = checkpoint_status_dto(&record.checkpoint, &state.checkpoint.store)?;
+    status.output_port = record.output_port.clone();
+    status.progress = record.progress;
+    Ok(status)
+}
+
+#[tauri::command]
+fn checkpoint_list(state: State<'_, AppState>) -> Result<Vec<CheckpointStatusDto>, String> {
+    let editor = lock_editor(&state.editor)?.clone();
+    let nodes = editor
+        .graph()
+        .nodes()
+        .values()
+        .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+        .map(|node| {
+            (
+                node.id.as_str().to_owned(),
+                node.descriptor.outputs.first().map(|port| port.id.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    nodes
+        .into_iter()
+        .map(|(node_id, output_port)| {
+            checkpoint_status_for_node(state.inner(), &node_id, output_port.as_deref())
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn checkpoint_status(
+    state: State<'_, AppState>,
+    node_id: String,
+) -> Result<CheckpointStatusDto, String> {
+    checkpoint_status_for_node(state.inner(), &node_id, None)
+}
+
+#[tauri::command]
+async fn generate_checkpoint(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    node_id: String,
+    output_port: String,
+) -> Result<CheckpointStatusDto, String> {
+    let editor = lock_editor(&state.editor)?.clone();
+    let source = state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())?
+        .clone();
+    let manager = Arc::clone(&state.checkpoint);
+    let (token, node_version, dependency_hash, upstream_hashes) = {
+        let mut records = manager
+            .checkpoints
+            .lock()
+            .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+        let record = ensure_checkpoint_record(&mut records, &editor, &node_id, Some(&output_port))?;
+        let (dependency_hash, upstream_hashes) = checkpoint_dependencies(
+            &editor,
+            &node_id,
+            &record.output_port,
+            record.checkpoint.node_version,
+            source.as_ref(),
+        )?;
+        record
+            .checkpoint
+            .set_dependency_hash(dependency_hash.clone());
+        let token = record
+            .checkpoint
+            .begin_generation_token()
+            .map_err(|error| error.to_string())?;
+        record.progress = Some(0.0);
+        manager
+            .cancellation_requests
+            .lock()
+            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+            .remove(&node_id);
+        (
+            token,
+            record.checkpoint.node_version,
+            dependency_hash,
+            upstream_hashes,
+        )
+    };
+    emit_checkpoint_progress(&app, &node_id, &output_port, 0.05, "generating", None);
+
+    let evaluation_editor = editor.clone();
+    let evaluation_source = source.clone();
+    let evaluation_node = node_id.clone();
+    let evaluation_output = output_port.clone();
+    let evaluated = tauri::async_runtime::spawn_blocking(move || {
+        let value = evaluation_editor
+            .evaluate(
+                &evaluation_node,
+                &evaluation_output,
+                checkpoint_context(evaluation_source.as_ref()),
+            )
+            .map_err(|error| error.to_string())?;
+        checkpoint_payload(value)
+    })
+    .await
+    .map_err(|error| format!("checkpoint worker failed: {error}"))?;
+
+    let mut records = manager
+        .checkpoints
+        .lock()
+        .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+    let record = records
+        .get_mut(&node_id)
+        .ok_or_else(|| format!("checkpoint '{node_id}' is not registered"))?;
+    let cancelled = manager
+        .cancellation_requests
+        .lock()
+        .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+        .remove(&node_id)
+        || record.checkpoint.state() == CheckpointState::Cancelled;
+    if cancelled {
+        record.progress = None;
+        emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.0, "cancelled", None);
+        let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
+        status.output_port = record.output_port.clone();
+        return Ok(status);
+    }
+
+    let payload = match evaluated {
+        Ok(payload) => payload,
+        Err(error) => {
+            record
+                .checkpoint
+                .fail_generation(&token, &error)
+                .map_err(|failure| failure.to_string())?;
+            record.progress = None;
+            emit_checkpoint_progress(
+                &app,
+                &node_id,
+                &record.output_port,
+                0.0,
+                "failed",
+                Some(error),
+            );
+            let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
+            status.output_port = record.output_port.clone();
+            return Ok(status);
+        }
+    };
+
+    let current_editor = lock_editor(&state.editor)?.clone();
+    let current_source = state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())?
+        .clone();
+    let (current_dependency_hash, _) = checkpoint_dependencies(
+        &current_editor,
+        &node_id,
+        &record.output_port,
+        node_version,
+        current_source.as_ref(),
+    )?;
+    record
+        .checkpoint
+        .set_dependency_hash(current_dependency_hash);
+    record.progress = Some(90.0);
+    emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.9, "committing", None);
+    let provenance = Provenance {
+        dependency_hash: dependency_hash.clone(),
+        upstream_hashes,
+        node_version,
+        external_tool: None,
+    };
+    let artifact = CheckpointArtifact::new(
+        payload,
+        dependency_hash,
+        provenance,
+        GenerationMetadata {
+            generation_revision: token.generation_id(),
+            generated_at: Some(checkpoint_timestamp()),
+            duration_millis: None,
+            generator: Some("rawweave-desktop".to_owned()),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let commit_result = record
+        .checkpoint
+        .commit_generation(token, artifact, &manager.store);
+    record.progress = None;
+    match commit_result {
+        Ok(()) => {
+            emit_checkpoint_progress(&app, &node_id, &record.output_port, 1.0, "complete", None)
+        }
+        Err(error) if record.checkpoint.state() == CheckpointState::Stale => {
+            emit_checkpoint_progress(
+                &app,
+                &node_id,
+                &record.output_port,
+                1.0,
+                "complete",
+                Some(error.to_string()),
+            )
+        }
+        Err(error) => {
+            record.checkpoint.fail(error.to_string());
+            emit_checkpoint_progress(
+                &app,
+                &node_id,
+                &record.output_port,
+                0.0,
+                "failed",
+                Some(error.to_string()),
+            );
+        }
+    }
+    let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
+    status.output_port = record.output_port.clone();
+    Ok(status)
+}
+
+#[tauri::command]
+fn cancel_checkpoint(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    node_id: String,
+) -> Result<CheckpointStatusDto, String> {
+    let editor = lock_editor(&state.editor)?.clone();
+    let source = state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())?
+        .clone();
+    let mut records = state
+        .checkpoint
+        .checkpoints
+        .lock()
+        .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+    let record = ensure_checkpoint_record(&mut records, &editor, &node_id, None)?;
+    if record.checkpoint.state() == CheckpointState::Generating {
+        state
+            .checkpoint
+            .cancellation_requests
+            .lock()
+            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+            .insert(node_id.clone());
+        record.checkpoint.cancel();
+        record.progress = None;
+        emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.0, "cancelled", None);
+    } else {
+        let (dependency_hash, _) = checkpoint_dependencies(
+            &editor,
+            &node_id,
+            &record.output_port,
+            record.checkpoint.node_version,
+            source.as_ref(),
+        )?;
+        record.checkpoint.set_dependency_hash(dependency_hash);
+    }
+    let mut status = checkpoint_status_dto(&record.checkpoint, &state.checkpoint.store)?;
+    status.output_port = record.output_port.clone();
+    status.progress = record.progress;
+    Ok(status)
+}
+
 pub fn run() {
     let preview = Arc::new(preview::PreviewManager::default());
     let protocol_preview = Arc::clone(&preview);
@@ -1837,6 +2367,7 @@ pub fn run() {
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
             batch: Arc::new(BatchManager::default()),
+            checkpoint: Arc::new(CheckpointManager::default()),
         })
         .invoke_handler(tauri::generate_handler![
             node_descriptors,
@@ -1892,6 +2423,10 @@ pub fn run() {
             request_preview,
             cancel_preview,
             release_preview,
+            checkpoint_list,
+            checkpoint_status,
+            generate_checkpoint,
+            cancel_checkpoint,
             browser::list_directory,
             browser::inspect_file,
             browser::set_file_marks,
@@ -2337,6 +2872,7 @@ mod tests {
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
             batch: Arc::new(BatchManager::default()),
+            checkpoint: Arc::new(CheckpointManager::default()),
         };
 
         load_workflow_state(&state, &workflow).unwrap();
@@ -2424,6 +2960,7 @@ mod tests {
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
             batch: Arc::new(BatchManager::default()),
+            checkpoint: Arc::new(CheckpointManager::default()),
         };
         load_workflow_state(&state, &workflow).unwrap();
 
@@ -2467,6 +3004,7 @@ mod tests {
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
             batch: Arc::new(BatchManager::default()),
+            checkpoint: Arc::new(CheckpointManager::default()),
         };
 
         load_workflow_state(&state, &workflow).unwrap();
@@ -2495,5 +3033,32 @@ mod tests {
         let error =
             preview::render_preview(&preview, &editor, &current_editor, None, request).unwrap_err();
         assert!(error.contains("source image unavailable"));
+    }
+
+    #[test]
+    fn step10_checkpoint_status_dto_preserves_stale_artifact_and_provenance() {
+        let store = ArtifactStore::memory();
+        let mut checkpoint = Checkpoint::new("manual", 1);
+        checkpoint.set_dependency_hash("input-a");
+        let artifact = CheckpointArtifact::new(
+            CheckpointPayload::Image(Image::from_pixels(1, 1, vec![[0.5, 0.5, 0.5, 1.0]]).unwrap()),
+            "input-a",
+            Provenance::new("input-a", 1),
+            GenerationMetadata::new(3),
+        )
+        .unwrap();
+        let artifact_id = artifact.id().to_string();
+        checkpoint.commit(artifact, &store).unwrap();
+        checkpoint.set_dependency_hash("input-b");
+
+        let status = checkpoint_status_dto(&checkpoint, &store).unwrap();
+
+        assert_eq!(status.node_id, "manual");
+        assert_eq!(status.state, rawweave_graph::CheckpointState::Stale);
+        assert_eq!(
+            status.committed_artifact_id.as_deref(),
+            Some(artifact_id.as_str())
+        );
+        assert!(status.provenance.is_some());
     }
 }

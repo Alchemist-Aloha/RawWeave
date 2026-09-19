@@ -44,6 +44,20 @@ describe('batch controller', () => {
     expect(job.recipes[0].destination).toBe('/exports');
   });
 
+  it('pins an explicit checkpoint policy for manual-checkpoint workflows', async () => {
+    const controller = new BatchController(createMemoryBatchPlatform(), () => 'job-policy');
+    controller.updateCheckpointPolicy('fail_if_stale');
+
+    await controller.createFromQueue(
+      [queueItem('/photos/one.jpg')],
+      context,
+      { kind: 'all' },
+      defaultBatchRecipe('/exports'),
+    );
+
+    expect(controller.state.job?.checkpointPolicy).toBe('fail_if_stale');
+  });
+
   it('runs preflight, dry run, start, pause, resume, and cancel without blocking state consumers', async () => {
     const controller = new BatchController(createMemoryBatchPlatform(), () => 'job-2');
     await controller.createFromQueue([queueItem('/photos/one.jpg')], context, { kind: 'all' }, defaultBatchRecipe('/exports'));

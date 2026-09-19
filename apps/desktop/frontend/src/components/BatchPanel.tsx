@@ -10,6 +10,7 @@ import {
 } from '../batch/model';
 import type {
   BatchColorSpace,
+  BatchCheckpointPolicy,
   BatchFormat,
   BatchItem,
   BatchMetadataPolicy,
@@ -59,6 +60,20 @@ function formatResolution(value: BatchResolution): string {
   return 'long_edge';
 }
 
+const checkpointPolicyLabels: Record<BatchCheckpointPolicy, string> = {
+  after_each_item: 'After each item (legacy)',
+  after_each_output: 'After each output (legacy)',
+  manual: 'Manual (legacy)',
+  use_committed: 'Use committed',
+  generate_if_missing: 'Generate if missing',
+  regenerate_all: 'Regenerate all',
+  fail_if_stale: 'Fail if stale',
+};
+
+function isExplicitCheckpointPolicy(policy: BatchCheckpointPolicy): boolean {
+  return ['use_committed', 'generate_if_missing', 'regenerate_all', 'fail_if_stale'].includes(policy);
+}
+
 export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: BatchPanelProps) {
   const [, setRevision] = useState(0);
   const [subset, setSubset] = useState<BatchSubset>(() => defaultSubset(queueItems));
@@ -79,6 +94,10 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
   const failedItems = items.filter((item) => item.state === 'failed');
   const terminalCount = items.filter((item) => ['completed', 'skipped', 'failed', 'cancelled'].includes(item.state)).length;
   const progress = items.length === 0 ? 0 : Math.round((terminalCount / items.length) * 100);
+  const hasManualCheckpoints = workflow?.nodes.some(
+    (node) => node.descriptor.evaluationPolicy === 'manual_checkpoint',
+  ) ?? false;
+  const requiresExplicitCheckpointPolicy = hasManualCheckpoints && !isExplicitCheckpointPolicy(controller.checkpointPolicy);
 
   const updateRecipe = <K extends keyof BatchRecipe>(key: K, value: BatchRecipe[K]) => {
     controller.updateRecipe({ [key]: value } as Partial<BatchRecipe>);
@@ -133,7 +152,7 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
           <button
             aria-label="Create batch"
             className="button button--primary"
-            disabled={!workflow || queueItems.length === 0 || controller.state.loading}
+            disabled={!workflow || queueItems.length === 0 || controller.state.loading || requiresExplicitCheckpointPolicy}
             onClick={() => workflow && run(() => controller.createFromQueue(queueItems, workflow, subset, recipe))}
             type="button"
           >
@@ -213,6 +232,25 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
           </label>
         </div>
       </div>
+
+      <section aria-label="Batch checkpoint policy" className="batch-panel__checkpoint-policy">
+        <h3>Checkpoint policy</h3>
+        <label>Manual checkpoint handling
+          <select
+            aria-label="Batch checkpoint policy"
+            disabled={Boolean(job)}
+            onChange={(event) => controller.updateCheckpointPolicy(event.target.value as BatchCheckpointPolicy)}
+            value={controller.checkpointPolicy}
+          >
+            {(Object.keys(checkpointPolicyLabels) as BatchCheckpointPolicy[]).map((policy) => (
+              <option key={policy} value={policy}>{checkpointPolicyLabels[policy]}</option>
+            ))}
+          </select>
+        </label>
+        {requiresExplicitCheckpointPolicy && (
+          <p className="batch-panel__warning">This workflow contains manual checkpoints. Choose an explicit policy before creating the batch.</p>
+        )}
+      </section>
 
       <section className="batch-panel__dry-run" aria-label="Batch dry run">
         <h3>Dry run</h3>

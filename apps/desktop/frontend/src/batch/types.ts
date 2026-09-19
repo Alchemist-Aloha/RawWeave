@@ -19,7 +19,14 @@ export type BatchMetadataPolicy = 'preserve' | 'strip' | 'sidecar';
 export type BatchCompression = 'default' | 'fast' | 'best' | 'lossless';
 export type BatchCollisionPolicy = 'error' | 'skip' | 'overwrite' | 'suffix';
 export type BatchSharpening = 'None' | { UnsharpMask: { radius: number; amount: number; threshold: number } };
-export type BatchCheckpointPolicy = 'after_each_item' | 'after_each_output' | 'manual';
+export type BatchCheckpointPolicy =
+  | 'after_each_item'
+  | 'after_each_output'
+  | 'manual'
+  | 'use_committed'
+  | 'generate_if_missing'
+  | 'regenerate_all'
+  | 'fail_if_stale';
 
 export interface BatchRecipe {
   format: BatchFormat;

@@ -2,6 +2,7 @@ import type { QueueItem } from '../browser/types';
 import { buildBatchJob, defaultBatchRecipe, type BatchWorkflowContext } from './model';
 import type {
   BatchCreateOptions,
+  BatchCheckpointPolicy,
   BatchDryRunResult,
   BatchItem,
   BatchJob,
@@ -40,6 +41,7 @@ export class BatchController {
   private readonly listeners = new Set<BatchControllerListener>();
   private statePath: string | null = null;
   private draftRecipe: BatchRecipe = defaultBatchRecipe();
+  private draftCheckpointPolicy: BatchCheckpointPolicy = 'after_each_item';
 
   public constructor(
     private readonly platform: BatchPlatform,
@@ -53,6 +55,10 @@ export class BatchController {
 
   public get recipe(): BatchRecipe {
     return this.state.job?.recipes[0] ?? this.draftRecipe;
+  }
+
+  public get checkpointPolicy(): BatchCheckpointPolicy {
+    return this.state.job?.checkpointPolicy ?? this.draftCheckpointPolicy;
   }
 
   public get sessionReference(): BatchSessionReference {
@@ -86,6 +92,7 @@ export class BatchController {
   }
 
   private setJob(job: BatchJob): void {
+    this.draftCheckpointPolicy = job.checkpointPolicy;
     this.setState({ job, openedItem: null });
   }
 
@@ -96,11 +103,19 @@ export class BatchController {
     recipe: BatchRecipe = this.draftRecipe,
     options: BatchCreateOptions = {},
   ): Promise<BatchJob> {
-    const job = buildBatchJob(queueItems, workflow, subset, recipe, this.idFactory());
+    const job = buildBatchJob(
+      queueItems,
+      workflow,
+      subset,
+      recipe,
+      this.idFactory(),
+      this.draftCheckpointPolicy,
+    );
     return this.run('create', async () => {
       const created = await this.platform.createJob(job, options);
       this.statePath = options.statePath ?? null;
       this.draftRecipe = created.recipes[0] ?? recipe;
+      this.draftCheckpointPolicy = created.checkpointPolicy;
       this.setState({ job: created, diagnostics: [], dryRun: null, openedItem: null });
       return created;
     });
@@ -111,6 +126,7 @@ export class BatchController {
       const job = await this.platform.loadJob(statePath, maxWorkers);
       this.statePath = statePath;
       this.draftRecipe = job.recipes[0] ?? this.draftRecipe;
+      this.draftCheckpointPolicy = job.checkpointPolicy;
       this.setState({ job, diagnostics: [], dryRun: null, openedItem: null });
       return job;
     });
@@ -224,6 +240,16 @@ export class BatchController {
       this.publish();
     }
     return next;
+  }
+
+  public updateCheckpointPolicy(policy: BatchCheckpointPolicy): BatchCheckpointPolicy {
+    this.draftCheckpointPolicy = policy;
+    if (this.state.job) {
+      this.setState({ job: { ...this.state.job, checkpointPolicy: policy } });
+    } else {
+      this.publish();
+    }
+    return policy;
   }
 
   public clearError(): void {

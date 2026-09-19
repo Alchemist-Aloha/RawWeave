@@ -24,6 +24,8 @@ import type { BatchWorkflowContext } from './batch/model';
 import { createBatchPlatform } from './platform/batch';
 import { HostManager } from './components/HostManager';
 import { createTauriHostManager } from './platform/hosts';
+import { CheckpointController } from './checkpoint/controller';
+import { createCheckpointPlatform } from './platform/checkpoint';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -171,8 +173,11 @@ export default function App() {
   const [controller] = useState(() => new EditorController(platform));
   const [hostManager] = useState(() => createTauriHostManager());
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
+  const [checkpointPlatform] = useState(() => createCheckpointPlatform());
+  const [checkpointController] = useState(() => new CheckpointController(checkpointPlatform));
   const [, setRevision] = useState(0);
   const [, setViewerRevision] = useState(0);
+  const [, setCheckpointRevision] = useState(0);
   const [restoredSession, setRestoredSession] = useState<BrowserSession | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
@@ -194,16 +199,28 @@ export default function App() {
 
   useEffect(() => viewerController.subscribe(() => setViewerRevision((revision) => revision + 1)), [viewerController]);
 
+  useEffect(() => {
+    const unsubscribe = checkpointController.subscribe(() => setCheckpointRevision((revision) => revision + 1));
+    void checkpointController.refresh().catch(() => undefined);
+    return () => {
+      unsubscribe();
+      checkpointController.dispose();
+    };
+  }, [checkpointController]);
+
   const flowNodes = useMemo<RawWeaveFlowNode[]>(
     () =>
       controller.state.nodes.map((node) => ({
         id: node.id,
         type: 'rawweave',
         position: node.position,
-        data: { node },
+        data: {
+          node,
+          checkpointStatus: checkpointController.state.statuses.find((status) => status.nodeId === node.id) ?? null,
+        },
         selected: controller.state.selectedNodeIds.includes(node.id),
       })),
-    [controller, controller.state.nodes, controller.state.selectedNodeIds],
+    [checkpointController, checkpointController.state.statuses, controller, controller.state.nodes, controller.state.selectedNodeIds],
   );
   const flowEdges = useMemo<Edge[]>(
     () =>
@@ -222,6 +239,25 @@ export default function App() {
   const selectedNode = controller.state.nodes.find(
     (node) => node.id === controller.state.selectedNodeId,
   );
+  const selectedCheckpointStatus = selectedNode
+    ? checkpointController.state.statuses.find((status) => status.nodeId === selectedNode.id) ?? null
+    : null;
+
+  useEffect(() => {
+    if (selectedNode?.descriptor.evaluationPolicy !== 'manual_checkpoint') return;
+    void checkpointController.refresh(selectedNode.id).catch(() => undefined);
+  }, [checkpointController, controller.state.revision, selectedNode?.descriptor.evaluationPolicy, selectedNode?.id]);
+
+  const generateCheckpoint = useCallback(() => {
+    const outputPort = selectedNode?.descriptor.outputs[0]?.id;
+    if (!selectedNode || !outputPort) return;
+    void checkpointController.generate(selectedNode.id, outputPort).catch(() => undefined);
+  }, [checkpointController, selectedNode]);
+
+  const cancelCheckpoint = useCallback(() => {
+    if (!selectedNode) return;
+    void checkpointController.cancel(selectedNode.id).catch(() => undefined);
+  }, [checkpointController, selectedNode]);
   const browserWorkflowBinding = useMemo(() => {
     const scope = controller.state.scopePath.at(-1);
     if (!scope || !controller.state.workflowHash) return null;
@@ -669,6 +705,10 @@ export default function App() {
           onToggleExposed={onToggleExposed}
           onToggleInput={onToggleInput}
           onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
+          checkpointLoading={checkpointController.state.loading}
+          checkpointStatus={selectedCheckpointStatus}
+          onCancelCheckpoint={cancelCheckpoint}
+          onGenerateCheckpoint={generateCheckpoint}
         />
       </section>
 

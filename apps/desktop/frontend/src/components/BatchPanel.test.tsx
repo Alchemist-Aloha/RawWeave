@@ -22,6 +22,25 @@ const item: QueueItem = {
   processingStatus: 'pending', outputStatus: 'not-started', errors: [], warnings: [], testSet: false,
 };
 
+const manualContext: BatchWorkflowContext = {
+  ...context,
+  nodes: [{
+    id: 'manual',
+    typeId: 'test.manual',
+    parameters: {},
+    position: { x: 0, y: 0 },
+    descriptor: {
+      typeId: 'test.manual',
+      name: 'Manual checkpoint',
+      version: 1,
+      inputs: [],
+      outputs: [{ id: 'image', name: 'Image', dataType: 'core.Image', required: true }],
+      parameters: [],
+      evaluationPolicy: 'manual_checkpoint',
+    },
+  }],
+};
+
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
@@ -50,5 +69,25 @@ describe('BatchPanel', () => {
     expect(host.querySelector('[aria-label="Start batch"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Retry failed"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Open failed item"]')).not.toBeNull();
+  });
+
+  it('requires an explicit checkpoint policy before creating a manual-checkpoint batch', async () => {
+    const controller = new BatchController(createMemoryBatchPlatform(), () => 'manual-policy-ui');
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<BatchPanel controller={controller} queueItems={[item]} workflow={manualContext} />);
+    });
+
+    const create = host.querySelector<HTMLButtonElement>('[aria-label="Create batch"]');
+    expect(create?.disabled).toBe(true);
+    expect(host.textContent).toContain('Choose an explicit policy');
+
+    await act(async () => {
+      controller.updateCheckpointPolicy('use_committed');
+    });
+
+    expect(create?.disabled).toBe(false);
   });
 });

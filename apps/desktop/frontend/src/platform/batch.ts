@@ -81,6 +81,7 @@ interface RustDescriptor {
   inputs: Array<{ id: string; name: string; data_type: string; required: boolean }>;
   outputs: Array<{ id: string; name: string; data_type: string; required: boolean }>;
   parameters: Array<{ id: string; name: string; parameter_type: ParameterType; default: RustValue; min: number | null; max: number | null }>;
+  evaluation_policy?: 'automatic' | 'manual_checkpoint';
   capabilities?: string[];
   lazy_inputs?: unknown[];
 }
@@ -183,6 +184,7 @@ function rustDescriptor(descriptor: NodeDescriptor): RustDescriptor {
       id: parameter.id, name: parameter.name, parameter_type: parameter.parameterType,
       default: toRustValue(parameter.default), min: parameter.min, max: parameter.max,
     })),
+    evaluation_policy: descriptor.evaluationPolicy ?? 'automatic',
     capabilities: (descriptor.capabilities ?? []).map((capability) => capability === 'CPU' ? 'Cpu' : capability === 'GPU' ? 'Gpu' : capability),
     lazy_inputs: descriptor.lazyInputs,
   };
@@ -315,6 +317,7 @@ function mapDescriptor(descriptor: RustDescriptor): NodeDescriptor {
     inputs: descriptor.inputs.map((port) => ({ id: port.id, name: port.name, dataType: port.data_type, required: port.required })),
     outputs: descriptor.outputs.map((port) => ({ id: port.id, name: port.name, dataType: port.data_type, required: port.required })),
     parameters: descriptor.parameters.map((parameter) => ({ id: parameter.id, name: parameter.name, parameterType: parameter.parameter_type, default: fromRustValue(parameter.default), min: parameter.min, max: parameter.max })),
+    evaluationPolicy: descriptor.evaluation_policy ?? 'automatic',
     capabilities: (descriptor.capabilities ?? []).map((capability) => {
       if (capability === 'Cpu') return 'CPU';
       if (capability === 'Gpu') return 'GPU';
