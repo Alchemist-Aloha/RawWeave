@@ -643,3 +643,16 @@ fn put_entry(bytes: &mut [u8], offset: usize, tag: u16, kind: u16, count: u32, v
     put_u32(bytes, offset + 4, count);
     put_u32(bytes, offset + 8, value);
 }
+
+#[test]
+fn orientation_exposes_stable_control_strings() {
+    assert_eq!(Orientation::Normal.as_str(), "normal");
+    assert_eq!(Orientation::HorizontalFlip.as_str(), "horizontal-flip");
+    assert_eq!(Orientation::Rotate180.as_str(), "rotate-180");
+    assert_eq!(Orientation::VerticalFlip.as_str(), "vertical-flip");
+    assert_eq!(Orientation::Transpose.as_str(), "transpose");
+    assert_eq!(Orientation::Rotate90.as_str(), "rotate-90");
+    assert_eq!(Orientation::Transverse.as_str(), "transverse");
+    assert_eq!(Orientation::Rotate270.as_str(), "rotate-270");
+    assert_eq!(Orientation::Unknown.as_str(), "unknown");
+}

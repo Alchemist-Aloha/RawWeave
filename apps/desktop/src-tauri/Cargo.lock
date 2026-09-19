@@ -2829,6 +2829,7 @@ name = "rawweave-core-values"
 version = "0.1.0"
 dependencies = [
  "rawweave-node-api",
+ "rawweave-raw",
 ]
 
 [[package]]

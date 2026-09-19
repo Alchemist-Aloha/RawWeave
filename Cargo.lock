@@ -733,6 +733,8 @@ name = "rawweave-core-values"
 version = "0.1.0"
 dependencies = [
  "rawweave-node-api",
+ "rawweave-raw",
+ "serde_json",
 ]
 
 [[package]]
@@ -769,6 +771,7 @@ dependencies = [
  "rawweave-raw",
  "rawweave-rendering",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

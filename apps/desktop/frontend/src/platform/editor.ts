@@ -3,6 +3,7 @@ import type {
   ExecutionCapability,
   NodeDescriptor,
   OpenImageResult,
+  ParameterType,
   ParameterValue,
   PlatformEdge,
   PortDescriptor,
@@ -47,6 +48,14 @@ function parameter(id: string, name: string, defaultValue: number, min: number |
 
 function stringParameter(id: string, name: string, defaultValue: string) {
   return { id, name, parameterType: 'String' as const, default: defaultValue, min: null, max: null };
+}
+
+function integerParameter(id: string, name: string, defaultValue: number) {
+  return { id, name, parameterType: 'Integer' as const, default: defaultValue, min: null, max: null };
+}
+
+function booleanParameter(id: string, name: string, defaultValue: boolean) {
+  return { id, name, parameterType: 'Boolean' as const, default: defaultValue, min: null, max: null };
 }
 
 function input(id: string, name: string, dataType: string, required: boolean): PortDescriptor {
@@ -208,6 +217,181 @@ for (const [id, name] of [
   colorMatrix.parameters.push(parameter(id, name, 0));
 }
 
+function controlDescriptor(
+  typeId: string,
+  name: string,
+  inputs: PortDescriptor[],
+  outputs: PortDescriptor[],
+  parameters: NodeDescriptor['parameters'] = [],
+): NodeDescriptor {
+  return { typeId, name, version: 1, inputs, outputs, parameters, capabilities: ['CPU'] };
+}
+
+const conditionInput = input('value', 'Value', 'value.Condition', true);
+
+const logicDescriptors: NodeDescriptor[] = [
+  controlDescriptor(
+    'core.constant-integer',
+    'Constant Integer',
+    [],
+    [outputPort('value', 'Value', 'value.Integer')],
+    [integerParameter('value', 'Value', 0)],
+  ),
+  controlDescriptor(
+    'core.constant-boolean',
+    'Constant Boolean',
+    [],
+    [outputPort('value', 'Value', 'value.Boolean')],
+    [booleanParameter('value', 'Value', false)],
+  ),
+  controlDescriptor(
+    'core.constant-string',
+    'Constant String',
+    [],
+    [outputPort('value', 'Value', 'value.String')],
+    [stringParameter('value', 'Value', '')],
+  ),
+  controlDescriptor(
+    'core.metadata',
+    'Metadata',
+    [
+      input('camera', 'Camera Metadata', 'raw.CameraMetadata', false),
+      input('exif', 'EXIF Metadata', 'raw.ExifMetadata', false),
+    ],
+    [
+      outputPort('metadata', 'Metadata', 'core.Metadata'),
+      outputPort('make', 'Make', 'value.String'),
+      outputPort('model', 'Model', 'value.String'),
+      outputPort('camera_model', 'Camera Model', 'value.String'),
+      outputPort('lens_model', 'Lens Model', 'value.String'),
+      outputPort('iso', 'ISO', 'value.Integer'),
+      outputPort('aperture', 'Aperture', 'value.Float'),
+      outputPort('shutter_seconds', 'Shutter Speed', 'value.Float'),
+      outputPort('focal_length', 'Focal Length', 'value.Float'),
+      outputPort('capture_time', 'Capture Time', 'value.String'),
+      outputPort('orientation', 'Orientation', 'value.String'),
+      outputPort('rating', 'Rating', 'value.Integer'),
+    ],
+  ),
+  ...[compareDescriptor('core.equal', 'Equal'), compareDescriptor('core.greater-than', 'Greater Than'), compareDescriptor('core.less-than', 'Less Than')],
+  controlDescriptor(
+    'core.compare',
+    'Compare',
+    [input('a', 'A', 'value.Float', true), input('b', 'B', 'value.Float', true)],
+    [outputPort('result', 'Result', 'value.Condition')],
+    [parameter('epsilon', 'Epsilon', 0.000001, 0), stringParameter('operation', 'Operation', '==')],
+  ),
+  controlDescriptor(
+    'core.and',
+    'And',
+    [input('a', 'A', 'value.Condition', true), input('b', 'B', 'value.Condition', true)],
+    [outputPort('result', 'Result', 'value.Condition')],
+  ),
+  controlDescriptor(
+    'core.or',
+    'Or',
+    [input('a', 'A', 'value.Condition', true), input('b', 'B', 'value.Condition', true)],
+    [outputPort('result', 'Result', 'value.Condition')],
+  ),
+  controlDescriptor('core.not', 'Not', [conditionInput], [outputPort('result', 'Result', 'value.Condition')]),
+  controlDescriptor(
+    'core.switch',
+    'Switch',
+    [
+      input('condition', 'Condition', 'value.Condition', true),
+      input('true', 'True', 'core.Any', false),
+      input('false', 'False', 'core.Any', false),
+    ],
+    [outputPort('value', 'Value', 'core.Any')],
+  ),
+  controlDescriptor(
+    'core.select',
+    'Select',
+    [
+      input('index', 'Index', 'value.Integer', true),
+      input('a', 'A', 'core.Any', false),
+      input('b', 'B', 'core.Any', false),
+      input('c', 'C', 'core.Any', false),
+      input('d', 'D', 'core.Any', false),
+    ],
+    [outputPort('value', 'Value', 'core.Any')],
+  ),
+  controlDescriptor(
+    'core.enum-select',
+    'Enum Select',
+    [
+      input('selector', 'Selector', 'value.String', true),
+      input('a', 'A', 'core.Any', false),
+      input('b', 'B', 'core.Any', false),
+      input('c', 'C', 'core.Any', false),
+      input('d', 'D', 'core.Any', false),
+    ],
+    [outputPort('value', 'Value', 'core.Any')],
+    [
+      stringParameter('match_a', 'A Matches', ''),
+      stringParameter('match_b', 'B Matches', ''),
+      stringParameter('match_c', 'C Matches', ''),
+      stringParameter('match_d', 'D Matches', ''),
+    ],
+  ),
+  controlDescriptor(
+    'core.map-range',
+    'Map Range',
+    [input('value', 'Value', 'value.Float', true)],
+    [outputPort('value', 'Value', 'value.Float')],
+    [
+      parameter('in_min', 'Input Minimum', 0),
+      parameter('in_max', 'Input Maximum', 1),
+      parameter('out_min', 'Output Minimum', 0),
+      parameter('out_max', 'Output Maximum', 1),
+      booleanParameter('clamp', 'Clamp', false),
+    ],
+  ),
+  controlDescriptor(
+    'core.clamp',
+    'Clamp',
+    [input('value', 'Value', 'value.Float', true)],
+    [outputPort('value', 'Value', 'value.Float')],
+    [parameter('min', 'Minimum', 0), parameter('max', 'Maximum', 1)],
+  ),
+  controlDescriptor(
+    'core.curve',
+    'Curve',
+    [input('value', 'Value', 'value.Float', true)],
+    [outputPort('value', 'Value', 'value.Float')],
+    [stringParameter('points', 'Control Points', '0,0;1,1')],
+  ),
+  controlDescriptor(
+    'core.expression',
+    'Expression',
+    [
+      input('a', 'A', 'value.Float', false),
+      input('b', 'B', 'value.Float', false),
+      input('c', 'C', 'value.Float', false),
+      input('d', 'D', 'value.Float', false),
+    ],
+    [outputPort('value', 'Value', 'value.Float')],
+    [stringParameter('expression', 'Expression', '0')],
+  ),
+  controlDescriptor(
+    'core.string-match',
+    'String Match',
+    [input('value', 'Value', 'value.String', true)],
+    [outputPort('result', 'Result', 'value.Condition')],
+    [stringParameter('pattern', 'Pattern', ''), booleanParameter('case_sensitive', 'Case Sensitive', true)],
+  ),
+];
+
+function compareDescriptor(typeId: string, name: string): NodeDescriptor {
+  return controlDescriptor(
+    typeId,
+    name,
+    [input('a', 'A', 'value.Float', true), input('b', 'B', 'value.Float', true)],
+    [outputPort('result', 'Result', 'value.Condition')],
+    [parameter('epsilon', 'Epsilon', 0.000001, 0)],
+  );
+}
+
 export const builtInDescriptors: NodeDescriptor[] = [
   imageInput,
   constantFloat,
@@ -220,6 +404,7 @@ export const builtInDescriptors: NodeDescriptor[] = [
   curves,
   colorMatrix,
   output,
+  ...logicDescriptors,
   ...rawDescriptors,
 ];
 
@@ -238,6 +423,41 @@ function port(descriptor: NodeDescriptor, direction: 'input' | 'output', portId:
     throw new Error(`port '${portId}' does not exist on node '${descriptor.typeId}'`);
   }
   return found;
+}
+
+function parameterDataType(parameterType: ParameterType): string {
+  switch (parameterType) {
+    case 'Float':
+      return 'value.Float';
+    case 'Integer':
+      return 'value.Integer';
+    case 'Boolean':
+      return 'value.Boolean';
+    default:
+      return 'value.String';
+  }
+}
+
+function typesCompatible(expected: string, actual: string): boolean {
+  if (expected === actual || expected === 'core.Any' || actual === 'core.Any') return true;
+  return (
+    (expected === 'value.Float' && actual === 'value.Integer') ||
+    (expected === 'value.Integer' && actual === 'value.Float') ||
+    (expected === 'value.Condition' && actual === 'value.Boolean') ||
+    (expected === 'value.Boolean' && actual === 'value.Condition')
+  );
+}
+
+/// Resolve the expected data type for a connection target, accepting either a
+/// static input port or an exposed parameter of the same id.
+function inputType(node: PlatformNode | undefined, descriptor: NodeDescriptor, portId: string): string {
+  const input = descriptor.inputs.find((candidate) => candidate.id === portId);
+  if (input) return input.dataType;
+  if (node?.exposedParameters?.includes(portId)) {
+    const parameter = descriptor.parameters.find((candidate) => candidate.id === portId);
+    if (parameter) return parameterDataType(parameter.parameterType);
+  }
+  throw new Error(`port '${portId}' does not exist on node '${descriptor.typeId}'`);
 }
 
 function hasCycle(edges: PlatformEdge[]): boolean {
@@ -292,12 +512,14 @@ export function createMemoryPlatform(): EditorPlatform {
         id: 'input',
         typeId: inputDescriptor.typeId,
         parameters: {},
+        exposedParameters: [],
       });
       revision += 1;
       nodes.set('output', {
         id: 'output',
         typeId: outputDescriptor.typeId,
         parameters: {},
+        exposedParameters: [],
       });
       revision += 1;
       edges = [{ fromNode: 'input', fromPort: 'image', toNode: 'output', toPort: 'image' }];
@@ -320,6 +542,7 @@ export function createMemoryPlatform(): EditorPlatform {
         parameters: Object.fromEntries(
           descriptor.parameters.map((parameter) => [parameter.id, clone(parameter.default)]),
         ),
+        exposedParameters: [],
       });
       revision += 1;
     },
@@ -334,9 +557,9 @@ export function createMemoryPlatform(): EditorPlatform {
       if (!source) throw new Error(`node '${fromNode}' does not exist`);
       if (!target) throw new Error(`node '${toNode}' does not exist`);
       const sourcePort = port(descriptorFor(descriptors, source.typeId), 'output', fromPort);
-      const targetPort = port(descriptorFor(descriptors, target.typeId), 'input', toPort);
-      if (sourcePort.dataType !== targetPort.dataType) {
-        throw new Error(`cannot connect '${sourcePort.dataType}' to '${targetPort.dataType}'`);
+      const targetType = inputType(target, descriptorFor(descriptors, target.typeId), toPort);
+      if (!typesCompatible(targetType, sourcePort.dataType)) {
+        throw new Error(`cannot connect '${sourcePort.dataType}' to '${targetType}'`);
       }
       if (edges.some((edge) => edge.toNode === toNode && edge.toPort === toPort)) {
         throw new Error(`input '${toNode}:${toPort}' already has a connection`);
@@ -380,6 +603,29 @@ export function createMemoryPlatform(): EditorPlatform {
       node.parameters[parameterId] = value;
       revision += 1;
     },
+    async exposeParameter(nodeId, parameterId) {
+      const node = nodes.get(nodeId);
+      if (!node) throw new Error(`node '${nodeId}' does not exist`);
+      const parameter = descriptorFor(descriptors, node.typeId).parameters.find(
+        (candidate) => candidate.id === parameterId,
+      );
+      if (!parameter) throw new Error(`parameter '${parameterId}' does not exist on node '${nodeId}'`);
+      const exposed = new Set(node.exposedParameters ?? []);
+      exposed.add(parameterId);
+      node.exposedParameters = [...exposed];
+      revision += 1;
+    },
+    async unexposeParameter(nodeId, parameterId) {
+      const node = nodes.get(nodeId);
+      if (!node) throw new Error(`node '${nodeId}' does not exist`);
+      const parameter = descriptorFor(descriptors, node.typeId).parameters.find(
+        (candidate) => candidate.id === parameterId,
+      );
+      if (!parameter) throw new Error(`parameter '${parameterId}' does not exist on node '${nodeId}'`);
+      node.exposedParameters = (node.exposedParameters ?? []).filter((id) => id !== parameterId);
+      edges = edges.filter((edge) => !(edge.toNode === nodeId && edge.toPort === parameterId));
+      revision += 1;
+    },
     async saveWorkflow() {
       return JSON.stringify(snapshot());
     },
@@ -391,7 +637,7 @@ export function createMemoryPlatform(): EditorPlatform {
       nodes.clear();
       for (const node of parsed.nodes) {
         descriptorFor(descriptors, node.typeId);
-        nodes.set(node.id, clone(node));
+        nodes.set(node.id, { ...clone(node), exposedParameters: clone(node.exposedParameters ?? []) });
       }
       edges = clone(parsed.edges);
       for (const edge of edges) {
@@ -399,8 +645,8 @@ export function createMemoryPlatform(): EditorPlatform {
         const target = nodes.get(edge.toNode);
         if (!source || !target) throw new Error('workflow contains an unknown node');
         const sourcePort = port(descriptorFor(descriptors, source.typeId), 'output', edge.fromPort);
-        const targetPort = port(descriptorFor(descriptors, target.typeId), 'input', edge.toPort);
-        if (sourcePort.dataType !== targetPort.dataType) throw new Error('workflow contains an invalid connection');
+        const targetType = inputType(target, descriptorFor(descriptors, target.typeId), edge.toPort);
+        if (!typesCompatible(targetType, sourcePort.dataType)) throw new Error('workflow contains an invalid connection');
       }
       if (hasCycle(edges)) throw new Error('workflow contains a cycle');
       revision += 1;

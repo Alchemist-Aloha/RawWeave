@@ -105,6 +105,52 @@ describe('editor controller', () => {
     expect(editor.state.nodes[0].parameters.exposure).toBe(1.25);
   });
 
+  it('exposes a parameter as a connectable input port', async () => {
+    const editor = await controller();
+    await editor.createNode('core.blur', 'blur');
+
+    await editor.exposeParameter('blur', 'radius');
+
+    expect(editor.state.nodes[0].exposedParameters).toEqual(['radius']);
+  });
+
+  it('routes a value into an exposed parameter and restores the literal when hidden', async () => {
+    const editor = await controller();
+    await editor.createNode('core.blur', 'blur');
+    await editor.createNode('core.constant-float', 'constant');
+    await editor.setParameter('blur', 'radius', 2);
+    await editor.exposeParameter('blur', 'radius');
+
+    await editor.connect('constant', 'value', 'blur', 'radius');
+
+    expect(editor.state.edges).toHaveLength(1);
+    // The stored literal survives the temporary connection.
+    expect(editor.state.nodes.find((node) => node.id === 'blur')?.parameters.radius).toBe(2);
+
+    await editor.unexposeParameter('blur', 'radius');
+
+    expect(editor.state.edges).toHaveLength(0);
+    expect(editor.state.nodes.find((node) => node.id === 'blur')?.parameters.radius).toBe(2);
+    expect(editor.state.nodes.find((node) => node.id === 'blur')?.exposedParameters).toEqual([]);
+  });
+
+  it('rejects a type-mismatched connection to an exposed parameter', async () => {
+    const editor = await controller();
+    await editor.createNode('core.blur', 'blur');
+    await editor.createNode('core.image-input', 'input');
+    await editor.exposeParameter('blur', 'radius');
+
+    await expect(editor.connect('input', 'image', 'blur', 'radius')).rejects.toThrow();
+    expect(editor.state.error).toMatch(/cannot connect|type/i);
+  });
+
+  it('rejects exposing an unknown parameter', async () => {
+    const editor = await controller();
+    await editor.createNode('core.blur', 'blur');
+
+    await expect(editor.exposeParameter('blur', 'missing')).rejects.toThrow();
+  });
+
   it('saves and loads workflow state without losing topology', async () => {
     const editor = await controller();
     await editor.createNode('core.image-input', 'input');
@@ -168,6 +214,26 @@ describe('editor controller', () => {
     expect(editor.state.source).toEqual(result);
     expect(editor.state.nodes).toHaveLength(8);
     expect(editor.state.notification).toMatch(/display transform is ready/i);
+  });
+
+  it('registers the Step 4 control and logic nodes', async () => {
+    const editor = await controller();
+    const typeIds = editor.state.descriptors.map((descriptor) => descriptor.typeId);
+    for (const typeId of [
+      'core.metadata',
+      'core.switch',
+      'core.select',
+      'core.enum-select',
+      'core.compare',
+      'core.curve',
+      'core.expression',
+      'core.map-range',
+      'core.constant-integer',
+      'core.constant-boolean',
+      'core.constant-string',
+    ]) {
+      expect(typeIds).toContain(typeId);
+    }
   });
 
   it('opening an ordinary image resets the graph to the standard image workflow', async () => {

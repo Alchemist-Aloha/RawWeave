@@ -3,10 +3,11 @@ import type { EditorNode, ParameterValue } from '../editor/types';
 interface InspectorProps {
   node: EditorNode | undefined;
   onChange: (parameterId: string, value: ParameterValue) => void;
+  onToggleExposed: (parameterId: string, exposed: boolean) => void;
   onDelete: (nodeId: string) => void;
 }
 
-export function Inspector({ node, onChange, onDelete }: InspectorProps) {
+export function Inspector({ node, onChange, onToggleExposed, onDelete }: InspectorProps) {
   if (!node) {
     return (
       <aside className="panel panel--inspector inspector-empty">
@@ -40,38 +41,71 @@ export function Inspector({ node, onChange, onDelete }: InspectorProps) {
       <div className="parameter-list">
         {node.descriptor.parameters.map((parameter) => {
           const value = node.parameters[parameter.id] ?? parameter.default;
+          const exposed = (node.exposedParameters ?? []).includes(parameter.id);
+          const toggle = (
+            <button
+              aria-label={`${exposed ? 'Hide' : 'Expose'} ${parameter.name} port`}
+              aria-pressed={exposed}
+              className={`port-toggle${exposed ? ' port-toggle--active' : ''}`}
+              onClick={() => onToggleExposed(parameter.id, !exposed)}
+              title={exposed ? 'Remove parameter port' : 'Expose as an input port'}
+              type="button"
+            >
+              ⇄
+            </button>
+          );
           if (parameter.parameterType === 'Boolean') {
             return (
-              <label className="parameter parameter--checkbox" key={parameter.id}>
-                <span>{parameter.name}</span>
-                <input
-                  checked={Boolean(value)}
-                  onChange={(event) => onChange(parameter.id, event.target.checked)}
-                  type="checkbox"
-                />
-              </label>
+              <div className="parameter" key={parameter.id}>
+                <label className="parameter__field parameter__field--checkbox">
+                  <span>{parameter.name}</span>
+                  <input
+                    checked={Boolean(value)}
+                    onChange={(event) => onChange(parameter.id, event.target.checked)}
+                    type="checkbox"
+                  />
+                </label>
+                {toggle}
+              </div>
             );
           }
           return (
-            <label className="parameter" key={parameter.id}>
-              <span>{parameter.name}</span>
-              <input
-                max={parameter.max ?? undefined}
-                min={parameter.min ?? undefined}
-                onChange={(event) => {
-                  const next =
+            <div className="parameter" key={parameter.id}>
+              <label className="parameter__field">
+                <span>{parameter.name}</span>
+                <input
+                  max={parameter.max ?? undefined}
+                  min={parameter.min ?? undefined}
+                  onChange={(event) => {
+                    const next =
+                      parameter.parameterType === 'Float' || parameter.parameterType === 'Integer'
+                        ? Number(event.target.value)
+                        : event.target.value;
+                    if (
+                      (parameter.parameterType !== 'Float' &&
+                        parameter.parameterType !== 'Integer') ||
+                      Number.isFinite(next)
+                    ) {
+                      onChange(parameter.id, next);
+                    }
+                  }}
+                  step={
                     parameter.parameterType === 'Float'
-                      ? Number(event.target.value)
-                      : event.target.value;
-                  if (parameter.parameterType !== 'Float' || Number.isFinite(next)) {
-                    onChange(parameter.id, next);
+                      ? 0.01
+                      : parameter.parameterType === 'Integer'
+                        ? 1
+                        : undefined
                   }
-                }}
-                step={parameter.parameterType === 'Float' ? 0.01 : undefined}
-                type={parameter.parameterType === 'Float' ? 'number' : 'text'}
-                value={String(value)}
-              />
-            </label>
+                  type={
+                    parameter.parameterType === 'Float' || parameter.parameterType === 'Integer'
+                      ? 'number'
+                      : 'text'
+                  }
+                  value={String(value)}
+                />
+              </label>
+              {toggle}
+            </div>
           );
         })}
         {node.descriptor.parameters.length === 0 && (

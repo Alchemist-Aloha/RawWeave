@@ -121,6 +121,28 @@ impl EditorCore {
         Ok(())
     }
 
+    /// Expose a node parameter as a typed input port so metadata, analysis, or
+    /// logic values can drive it. The stored literal is preserved.
+    pub fn expose_parameter(
+        &mut self,
+        node_id: &str,
+        parameter_id: &str,
+    ) -> Result<(), ProjectError> {
+        self.graph
+            .expose_parameter(&NodeId::from(node_id), parameter_id)?;
+        Ok(())
+    }
+
+    pub fn unexpose_parameter(
+        &mut self,
+        node_id: &str,
+        parameter_id: &str,
+    ) -> Result<(), ProjectError> {
+        self.graph
+            .unexpose_parameter(&NodeId::from(node_id), parameter_id)?;
+        Ok(())
+    }
+
     pub fn evaluate(
         &self,
         node_id: &str,

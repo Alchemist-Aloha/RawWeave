@@ -14,10 +14,29 @@ fn editor_core_registers_the_backbone_node_packs() {
         .into_iter()
         .map(|descriptor| descriptor.type_id)
         .collect::<Vec<_>>();
-    assert_eq!(types.len(), 19);
+    assert_eq!(types.len(), 38);
     for type_id in [
         "core.image-input",
         "core.constant-float",
+        "core.constant-integer",
+        "core.constant-boolean",
+        "core.constant-string",
+        "core.metadata",
+        "core.equal",
+        "core.greater-than",
+        "core.less-than",
+        "core.compare",
+        "core.and",
+        "core.or",
+        "core.not",
+        "core.switch",
+        "core.select",
+        "core.enum-select",
+        "core.map-range",
+        "core.clamp",
+        "core.curve",
+        "core.expression",
+        "core.string-match",
         "core.exposure",
         "core.invert",
         "core.resize",

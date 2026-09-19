@@ -200,6 +200,17 @@ export default function App() {
     [controller, selectedNode],
   );
 
+  const onToggleExposed = useCallback(
+    (parameterId: string, exposed: boolean) => {
+      if (!selectedNode) return;
+      const action = exposed
+        ? controller.exposeParameter(selectedNode.id, parameterId)
+        : controller.unexposeParameter(selectedNode.id, parameterId);
+      void action.catch(() => undefined);
+    },
+    [controller, selectedNode],
+  );
+
   const loadFile = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -342,6 +353,7 @@ export default function App() {
         <Inspector
           node={selectedNode}
           onChange={onParameterChange}
+          onToggleExposed={onToggleExposed}
           onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
         />
       </section>

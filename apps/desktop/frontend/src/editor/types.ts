@@ -1,4 +1,4 @@
-export type ParameterType = 'Float' | 'Boolean' | 'String';
+export type ParameterType = 'Float' | 'Integer' | 'Boolean' | 'String';
 export type ParameterValue = number | boolean | string;
 
 export interface PortDescriptor {
@@ -33,6 +33,7 @@ export interface PlatformNode {
   id: string;
   typeId: string;
   parameters: Record<string, ParameterValue>;
+  exposedParameters?: string[];
 }
 
 export interface PlatformEdge {
@@ -81,6 +82,8 @@ export interface EditorPlatform {
   connect(fromNode: string, fromPort: string, toNode: string, toPort: string): Promise<void>;
   disconnect(fromNode: string, fromPort: string, toNode: string, toPort: string): Promise<void>;
   setParameter(nodeId: string, parameterId: string, value: ParameterValue): Promise<void>;
+  exposeParameter(nodeId: string, parameterId: string): Promise<void>;
+  unexposeParameter(nodeId: string, parameterId: string): Promise<void>;
   saveWorkflow(): Promise<string>;
   loadWorkflow(serialized: string): Promise<void>;
 }

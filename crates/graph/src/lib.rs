@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use rawweave_core::{CoreError, NodeId};
 use rawweave_node_api::{
-    EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeRegistry,
-    NodeResult, ParameterValue, Value,
+    EvaluationContext, ExecutionCapability, Inputs, LazyCondition, LazyInputGate, NodeDescriptor,
+    NodeError, NodeRegistry, NodeResult, ParameterType, ParameterValue, Value,
 };
 use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResult, TileCoord};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,14 @@ pub struct GraphNode {
     pub type_id: String,
     pub descriptor: NodeDescriptor,
     pub parameters: rawweave_node_api::Parameters,
+    /// Parameters optionally exposed as typed input ports. Exposed parameters
+    /// may be connected without becoming static descriptor inputs.
+    #[serde(default)]
+    pub exposed_parameters: BTreeSet<String>,
 }
+
+/// The wildcard type id accepted by generic routing nodes such as `Switch`.
+pub const ANY_TYPE: &str = "core.Any";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEdge {
@@ -179,9 +186,64 @@ impl Graph {
             type_id: type_id.to_owned(),
             parameters: descriptor.parameter_defaults(),
             descriptor,
+            exposed_parameters: BTreeSet::new(),
         };
         self.nodes.insert(id, node);
         self.bump_revision();
+        Ok(())
+    }
+
+    /// Expose a node parameter as a typed input port so it may be driven by a
+    /// connection. The stored literal value is preserved.
+    pub fn expose_parameter(
+        &mut self,
+        node_id: &NodeId,
+        parameter_id: &str,
+    ) -> Result<(), GraphError> {
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        if node.descriptor.parameter(parameter_id).is_none() {
+            return Err(GraphError::MissingParameter {
+                node: node_id.clone(),
+                parameter: parameter_id.to_owned(),
+            });
+        }
+        node.exposed_parameters.insert(parameter_id.to_owned());
+        self.bump_revision();
+        Ok(())
+    }
+
+    /// Stop exposing a parameter. Any connection targeting it is removed and
+    /// the stored literal value becomes authoritative again.
+    pub fn unexpose_parameter(
+        &mut self,
+        node_id: &NodeId,
+        parameter_id: &str,
+    ) -> Result<(), GraphError> {
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        if node.descriptor.parameter(parameter_id).is_none() {
+            return Err(GraphError::MissingParameter {
+                node: node_id.clone(),
+                parameter: parameter_id.to_owned(),
+            });
+        }
+        let was_exposed = node.exposed_parameters.remove(parameter_id);
+        let dropped = self
+            .edges
+            .iter()
+            .any(|edge| edge.to_node == *node_id && edge.to_port == parameter_id);
+        self.edges
+            .retain(|edge| !(edge.to_node == *node_id && edge.to_port == parameter_id));
+        if was_exposed || dropped {
+            let affected = self.downstream_nodes(node_id);
+            self.invalidate_nodes(&affected);
+            self.bump_revision();
+        }
         Ok(())
     }
 
@@ -257,30 +319,28 @@ impl Graph {
             .nodes
             .get(&from_node)
             .ok_or_else(|| GraphError::MissingNode(from_node.clone()))?;
-        let source_port =
-            source
-                .descriptor
-                .output(from_port)
-                .ok_or_else(|| GraphError::MissingPort {
-                    node: from_node.clone(),
-                    port: from_port.to_owned(),
-                })?;
+        let source_type = source
+            .descriptor
+            .output(from_port)
+            .ok_or_else(|| GraphError::MissingPort {
+                node: from_node.clone(),
+                port: from_port.to_owned(),
+            })?
+            .data_type
+            .clone();
         let target = self
             .nodes
             .get(&to_node)
             .ok_or_else(|| GraphError::MissingNode(to_node.clone()))?;
-        let target_port =
-            target
-                .descriptor
-                .input(to_port)
-                .ok_or_else(|| GraphError::MissingPort {
-                    node: to_node.clone(),
-                    port: to_port.to_owned(),
-                })?;
-        if source_port.data_type != target_port.data_type {
+        let expected_type =
+            target_input_type(target, to_port).ok_or_else(|| GraphError::MissingPort {
+                node: to_node.clone(),
+                port: to_port.to_owned(),
+            })?;
+        if !types_compatible(&expected_type, &source_type) {
             return Err(GraphError::TypeMismatch {
-                expected: target_port.data_type.clone(),
-                actual: source_port.data_type.clone(),
+                expected: expected_type,
+                actual: source_type,
             });
         }
         if self
@@ -357,17 +417,15 @@ impl Graph {
                     port: edge.from_port.clone(),
                 }
             })?;
-            let target_port =
-                target
-                    .descriptor
-                    .input(&edge.to_port)
-                    .ok_or_else(|| GraphError::MissingPort {
-                        node: edge.to_node.clone(),
-                        port: edge.to_port.clone(),
-                    })?;
-            if source_port.data_type != target_port.data_type {
+            let expected_type = target_input_type(target, &edge.to_port).ok_or_else(|| {
+                GraphError::MissingPort {
+                    node: edge.to_node.clone(),
+                    port: edge.to_port.clone(),
+                }
+            })?;
+            if !types_compatible(&expected_type, &source_port.data_type) {
                 return Err(GraphError::TypeMismatch {
-                    expected: target_port.data_type.clone(),
+                    expected: expected_type,
                     actual: source_port.data_type.clone(),
                 });
             }
@@ -418,6 +476,34 @@ impl Graph {
         Ok(graph)
     }
 
+    fn evaluate_port_value(
+        &self,
+        node_id: &NodeId,
+        port: &str,
+        context: &EvaluationContext,
+        memo: &mut HashMap<MemoKey, EvaluatedNode>,
+        visiting: &mut BTreeSet<NodeId>,
+    ) -> Result<Option<Value>, GraphError> {
+        let Some(edge) = self
+            .edges
+            .iter()
+            .find(|edge| edge.to_node == *node_id && edge.to_port == port)
+        else {
+            return Ok(None);
+        };
+        let upstream = self.evaluate_node(&edge.from_node, context, memo, visiting)?;
+        upstream
+            .result
+            .outputs
+            .get(&edge.from_port)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| GraphError::MissingOutput {
+                node: edge.from_node.clone(),
+                port: edge.from_port.clone(),
+            })
+    }
+
     fn evaluate_node(
         &self,
         node_id: &NodeId,
@@ -452,11 +538,41 @@ impl Graph {
         if !visiting.insert(node_id.clone()) {
             return Err(GraphError::CycleDetected);
         }
+        let mut effective_parameters = node.parameters.clone();
+        for parameter in &node.descriptor.parameters {
+            if let Some(over) = context.parameter_override(node_id.as_str(), &parameter.id)
+                && over.parameter_type() == parameter.parameter_type
+            {
+                effective_parameters.insert(parameter.id.clone(), over.clone());
+            }
+        }
+        let mut included: Option<BTreeSet<String>> = None;
+        if !node.descriptor.lazy_inputs.is_empty() {
+            let mut selected = BTreeSet::new();
+            for gate in &node.descriptor.lazy_inputs {
+                selected.extend(gate.required.iter().cloned());
+                let selector = self.evaluate_port_value(
+                    node_id,
+                    &gate.selector,
+                    &execution_context,
+                    memo,
+                    visiting,
+                )?;
+                selected.extend(gate_inputs(gate, selector.as_ref()));
+            }
+            included = Some(selected);
+        }
         let mut inputs = Inputs::new();
         let mut upstream_hasher = DefaultHasher::new();
         backend_identity(&execution_context).hash(&mut upstream_hasher);
         hash_evaluation_context(&execution_context, &mut upstream_hasher);
         for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
+            if included
+                .as_ref()
+                .is_some_and(|selected| !selected.contains(&edge.to_port))
+            {
+                continue;
+            }
             let upstream =
                 self.evaluate_node(&edge.from_node, &execution_context, memo, visiting)?;
             let value = upstream
@@ -472,10 +588,44 @@ impl Graph {
             edge.from_port.hash(&mut upstream_hasher);
             edge.to_port.hash(&mut upstream_hasher);
             upstream.output_hash.hash(&mut upstream_hasher);
-            inputs.insert(edge.to_port.clone(), value);
+            if node.descriptor.input(&edge.to_port).is_none()
+                && node.exposed_parameters.contains(&edge.to_port)
+            {
+                let parameter = node.descriptor.parameter(&edge.to_port).ok_or_else(|| {
+                    GraphError::Evaluation {
+                        node: node_id.clone(),
+                        source: NodeError::InvalidParameter(edge.to_port.clone()),
+                    }
+                })?;
+                let converted =
+                    value_to_parameter(&value, parameter.parameter_type).ok_or_else(|| {
+                        GraphError::Evaluation {
+                            node: node_id.clone(),
+                            source: NodeError::InvalidParameter(edge.to_port.clone()),
+                        }
+                    })?;
+                effective_parameters.insert(edge.to_port.clone(), converted);
+                continue;
+            }
+            let coerced = match target_input_type(node, &edge.to_port) {
+                Some(expected) => coerce_value(value.clone(), &expected).ok_or_else(|| {
+                    GraphError::TypeMismatch {
+                        expected,
+                        actual: value.data_type().to_owned(),
+                    }
+                })?,
+                None => value,
+            };
+            inputs.insert(edge.to_port.clone(), coerced);
         }
         for port in &node.descriptor.inputs {
             if port.required && !inputs.contains_key(&port.id) {
+                if included
+                    .as_ref()
+                    .is_some_and(|selected| !selected.contains(&port.id))
+                {
+                    continue;
+                }
                 return Err(GraphError::Evaluation {
                     node: node_id.clone(),
                     source: NodeError::MissingInput(port.id.clone()),
@@ -485,7 +635,7 @@ impl Graph {
         let cache_key = CacheKey::new(
             node.id.as_str(),
             node.descriptor.version,
-            hash_parameters(&node.parameters),
+            hash_parameters(&effective_parameters),
             hash_output_schema(node),
             upstream_hasher.finish(),
             execution_context.requested_region().unwrap_or_default(),
@@ -515,7 +665,7 @@ impl Graph {
             }
         })?;
         let result = instance
-            .evaluate(&inputs, &node.parameters, &execution_context)
+            .evaluate(&inputs, &effective_parameters, &execution_context)
             .map_err(|source| GraphError::Evaluation {
                 node: node_id.clone(),
                 source,
@@ -613,6 +763,106 @@ fn backend_identity_hash(context: &EvaluationContext) -> u64 {
     hasher.finish()
 }
 
+/// Resolve the expected graph data type for a connection target, accepting
+/// either a static input port or an exposed parameter of the same id.
+fn target_input_type(node: &GraphNode, port: &str) -> Option<String> {
+    if let Some(descriptor) = node.descriptor.input(port) {
+        return Some(descriptor.data_type.clone());
+    }
+    node.exposed_parameters
+        .contains(port)
+        .then(|| node.descriptor.parameter(port))
+        .flatten()
+        .map(|parameter| parameter_data_type(parameter.parameter_type).to_owned())
+}
+
+fn parameter_data_type(parameter_type: ParameterType) -> &'static str {
+    match parameter_type {
+        ParameterType::Float => "value.Float",
+        ParameterType::Integer => "value.Integer",
+        ParameterType::Boolean => "value.Boolean",
+        ParameterType::String => "value.String",
+    }
+}
+
+/// Two ports may connect when their types match, when either side is the
+/// `core.Any` wildcard used by routing nodes, or for the documented safe
+/// conversions: integer/float numerics and boolean/condition predicates.
+fn types_compatible(expected: &str, actual: &str) -> bool {
+    expected == actual
+        || expected == ANY_TYPE
+        || actual == ANY_TYPE
+        || matches!(
+            (expected, actual),
+            ("value.Float", "value.Integer")
+                | ("value.Integer", "value.Float")
+                | ("value.Condition", "value.Boolean")
+                | ("value.Boolean", "value.Condition")
+        )
+}
+
+/// Convert an upstream value to the type a downstream input port expects.
+fn coerce_value(value: Value, expected: &str) -> Option<Value> {
+    if expected == ANY_TYPE || value.data_type() == expected {
+        return Some(value);
+    }
+    match (expected, value) {
+        ("value.Float", Value::Integer(number)) => Some(Value::Float(number as f32)),
+        ("value.Integer", Value::Float(number)) if number.fract() == 0.0 => {
+            Some(Value::Integer(number as i64))
+        }
+        ("value.Condition", Value::Boolean(value)) => Some(Value::Condition(value)),
+        ("value.Boolean", Value::Condition(value)) => Some(Value::Boolean(value)),
+        _ => None,
+    }
+}
+
+/// Convert a connected control value into a stored parameter value.
+fn value_to_parameter(value: &Value, parameter_type: ParameterType) -> Option<ParameterValue> {
+    match (parameter_type, value) {
+        (ParameterType::Float, Value::Float(number)) => Some(ParameterValue::Float(*number)),
+        (ParameterType::Float, Value::Integer(number)) => {
+            Some(ParameterValue::Float(*number as f32))
+        }
+        (ParameterType::Integer, Value::Integer(number)) => Some(ParameterValue::Integer(*number)),
+        (ParameterType::Integer, Value::Float(number)) if number.fract() == 0.0 => {
+            Some(ParameterValue::Integer(*number as i64))
+        }
+        (ParameterType::Boolean, Value::Boolean(value)) => Some(ParameterValue::Boolean(*value)),
+        (ParameterType::Boolean, Value::Condition(value)) => Some(ParameterValue::Boolean(*value)),
+        (ParameterType::String, Value::String(value)) => {
+            Some(ParameterValue::String(value.clone()))
+        }
+        (ParameterType::String, Value::Enum(value)) => Some(ParameterValue::String(value.clone())),
+        _ => None,
+    }
+}
+
+/// Decide which input ports a lazy gate requires for the observed selector.
+fn gate_inputs(gate: &LazyInputGate, selector: Option<&Value>) -> Vec<String> {
+    let Some(selector) = selector else {
+        return Vec::new();
+    };
+    gate.branches
+        .iter()
+        .find(|branch| lazy_condition_matches(&branch.condition, selector))
+        .map(|branch| branch.inputs.clone())
+        .unwrap_or_default()
+}
+
+fn lazy_condition_matches(condition: &LazyCondition, selector: &Value) -> bool {
+    match (condition, selector) {
+        (LazyCondition::True, Value::Condition(value) | Value::Boolean(value)) => *value,
+        (LazyCondition::False, Value::Condition(value) | Value::Boolean(value)) => !*value,
+        (LazyCondition::Index(index), Value::Integer(value)) => i64::from(*index) == *value,
+        (LazyCondition::Index(index), Value::Float(value)) => {
+            value.fract() == 0.0 && *value as i64 == i64::from(*index)
+        }
+        (LazyCondition::Key(key), Value::String(value) | Value::Enum(value)) => key == value,
+        _ => false,
+    }
+}
+
 fn cached_node_result(node: &GraphNode, cached: RenderResult) -> Option<NodeResult> {
     let output = node.descriptor.outputs.first()?;
     (node.descriptor.outputs.len() == 1 && output.data_type == "core.Image").then(|| {
@@ -629,17 +879,7 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
         .flatten()
         .and_then(|value| match value {
             Value::Image(image) => Some(image),
-            Value::Float(_)
-            | Value::Bytes(_)
-            | Value::RawFrame(_)
-            | Value::Mosaic(_)
-            | Value::SceneLinearRGB(_)
-            | Value::DisplayRGB(_)
-            | Value::CameraMetadata(_)
-            | Value::ExifMetadata(_)
-            | Value::CameraProfile(_)
-            | Value::LensProfile(_)
-            | Value::EmbeddedPreview(_) => None,
+            _ => None,
         })
 }
 
@@ -661,6 +901,10 @@ fn hash_parameters(parameters: &rawweave_node_api::Parameters) -> u64 {
             ParameterValue::Float(number) => {
                 0_u8.hash(&mut hasher);
                 number.to_bits().hash(&mut hasher);
+            }
+            ParameterValue::Integer(number) => {
+                3_u8.hash(&mut hasher);
+                number.hash(&mut hasher);
             }
             ParameterValue::Boolean(value) => {
                 1_u8.hash(&mut hasher);
@@ -693,6 +937,36 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
         Value::Float(number) => {
             1_u8.hash(hasher);
             number.to_bits().hash(hasher);
+        }
+        Value::Integer(number) => {
+            12_u8.hash(hasher);
+            number.hash(hasher);
+        }
+        Value::Boolean(value) => {
+            13_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::String(value) => {
+            14_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Enum(value) => {
+            15_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Color(color) => {
+            16_u8.hash(hasher);
+            for channel in [color.red, color.green, color.blue, color.alpha] {
+                channel.to_bits().hash(hasher);
+            }
+        }
+        Value::Condition(value) => {
+            17_u8.hash(hasher);
+            value.hash(hasher);
+        }
+        Value::Metadata(metadata) => {
+            18_u8.hash(hasher);
+            hash_metadata(metadata, hasher);
         }
         Value::Bytes(bytes) => {
             2_u8.hash(hasher);
@@ -803,6 +1077,23 @@ fn hash_mosaic(mosaic: &rawweave_raw::Mosaic, hasher: &mut impl Hasher) {
     mosaic.cfa().colors().hash(hasher);
     for sample in mosaic.samples() {
         sample.to_bits().hash(hasher);
+    }
+}
+
+fn hash_metadata(metadata: &rawweave_node_api::Metadata, hasher: &mut impl Hasher) {
+    metadata.make.hash(hasher);
+    metadata.model.hash(hasher);
+    metadata.lens.hash(hasher);
+    metadata.iso.hash(hasher);
+    hash_optional_float(metadata.aperture, hasher);
+    hash_optional_float(metadata.shutter_seconds, hasher);
+    hash_optional_float(metadata.focal_length_mm, hasher);
+    metadata.capture_time.hash(hasher);
+    metadata.orientation.hash(hasher);
+    metadata.rating.hash(hasher);
+    for (key, value) in &metadata.tags {
+        key.hash(hasher);
+        value.hash(hasher);
     }
 }
 

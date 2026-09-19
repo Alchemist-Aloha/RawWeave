@@ -566,51 +566,21 @@ fn required_input<'a>(inputs: &'a Inputs, port: &str) -> Result<&'a Value, NodeE
 fn raw_frame_input(inputs: &Inputs, port: &str) -> Result<RawFrame, NodeError> {
     match required_input(inputs, port)? {
         Value::RawFrame(frame) => Ok(frame.clone()),
-        Value::Image(_)
-        | Value::Float(_)
-        | Value::Bytes(_)
-        | Value::Mosaic(_)
-        | Value::SceneLinearRGB(_)
-        | Value::DisplayRGB(_)
-        | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_)
-        | Value::CameraProfile(_)
-        | Value::LensProfile(_)
-        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        _ => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
 fn mosaic_input(inputs: &Inputs, port: &str) -> Result<Mosaic, NodeError> {
     match required_input(inputs, port)? {
         Value::Mosaic(mosaic) => Ok(mosaic.clone()),
-        Value::Image(_)
-        | Value::Float(_)
-        | Value::Bytes(_)
-        | Value::RawFrame(_)
-        | Value::SceneLinearRGB(_)
-        | Value::DisplayRGB(_)
-        | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_)
-        | Value::CameraProfile(_)
-        | Value::LensProfile(_)
-        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        _ => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 
 fn scene_input(inputs: &Inputs, port: &str) -> Result<SceneLinearRGB, NodeError> {
     match required_input(inputs, port)? {
         Value::SceneLinearRGB(scene) => Ok(scene.clone()),
-        Value::Image(_)
-        | Value::Float(_)
-        | Value::Bytes(_)
-        | Value::RawFrame(_)
-        | Value::Mosaic(_)
-        | Value::DisplayRGB(_)
-        | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_)
-        | Value::CameraProfile(_)
-        | Value::LensProfile(_)
-        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        _ => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 

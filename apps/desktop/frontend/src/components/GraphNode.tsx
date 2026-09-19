@@ -9,13 +9,25 @@ export type RawWeaveFlowNode = Node<RawWeaveNodeData, 'rawweave'>;
 
 export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
   const { node } = data;
+  const exposedPorts = (node.exposedParameters ?? [])
+    .filter(
+      (parameterId) => !node.descriptor.inputs.some((input) => input.id === parameterId),
+    )
+    .map((parameterId) => ({
+      id: parameterId,
+      name: node.descriptor.parameters.find((parameter) => parameter.id === parameterId)?.name ?? parameterId,
+    }));
+  const inputPorts = [
+    ...node.descriptor.inputs.map((input) => ({ id: input.id, name: input.name })),
+    ...exposedPorts,
+  ];
   return (
     <div className={`graph-node${selected ? ' graph-node--selected' : ''}`}>
       <div className="graph-node__title">{node.descriptor.name}</div>
       <div className="graph-node__type">{node.typeId}</div>
       <div className="graph-node__ports">
         <div className="graph-node__port-column">
-          {node.descriptor.inputs.map((input, index) => (
+          {inputPorts.map((input, index) => (
             <div className="graph-node__port graph-node__port--input" key={input.id}>
               <Handle
                 id={input.id}

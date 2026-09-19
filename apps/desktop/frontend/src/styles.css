@@ -101,10 +101,13 @@ button { cursor: pointer; }
 .inspector__identity code { margin-top: 5px; color: #66768a; font-family: 'DM Mono', monospace; font-size: 8px; }
 .parameter-list { display: grid; gap: 15px; }
 .parameter { display: grid; gap: 7px; color: #94a3b5; font-size: 10px; }
+.parameter__field { display: grid; gap: 7px; }
 .parameter input:not([type='checkbox']) { width: 100%; border: 1px solid #293543; border-radius: 6px; outline: none; padding: 8px; color: #e6eef3; background: #0c1016; font-family: 'DM Mono', monospace; font-size: 10px; }
 .parameter input:focus { border-color: #58c6aa; }
-.parameter--checkbox { grid-template-columns: 1fr auto; align-items: center; }
+.parameter__field--checkbox { grid-template-columns: 1fr auto; align-items: center; }
 .parameter input[type='checkbox'] { width: 15px; height: 15px; accent-color: #6ee7c7; }
+.port-toggle { justify-self: start; border: 1px solid #293543; border-radius: 6px; padding: 3px 9px; color: #94a3b5; background: #0c1016; font-size: 10px; cursor: pointer; }
+.port-toggle--active { border-color: #58c6aa; color: #6ee7c7; }
 
 .viewer-section { display: grid; grid-template-rows: 50px minmax(0, 1fr); min-height: 0; border-top: 1px solid #1c2430; padding: 0 18px 14px; background: #0e1219; }
 .viewer-section__toolbar { display: flex; align-items: center; justify-content: space-between; min-width: 0; }

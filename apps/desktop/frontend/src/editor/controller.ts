@@ -179,6 +179,14 @@ export class EditorController {
     await this.command(() => this.platform.setParameter(nodeId, parameterId, value));
   }
 
+  public async exposeParameter(nodeId: string, parameterId: string): Promise<void> {
+    await this.command(() => this.platform.exposeParameter(nodeId, parameterId));
+  }
+
+  public async unexposeParameter(nodeId: string, parameterId: string): Promise<void> {
+    await this.command(() => this.platform.unexposeParameter(nodeId, parameterId));
+  }
+
   public selectNode(nodeId: string | null): void {
     this.setState({ selectedNodeId: nodeId, error: null });
   }

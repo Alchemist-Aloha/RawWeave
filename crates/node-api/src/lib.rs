@@ -56,6 +56,7 @@ impl PortDescriptor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParameterType {
     Float,
+    Integer,
     Boolean,
     String,
 }
@@ -63,8 +64,95 @@ pub enum ParameterType {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ParameterValue {
     Float(#[serde(deserialize_with = "deserialize_finite_float")] f32),
+    Integer(i64),
     Boolean(bool),
     String(String),
+}
+
+/// A validated linear RGBA control value.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ColorValue {
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+    pub alpha: f32,
+}
+
+impl ColorValue {
+    /// Build a color when every channel is finite.
+    pub fn new(red: f32, green: f32, blue: f32, alpha: f32) -> Option<Self> {
+        [red, green, blue, alpha]
+            .into_iter()
+            .all(f32::is_finite)
+            .then_some(Self {
+                red,
+                green,
+                blue,
+                alpha,
+            })
+    }
+
+    /// Build an opaque color from in-range channels.
+    pub fn rgb(red: f32, green: f32, blue: f32) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha: 1.0,
+        }
+    }
+
+    /// Build a color with an explicit alpha channel.
+    pub fn rgba(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
+    }
+}
+
+/// Descriptive capture metadata projected into graph space.
+///
+/// Fields mirror [`rawweave_raw::CameraMetadata`]; absent values stay `None`
+/// rather than being invented.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Metadata {
+    pub make: String,
+    pub model: String,
+    pub lens: Option<String>,
+    pub iso: Option<u32>,
+    pub aperture: Option<f32>,
+    pub shutter_seconds: Option<f32>,
+    pub focal_length_mm: Option<f32>,
+    pub capture_time: Option<String>,
+    pub orientation: Option<String>,
+    pub rating: Option<u32>,
+    pub tags: BTreeMap<String, String>,
+}
+
+impl Metadata {
+    /// Project RAW camera and EXIF metadata into the portable `core.Metadata`
+    /// value. The `Rating` EXIF tag is parsed when present and well formed.
+    pub fn from_sources(camera: &CameraMetadata, exif: &ExifMetadata) -> Self {
+        Self {
+            make: camera.make.clone(),
+            model: camera.model.clone(),
+            lens: camera.lens.clone(),
+            iso: camera.iso,
+            aperture: camera.aperture,
+            shutter_seconds: camera.shutter_seconds,
+            focal_length_mm: camera.focal_length_mm,
+            capture_time: camera.capture_time.clone(),
+            orientation: Some(camera.orientation.as_str().to_owned()),
+            rating: exif
+                .tags
+                .get("Rating")
+                .and_then(|rating| rating.parse::<u32>().ok()),
+            tags: exif.tags.clone(),
+        }
+    }
 }
 
 fn deserialize_finite_float<'de, D>(deserializer: D) -> Result<f32, D::Error>
@@ -82,6 +170,7 @@ impl ParameterValue {
     pub fn parameter_type(&self) -> ParameterType {
         match self {
             Self::Float(_) => ParameterType::Float,
+            Self::Integer(_) => ParameterType::Integer,
             Self::Boolean(_) => ParameterType::Boolean,
             Self::String(_) => ParameterType::String,
         }
@@ -90,8 +179,36 @@ impl ParameterValue {
     pub fn as_float(&self) -> Option<f32> {
         match self {
             Self::Float(value) => Some(*value),
+            Self::Integer(value) => Some(*value as f32),
             _ => None,
         }
+    }
+
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            Self::Integer(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_boolean(&self) -> Option<bool> {
+        match self {
+            Self::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl From<i64> for ParameterValue {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
     }
 }
 
@@ -161,6 +278,28 @@ impl ParameterDescriptor {
             max: None,
         }
     }
+
+    pub fn integer(id: impl Into<String>, name: impl Into<String>, default: i64) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            parameter_type: ParameterType::Integer,
+            default: ParameterValue::Integer(default),
+            min: None,
+            max: None,
+        }
+    }
+
+    pub fn boolean(id: impl Into<String>, name: impl Into<String>, default: bool) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            parameter_type: ParameterType::Boolean,
+            default: ParameterValue::Boolean(default),
+            min: None,
+            max: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,6 +312,37 @@ pub struct NodeDescriptor {
     pub parameters: Vec<ParameterDescriptor>,
     #[serde(default)]
     pub capabilities: Vec<ExecutionCapability>,
+    /// Selector-gated input ports. When present, the graph evaluates the
+    /// selector first and skips input ports outside the selected branch so
+    /// unselected expensive image branches are not rendered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lazy_inputs: Vec<LazyInputGate>,
+}
+
+/// A selector port that decides which input ports are required to evaluate a
+/// node. `required` ports are always evaluated (including the selector).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LazyInputGate {
+    pub selector: String,
+    #[serde(default)]
+    pub required: Vec<String>,
+    pub branches: Vec<LazyBranch>,
+}
+
+/// Input ports that are only needed when the selector matches `condition`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LazyBranch {
+    pub condition: LazyCondition,
+    pub inputs: Vec<String>,
+}
+
+/// A selector outcome that gates a branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LazyCondition {
+    True,
+    False,
+    Index(u32),
+    Key(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -194,6 +364,7 @@ impl NodeDescriptor {
             outputs: Vec::new(),
             parameters: Vec::new(),
             capabilities: Vec::new(),
+            lazy_inputs: Vec::new(),
         }
     }
 
@@ -251,6 +422,12 @@ impl NodeDescriptor {
     pub fn parameter(&self, id: &str) -> Option<&ParameterDescriptor> {
         self.parameters.iter().find(|parameter| parameter.id == id)
     }
+
+    pub fn lazy_input_gate(&self, selector: &str) -> Option<&LazyInputGate> {
+        self.lazy_inputs
+            .iter()
+            .find(|gate| gate.selector == selector)
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -258,6 +435,13 @@ impl NodeDescriptor {
 pub enum Value {
     Image(Image),
     Float(f32),
+    Integer(i64),
+    Boolean(bool),
+    String(String),
+    Enum(String),
+    Color(ColorValue),
+    Condition(bool),
+    Metadata(Metadata),
     Bytes(Vec<u8>),
     RawFrame(RawFrame),
     Mosaic(Mosaic),
@@ -275,6 +459,13 @@ impl Value {
         match self {
             Self::Image(_) => "core.Image",
             Self::Float(_) => "value.Float",
+            Self::Integer(_) => "value.Integer",
+            Self::Boolean(_) => "value.Boolean",
+            Self::String(_) => "value.String",
+            Self::Enum(_) => "value.Enum",
+            Self::Color(_) => "value.Color",
+            Self::Condition(_) => "value.Condition",
+            Self::Metadata(_) => "core.Metadata",
             Self::Bytes(_) => "core.Bytes",
             Self::RawFrame(_) => "raw.Frame",
             Self::Mosaic(_) => "raw.Mosaic",
@@ -311,6 +502,9 @@ pub struct EvaluationContext {
     pub source_path: Option<PathBuf>,
     pub external_inputs: BTreeMap<String, Value>,
     pub assets: BTreeMap<String, Vec<u8>>,
+    /// Per-instance/per-image parameter overrides keyed by node and parameter
+    /// id. A connection still takes precedence over an override.
+    pub parameter_overrides: BTreeMap<(String, String), ParameterValue>,
     pub requested_region: Option<Region>,
     pub render_context: Option<RenderContext>,
     pub tile: TileCoord,
@@ -349,6 +543,22 @@ impl EvaluationContext {
         self.external_inputs
             .extend(inputs.into_iter().map(|(id, value)| (id.into(), value)));
         self
+    }
+
+    pub fn with_parameter_override(
+        mut self,
+        node_id: impl Into<String>,
+        parameter_id: impl Into<String>,
+        value: impl Into<ParameterValue>,
+    ) -> Self {
+        self.parameter_overrides
+            .insert((node_id.into(), parameter_id.into()), value.into());
+        self
+    }
+
+    pub fn parameter_override(&self, node_id: &str, parameter_id: &str) -> Option<&ParameterValue> {
+        self.parameter_overrides
+            .get(&(node_id.to_owned(), parameter_id.to_owned()))
     }
 
     pub fn with_asset(mut self, id: impl Into<String>, bytes: Vec<u8>) -> Self {

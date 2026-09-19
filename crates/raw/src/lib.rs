@@ -38,6 +38,23 @@ pub enum Orientation {
     Unknown,
 }
 
+impl Orientation {
+    /// Stable lower-case identifier used by control-value graph nodes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::HorizontalFlip => "horizontal-flip",
+            Self::Rotate180 => "rotate-180",
+            Self::VerticalFlip => "vertical-flip",
+            Self::Transpose => "transpose",
+            Self::Rotate90 => "rotate-90",
+            Self::Transverse => "transverse",
+            Self::Rotate270 => "rotate-270",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl From<rawloader::Orientation> for Orientation {
     fn from(value: rawloader::Orientation) -> Self {
         match value {

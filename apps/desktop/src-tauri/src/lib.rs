@@ -438,6 +438,28 @@ fn set_node_parameter(
 }
 
 #[tauri::command]
+fn expose_parameter(
+    state: State<'_, AppState>,
+    node_id: String,
+    parameter_id: String,
+) -> Result<(), String> {
+    lock_editor(&state.editor)?
+        .expose_parameter(&node_id, &parameter_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn unexpose_parameter(
+    state: State<'_, AppState>,
+    node_id: String,
+    parameter_id: String,
+) -> Result<(), String> {
+    lock_editor(&state.editor)?
+        .unexpose_parameter(&node_id, &parameter_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn save_workflow(state: State<'_, AppState>) -> Result<String, String> {
     lock_editor(&state.editor)?
         .save_workflow()
@@ -594,6 +616,8 @@ pub fn run() {
             connect_nodes,
             disconnect_nodes,
             set_node_parameter,
+            expose_parameter,
+            unexpose_parameter,
             save_workflow,
             load_workflow,
             open_image,

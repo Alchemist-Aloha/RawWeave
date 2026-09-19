@@ -538,17 +538,7 @@ fn image_value(inputs: &Inputs, port: &str) -> Result<Value, NodeError> {
 fn image_input(inputs: &Inputs, port: &str) -> Result<Image, NodeError> {
     match image_value(inputs, port)? {
         Value::Image(image) => Ok(image),
-        Value::Float(_)
-        | Value::Bytes(_)
-        | Value::RawFrame(_)
-        | Value::Mosaic(_)
-        | Value::SceneLinearRGB(_)
-        | Value::DisplayRGB(_)
-        | Value::CameraMetadata(_)
-        | Value::ExifMetadata(_)
-        | Value::CameraProfile(_)
-        | Value::LensProfile(_)
-        | Value::EmbeddedPreview(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        _ => Err(NodeError::InvalidParameter(port.to_owned())),
     }
 }
 

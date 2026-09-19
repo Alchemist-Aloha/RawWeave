@@ -73,16 +73,19 @@ const IMAGE_DIALOG_FILTERS = [
   },
 ];
 
-type RustValue = { Float: number } | { Boolean: boolean } | { String: string };
+type RustValue = { Float: number } | { Integer: number } | { Boolean: boolean } | { String: string };
 
 function fromRustValue(value: RustValue): ParameterValue {
   if ('Float' in value) return value.Float;
+  if ('Integer' in value) return value.Integer;
   if ('Boolean' in value) return value.Boolean;
   return value.String;
 }
 
-function toRustValue(value: ParameterValue): RustValue {
-  if (typeof value === 'number') return { Float: value };
+function toRustValue(value: ParameterValue, parameterType?: ParameterType): RustValue {
+  if (typeof value === 'number') {
+    return parameterType === 'Integer' ? { Integer: Math.trunc(value) } : { Float: value };
+  }
   if (typeof value === 'boolean') return { Boolean: value };
   return { String: value };
 }
@@ -147,21 +150,29 @@ function message(error: unknown): Error {
   return new Error(JSON.stringify(error));
 }
 
+const nodeTypes = new Map<string, string>();
+
 async function readSnapshot(): Promise<PlatformSnapshot> {
   const serialized = await invoke<string>('save_workflow');
   const graph = JSON.parse(serialized) as {
-    nodes: Record<string, { type_id: string; parameters: Record<string, RustValue> }>;
+    nodes: Record<
+      string,
+      { type_id: string; parameters: Record<string, RustValue>; exposed_parameters?: string[] }
+    >;
     edges: Array<{ from_node: string; from_port: string; to_node: string; to_port: string }>;
     revision?: number;
   };
+  const nodes = Object.entries(graph.nodes ?? {}).map(([id, node]) => ({
+    id,
+    typeId: node.type_id,
+    parameters: Object.fromEntries(
+      Object.entries(node.parameters).map(([key, value]) => [key, fromRustValue(value)]),
+    ),
+    exposedParameters: node.exposed_parameters ?? [],
+  }));
+  for (const node of nodes) nodeTypes.set(node.id, node.typeId);
   return {
-    nodes: Object.entries(graph.nodes ?? {}).map(([id, node]) => ({
-      id,
-      typeId: node.type_id,
-      parameters: Object.fromEntries(
-        Object.entries(node.parameters).map(([key, value]) => [key, fromRustValue(value)]),
-      ),
-    })),
+    nodes,
     edges: (graph.edges ?? []).map((edge) => ({
       fromNode: edge.from_node,
       fromPort: edge.from_port,
@@ -173,11 +184,13 @@ async function readSnapshot(): Promise<PlatformSnapshot> {
 }
 
 export function createTauriPlatform(): EditorPlatform {
+  let cachedDescriptors: NodeDescriptor[] = [];
   return {
     async nodeDescriptors() {
       try {
         const descriptors = await invoke<RustDescriptor[]>('node_descriptors');
-        return descriptors.map(mapDescriptor);
+        cachedDescriptors = descriptors.map(mapDescriptor);
+        return cachedDescriptors;
       } catch (error) {
         throw message(error);
       }
@@ -234,7 +247,29 @@ export function createTauriPlatform(): EditorPlatform {
     },
     async setParameter(nodeId, parameterId, value) {
       try {
-        await invoke('set_node_parameter', { nodeId, parameterId, value: toRustValue(value) });
+        const typeId = nodeTypes.get(nodeId);
+        const parameterType = cachedDescriptors
+          .find((descriptor) => descriptor.typeId === typeId)
+          ?.parameters.find((parameter) => parameter.id === parameterId)?.parameterType;
+        await invoke('set_node_parameter', {
+          nodeId,
+          parameterId,
+          value: toRustValue(value, parameterType),
+        });
+      } catch (error) {
+        throw message(error);
+      }
+    },
+    async exposeParameter(nodeId, parameterId) {
+      try {
+        await invoke('expose_parameter', { nodeId, parameterId });
+      } catch (error) {
+        throw message(error);
+      }
+    },
+    async unexposeParameter(nodeId, parameterId) {
+      try {
+        await invoke('unexpose_parameter', { nodeId, parameterId });
       } catch (error) {
         throw message(error);
       }
