@@ -9,6 +9,7 @@ members = [
   "crates/project",
   "crates/raw",
   "crates/color",
+  "crates/batch",
   "node-packs/core-values",
   "node-packs/core-image",
   "node-packs/raw",
@@ -32,6 +33,7 @@ rawweave-graph = { path = "crates/graph" }
 rawweave-project = { path = "crates/project" }
 rawweave-raw = { path = "crates/raw" }
 rawweave-color = { path = "crates/color" }
+rawweave-batch = { path = "crates/batch" }
 rawweave-core-values = { path = "node-packs/core-values" }
 rawweave-core-image = { path = "node-packs/core-image" }
 rawweave-raw-nodes = { path = "node-packs/raw" }

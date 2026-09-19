@@ -7,6 +7,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use rawweave_batch::{
+    dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore,
+    PreflightOptions,
+};
 use rawweave_core::NodeId;
 use rawweave_graph::{
     DependencyReport, DependencyStatus, Graph, NodePackManifest, SubgraphDependency,
@@ -387,6 +391,65 @@ fn dependency_report_dto(report: DependencyReport) -> DependencyReportDto {
 }
 
 #[derive(Default)]
+struct BatchManager {
+    jobs: Mutex<BTreeMap<String, Arc<BatchEngine>>>,
+}
+
+impl BatchManager {
+    fn insert(&self, job_id: String, engine: Arc<BatchEngine>) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "batch manager state is unavailable".to_owned())?;
+        if jobs.contains_key(&job_id) {
+            return Err(format!("batch job '{job_id}' is already loaded"));
+        }
+        jobs.insert(job_id, engine);
+        Ok(())
+    }
+
+    fn get(&self, job_id: &str) -> Result<Arc<BatchEngine>, String> {
+        self.jobs
+            .lock()
+            .map_err(|_| "batch manager state is unavailable".to_owned())?
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| format!("batch job '{job_id}' is not loaded"))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateBatchJobRequest {
+    pub job: BatchJob,
+    #[serde(default)]
+    pub state_path: Option<PathBuf>,
+    #[serde(default = "default_batch_workers")]
+    pub max_workers: usize,
+}
+
+fn default_batch_workers() -> usize {
+    4
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadBatchJobRequest {
+    pub state_path: PathBuf,
+    #[serde(default = "default_batch_workers")]
+    pub max_workers: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchDryRunResponse {
+    workflow_revision: u64,
+    workflow_hash: String,
+    item_ids: Vec<String>,
+    recipes: Vec<rawweave_batch::OutputRecipe>,
+}
+
+#[derive(Default)]
 pub struct AppState {
     pub editor: Arc<Mutex<EditorCore>>,
     pub preview: Arc<preview::PreviewManager>,
@@ -394,6 +457,7 @@ pub struct AppState {
     source_selection: Mutex<SourceSelectionIntent>,
     blueprint: Mutex<Option<WorkflowDefinition>>,
     blueprint_stack: Mutex<Vec<WorkflowDefinition>>,
+    batch: Arc<BatchManager>,
 }
 
 fn lock_editor(editor: &Arc<Mutex<EditorCore>>) -> Result<MutexGuard<'_, EditorCore>, String> {
@@ -1489,6 +1553,182 @@ fn open_image_file(path: &str) -> Result<(Image, preview::OpenImageMetadata), St
 }
 
 #[tauri::command]
+fn create_batch_job(
+    state: State<'_, AppState>,
+    request: CreateBatchJobRequest,
+) -> Result<BatchJob, String> {
+    let job_id = request.job.id.clone();
+    let store = request
+        .state_path
+        .map(JobStore::new)
+        .unwrap_or_else(JobStore::memory);
+    let engine = BatchEngine::new(
+        request.job,
+        store,
+        Arc::new(ImageFileProcessor),
+        request.max_workers,
+    )
+    .map_err(|error| error.to_string())?;
+    let engine = Arc::new(engine);
+    let snapshot = engine.snapshot().map_err(|error| error.to_string())?;
+    state.batch.insert(job_id, engine)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn load_batch_job(
+    state: State<'_, AppState>,
+    request: LoadBatchJobRequest,
+) -> Result<BatchJob, String> {
+    let store = JobStore::new(request.state_path);
+    let snapshot = store.load().map_err(|error| error.to_string())?;
+    let job_id = snapshot.id.clone();
+    let engine = BatchEngine::resume(
+        store,
+        Arc::new(ImageFileProcessor),
+        request.max_workers,
+    )
+    .map_err(|error| error.to_string())?;
+    let engine = Arc::new(engine);
+    let snapshot = engine.snapshot().map_err(|error| error.to_string())?;
+    state.batch.insert(job_id, engine)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn batch_preflight(
+    state: State<'_, AppState>,
+    job_id: String,
+    options: Option<PreflightOptions>,
+) -> Result<rawweave_batch::PreflightReport, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .preflight(&options.unwrap_or_default())
+        .map_err(|error| error.to_string())
+}
+
+fn batch_start_error(report: &rawweave_batch::PreflightReport) -> String {
+    report
+        .errors()
+        .map(|diagnostic| format!("{}: {}", diagnostic.code, diagnostic.message))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[tauri::command]
+fn start_batch(state: State<'_, AppState>, job_id: String) -> Result<BatchJob, String> {
+    let engine = state.batch.get(&job_id)?;
+    let report = engine
+        .preflight(&PreflightOptions::default())
+        .map_err(|error| error.to_string())?;
+    if report.has_errors() {
+        return Err(batch_start_error(&report));
+    }
+    engine.start().map_err(|error| error.to_string())?;
+    engine.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pause_batch(state: State<'_, AppState>, job_id: String) -> Result<BatchJob, String> {
+    let engine = state.batch.get(&job_id)?;
+    engine.pause().map_err(|error| error.to_string())?;
+    engine.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resume_batch(state: State<'_, AppState>, job_id: String) -> Result<BatchJob, String> {
+    let engine = state.batch.get(&job_id)?;
+    engine.resume_run().map_err(|error| error.to_string())?;
+    engine.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cancel_batch(state: State<'_, AppState>, job_id: String) -> Result<BatchJob, String> {
+    let engine = state.batch.get(&job_id)?;
+    engine.cancel().map_err(|error| error.to_string())?;
+    engine.wait().map_err(|error| error.to_string())?;
+    engine.snapshot().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn retry_failed_batch(state: State<'_, AppState>, job_id: String) -> Result<usize, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .retry_failed()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn retry_selected_batch(
+    state: State<'_, AppState>,
+    job_id: String,
+    item_ids: Vec<String>,
+) -> Result<usize, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .retry_selected(&item_ids)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn skip_batch_items(
+    state: State<'_, AppState>,
+    job_id: String,
+    item_ids: Vec<String>,
+) -> Result<usize, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .skip(&item_ids)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn batch_snapshot(state: State<'_, AppState>, job_id: String) -> Result<BatchJob, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .snapshot()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn batch_dry_run(
+    state: State<'_, AppState>,
+    job_id: String,
+    subset: DryRunSubset,
+) -> Result<BatchDryRunResponse, String> {
+    let job = state
+        .batch
+        .get(&job_id)?
+        .snapshot()
+        .map_err(|error| error.to_string())?;
+    let result = dry_run(&job, subset).map_err(|error| error.to_string())?;
+    Ok(BatchDryRunResponse {
+        workflow_revision: result.workflow_revision,
+        workflow_hash: result.workflow_hash,
+        item_ids: result.item_ids,
+        recipes: result.recipes,
+    })
+}
+
+#[tauri::command]
+fn open_failed_batch_item(
+    state: State<'_, AppState>,
+    job_id: String,
+    item_id: String,
+) -> Result<rawweave_batch::BatchItem, String> {
+    state
+        .batch
+        .get(&job_id)?
+        .failed_item(&item_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_image(
     state: State<'_, AppState>,
     path: String,
@@ -1523,6 +1763,7 @@ pub fn run() {
             source_selection: Mutex::new(SourceSelectionIntent::default()),
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
         })
         .invoke_handler(tauri::generate_handler![
             node_descriptors,
@@ -1554,6 +1795,19 @@ pub fn run() {
             workflow_dependency_report,
             save_workflow,
             load_workflow,
+            create_batch_job,
+            load_batch_job,
+            batch_preflight,
+            start_batch,
+            pause_batch,
+            resume_batch,
+            cancel_batch,
+            retry_failed_batch,
+            retry_selected_batch,
+            skip_batch_items,
+            batch_snapshot,
+            batch_dry_run,
+            open_failed_batch_item,
             open_image,
             request_preview,
             cancel_preview,
@@ -2001,6 +2255,7 @@ mod tests {
             source_selection: Mutex::new(SourceSelectionIntent::default()),
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
         };
 
         load_workflow_state(&state, &workflow).unwrap();
@@ -2086,6 +2341,7 @@ mod tests {
             source_selection: Mutex::new(SourceSelectionIntent::default()),
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
         };
         load_workflow_state(&state, &workflow).unwrap();
 
@@ -2127,6 +2383,7 @@ mod tests {
             source_selection: Mutex::new(SourceSelectionIntent::default()),
             blueprint: Mutex::new(None),
             blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
         };
 
         load_workflow_state(&state, &workflow).unwrap();

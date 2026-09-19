@@ -16,6 +16,7 @@ rawweave-node-api = { path = "../../../crates/node-api" }
 rawweave-project = { path = "../../../crates/project" }
 rawweave-raw = { path = "../../../crates/raw" }
 rawweave-color = { path = "../../../crates/color" }
+rawweave-batch = { path = "../../../crates/batch" }
 rawweave-rendering = { path = "../../../crates/rendering" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
