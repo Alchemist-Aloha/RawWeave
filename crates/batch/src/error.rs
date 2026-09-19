@@ -42,6 +42,10 @@ pub enum BatchError {
     UnsupportedWorkflowOutput(String),
     #[error("processor failed: {0}")]
     Processor(String),
+    #[error("checkpoint policy failed: {0}")]
+    CheckpointPolicy(String),
+    #[error("checkpoint operation failed: {0}")]
+    Checkpoint(#[from] rawweave_graph::CheckpointError),
     #[error("batch was cancelled")]
     Cancelled,
     #[error("batch is already running")]

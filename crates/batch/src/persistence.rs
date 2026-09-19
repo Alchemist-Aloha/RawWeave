@@ -1,4 +1,5 @@
 use crate::{BatchError, BatchJob};
+use rawweave_graph::ArtifactStore;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,16 @@ impl JobStore {
         match &self.backend {
             JobStoreBackend::File(path) => Some(path.as_path()),
             JobStoreBackend::Memory(_) => None,
+        }
+    }
+
+    /// Return the artifact store paired with this job's persistence boundary.
+    /// File-backed jobs keep committed checkpoint payloads beside the job state;
+    /// memory-backed jobs remain fully in memory for callers and tests.
+    pub fn artifact_store(&self) -> ArtifactStore {
+        match &self.backend {
+            JobStoreBackend::File(path) => ArtifactStore::new(path.with_extension("artifacts")),
+            JobStoreBackend::Memory(_) => ArtifactStore::memory(),
         }
     }
 

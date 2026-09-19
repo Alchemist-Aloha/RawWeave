@@ -1,3 +1,4 @@
+use crate::checkpoint::{CheckpointResolution, CheckpointRuntime};
 use crate::model::{
     BatchItem, BatchJob, BatchState, ItemState, OutputRecipe, PinnedDependencies, PinnedWorkflow,
 };
@@ -6,7 +7,9 @@ use crate::preflight::{PreflightOptions, PreflightReport, preflight};
 use crate::recipe::{record_for_path, write_output};
 use crate::{BatchError, OutputRecord};
 use rawweave_color::{DisplayRGB, SceneLinearRGB};
-use rawweave_graph::{WorkflowDefinition, WorkflowPort};
+use rawweave_graph::{
+    ArtifactStore, Checkpoint, EvaluationPolicy, GenerationToken, WorkflowDefinition, WorkflowPort,
+};
 use rawweave_image::{ColorDomain, Image, PixelFormat};
 use rawweave_node_api::{EvaluationContext, NodeRegistry, ParameterValue, Value};
 use rawweave_project::{built_in_node_pack_manifests, default_registry};
@@ -62,6 +65,34 @@ pub trait BatchProcessor: Send + Sync {
         item: &BatchItem,
         cancel: &CancellationToken,
     ) -> Result<Image, BatchError>;
+
+    /// Refresh any per-item dependency hashes before policy resolution. The
+    /// default keeps processors that do not expose graph checkpoint inputs
+    /// compatible with the runtime.
+    fn refresh_checkpoint_dependencies(
+        &self,
+        _workflow: &PinnedWorkflow,
+        _item: &BatchItem,
+        _cancel: &CancellationToken,
+    ) -> Result<(), BatchError> {
+        Ok(())
+    }
+
+    /// Generate one explicit manual checkpoint. External/plugin-backed
+    /// processors override this hook; the default fails with an actionable
+    /// message instead of silently executing a manual node.
+    fn generate_checkpoint(
+        &self,
+        _workflow: &PinnedWorkflow,
+        _item: &BatchItem,
+        checkpoint: &Checkpoint,
+        _cancel: &CancellationToken,
+    ) -> Result<rawweave_graph::CheckpointArtifact, BatchError> {
+        Err(BatchError::CheckpointPolicy(format!(
+            "checkpoint '{}' requires a generation-capable batch processor; use use_committed or generate it before the batch",
+            checkpoint.node_id
+        )))
+    }
 }
 
 impl<F> BatchProcessor for F
@@ -183,6 +214,13 @@ fn attach_registry(definition: &mut WorkflowDefinition, registry: &NodeRegistry)
     definition.graph = definition.graph.clone().with_registry(registry.clone());
     for nested in definition.nested_subgraphs.values_mut() {
         attach_registry(nested, registry);
+    }
+}
+
+fn attach_artifact_store(definition: &mut WorkflowDefinition, store: &ArtifactStore) {
+    definition.graph = definition.graph.clone().with_artifact_store(store.clone());
+    for nested in definition.nested_subgraphs.values_mut() {
+        attach_artifact_store(nested, store);
     }
 }
 
@@ -515,6 +553,7 @@ struct EngineState {
 struct EngineInner {
     job: Mutex<BatchJob>,
     store: JobStore,
+    artifact_store: ArtifactStore,
     processor: Arc<dyn BatchProcessor>,
     max_workers: usize,
     cancel: CancellationToken,
@@ -539,17 +578,33 @@ impl BatchEngine {
     where
         P: BatchProcessor + 'static,
     {
+        let artifact_store = store.artifact_store();
+        Self::new_with_artifact_store(job, store, processor, max_workers, artifact_store)
+    }
+
+    pub fn new_with_artifact_store<P>(
+        mut job: BatchJob,
+        store: JobStore,
+        processor: Arc<P>,
+        max_workers: usize,
+        artifact_store: ArtifactStore,
+    ) -> Result<Self, BatchError>
+    where
+        P: BatchProcessor + 'static,
+    {
         if max_workers == 0 {
             return Err(BatchError::InvalidJob(
                 "worker concurrency must be greater than zero".to_owned(),
             ));
         }
+        attach_artifact_store(&mut job.workflow.definition, &artifact_store);
         job.validate()?;
         store.save(&job)?;
         Ok(Self {
             inner: Arc::new(EngineInner {
                 job: Mutex::new(job),
                 store,
+                artifact_store,
                 processor,
                 max_workers,
                 cancel: CancellationToken::new(),
@@ -580,7 +635,6 @@ impl BatchEngine {
         }
         job.requeue_invalid_completed()?;
         job.refresh_state();
-        store.save(&job)?;
         Self::new(job, store, processor, max_workers)
     }
 
@@ -875,8 +929,175 @@ fn worker_loop(inner: Arc<EngineInner>, queue: Arc<Mutex<VecDeque<String>>>) {
     finish_worker(&inner);
 }
 
+fn checkpoint_key(prefix: &str, node_id: &str) -> String {
+    if prefix.is_empty() {
+        node_id.to_owned()
+    } else {
+        format!("{prefix}/{node_id}")
+    }
+}
+
+fn collect_checkpoints(
+    definition: &WorkflowDefinition,
+    prefix: &str,
+    checkpoints: &mut BTreeMap<String, Checkpoint>,
+) -> Result<(), BatchError> {
+    let manual_nodes = definition
+        .graph
+        .nodes()
+        .values()
+        .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+        .map(|node| (node.id.clone(), node.descriptor.version))
+        .collect::<Vec<_>>();
+    for (node_id, node_version) in manual_nodes {
+        let key = checkpoint_key(prefix, node_id.as_str());
+        let checkpoint = definition
+            .graph
+            .checkpoint(&node_id)
+            .map_err(|error| BatchError::CheckpointPolicy(format!("{key}: {error}")))?
+            .unwrap_or_else(|| Checkpoint::new(node_id.as_str(), node_version));
+        checkpoints.insert(key, checkpoint);
+    }
+    for (nested_id, nested) in &definition.nested_subgraphs {
+        let nested_prefix = checkpoint_key(prefix, nested_id);
+        collect_checkpoints(nested, &nested_prefix, checkpoints)?;
+    }
+    Ok(())
+}
+
+fn apply_checkpoints(
+    definition: &mut WorkflowDefinition,
+    prefix: &str,
+    checkpoints: &BTreeMap<String, Checkpoint>,
+) -> Result<(), BatchError> {
+    let manual_node_ids = definition
+        .graph
+        .nodes()
+        .values()
+        .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+    for node_id in manual_node_ids {
+        let key = checkpoint_key(prefix, node_id.as_str());
+        if let Some(checkpoint) = checkpoints.get(&key) {
+            definition
+                .graph
+                .register_checkpoint(checkpoint.clone())
+                .map_err(|error| BatchError::CheckpointPolicy(format!("{key}: {error}")))?;
+        }
+    }
+    for (nested_id, nested) in &mut definition.nested_subgraphs {
+        let nested_prefix = checkpoint_key(prefix, nested_id);
+        apply_checkpoints(nested, &nested_prefix, checkpoints)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_policy_failure(item_id: &str, error: BatchError) -> BatchError {
+    match error {
+        BatchError::Cancelled => BatchError::Cancelled,
+        error => BatchError::CheckpointPolicy(format!(
+            "item '{item_id}' cannot satisfy its checkpoint policy: {error}; resolve the checkpoint or retry the item"
+        )),
+    }
+}
+
+fn process_with_checkpoint_policy(
+    inner: &Arc<EngineInner>,
+    workflow: &mut PinnedWorkflow,
+    item: &BatchItem,
+) -> Result<Image, BatchError> {
+    inner
+        .processor
+        .refresh_checkpoint_dependencies(workflow, item, &inner.cancel)
+        .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
+
+    let mut checkpoints = BTreeMap::new();
+    collect_checkpoints(&workflow.definition, "", &mut checkpoints)
+        .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
+    if checkpoints.is_empty() {
+        return inner.processor.process(workflow, item, &inner.cancel);
+    }
+    let policy = {
+        let job = inner
+            .job
+            .lock()
+            .map_err(|_| BatchError::Persistence("batch job is poisoned".to_owned()))?;
+        job.checkpoint_policy
+    };
+    if !policy.is_explicit_checkpoint_policy() {
+        return Err(checkpoint_policy_failure(
+            &item.id,
+            BatchError::CheckpointPolicy(
+                "workflow contains manual checkpoints; choose use_committed, generate_if_missing, regenerate_all, or fail_if_stale"
+                    .to_owned(),
+            ),
+        ));
+    }
+
+    let keys = checkpoints.keys().cloned().collect::<Vec<_>>();
+    {
+        let mut runtime = CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
+        let mut pending_generations = Vec::<(String, GenerationToken, Checkpoint)>::new();
+        for key in keys {
+            if inner.cancel.is_cancelled() {
+                for (node_id, token, _) in pending_generations.drain(..) {
+                    let _ = runtime.cancel_generation(&node_id, token);
+                }
+                return Err(BatchError::Cancelled);
+            }
+            match runtime
+                .resolve(&key)
+                .map_err(|error| checkpoint_policy_failure(&item.id, error))?
+            {
+                CheckpointResolution::UseCommitted { .. } => {}
+                CheckpointResolution::Generate { token } => {
+                    let checkpoint = runtime
+                        .checkpoint(&key)
+                        .map_err(|error| checkpoint_policy_failure(&item.id, error))?
+                        .clone();
+                    pending_generations.push((key, token, checkpoint));
+                }
+            }
+        }
+
+        for (node_id, token, checkpoint) in pending_generations {
+            if inner.cancel.is_cancelled() {
+                let _ = runtime.cancel_generation(&node_id, token);
+                return Err(BatchError::Cancelled);
+            }
+            let generated =
+                inner
+                    .processor
+                    .generate_checkpoint(workflow, item, &checkpoint, &inner.cancel);
+            let artifact = match generated {
+                Ok(artifact) => artifact,
+                Err(BatchError::Cancelled) => {
+                    let _ = runtime.cancel_generation(&node_id, token);
+                    return Err(BatchError::Cancelled);
+                }
+                Err(error) => {
+                    let _ = runtime.fail_generation(&node_id, token, error.to_string());
+                    return Err(checkpoint_policy_failure(
+                        &item.id,
+                        BatchError::CheckpointPolicy(format!(
+                            "checkpoint '{node_id}' generation failed: {error}"
+                        )),
+                    ));
+                }
+            };
+            runtime
+                .commit_generation(&node_id, token, artifact)
+                .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
+        }
+    }
+    apply_checkpoints(&mut workflow.definition, "", &checkpoints)
+        .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
+    inner.processor.process(workflow, item, &inner.cancel)
+}
+
 fn process_item(inner: &Arc<EngineInner>, id: &str) {
-    let (workflow, dependencies, item, recipes) = {
+    let (mut workflow, dependencies, item, recipes) = {
         let mut job = match inner.job.lock() {
             Ok(job) => job,
             Err(_) => return,
@@ -902,7 +1123,7 @@ fn process_item(inner: &Arc<EngineInner>, id: &str) {
     };
 
     let result = validate_dependencies(&workflow.definition, &dependencies)
-        .and_then(|()| inner.processor.process(&workflow, &item, &inner.cancel));
+        .and_then(|()| process_with_checkpoint_policy(inner, &mut workflow, &item));
     let image = match result {
         Ok(image) if !inner.cancel.is_cancelled() => image,
         Ok(_) => {

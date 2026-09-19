@@ -4,12 +4,14 @@
 //! the scheduler can enforce bounded image lifetimes without knowing whether a
 //! source is an ordinary image, a RAW file, or a plugin-backed asset.
 
+mod checkpoint;
 mod engine;
 pub mod model;
 mod persistence;
 mod preflight;
 pub mod recipe;
 
+pub use checkpoint::{CheckpointResolution, CheckpointRuntime};
 pub use engine::{
     BatchEngine, BatchProcessor, CancellationToken, DryRunResult, ImageFileProcessor, dry_run,
 };
