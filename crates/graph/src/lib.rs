@@ -12,6 +12,10 @@ use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResul
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod workflow;
+
+pub use workflow::*;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: NodeId,
@@ -152,6 +156,33 @@ impl Graph {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn clone_selection(&self, selection: &BTreeSet<NodeId>) -> Result<Self, GraphError> {
+        for node_id in selection {
+            if !self.nodes.contains_key(node_id) {
+                return Err(GraphError::MissingNode(node_id.clone()));
+            }
+        }
+        let nodes = self
+            .nodes
+            .iter()
+            .filter(|(node_id, _)| selection.contains(*node_id))
+            .map(|(node_id, node)| (node_id.clone(), node.clone()))
+            .collect();
+        let edges = self
+            .edges
+            .iter()
+            .filter(|edge| selection.contains(&edge.from_node) && selection.contains(&edge.to_node))
+            .cloned()
+            .collect();
+        Ok(Self {
+            nodes,
+            edges,
+            revision: 0,
+            registry: self.registry.clone(),
+            render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+        })
     }
 
     pub fn downstream_nodes(&self, source: &NodeId) -> BTreeSet<NodeId> {

@@ -1,5 +1,5 @@
 use rawweave_core::NodeId;
-use rawweave_graph::{Graph, GraphError};
+use rawweave_graph::{Graph, GraphError, WorkflowDefinition, WorkflowError, WorkflowMetadata};
 use rawweave_node_api::{
     EvaluationContext, NodeDescriptor, NodePack, NodeRegistry, ParameterValue, Value,
 };
@@ -10,6 +10,10 @@ use thiserror::Error;
 pub enum ProjectError {
     #[error(transparent)]
     Graph(#[from] GraphError),
+    #[error(transparent)]
+    Workflow(#[from] WorkflowError),
+    #[error("blueprint parameter id '{0}' must contain exactly one ':'")]
+    InvalidBlueprintParameterId(String),
 }
 
 pub fn default_registry() -> NodeRegistry {
@@ -176,4 +180,84 @@ impl EditorCore {
         self.graph = Graph::from_json(json, registry)?;
         Ok(())
     }
+
+    pub fn create_subgraph_from_selection(
+        &self,
+        selection: &[&str],
+        id: impl Into<String>,
+        version: impl Into<String>,
+        metadata: WorkflowMetadata,
+    ) -> Result<WorkflowDefinition, ProjectError> {
+        let selection = selection
+            .iter()
+            .map(|node_id| NodeId::from(*node_id))
+            .collect::<Vec<_>>();
+        Ok(WorkflowDefinition::from_selection_slice(
+            &self.graph,
+            &selection,
+            id,
+            version,
+            metadata,
+        )?)
+    }
+
+    pub fn save_blueprint(&self, blueprint: &WorkflowDefinition) -> Result<Vec<u8>, ProjectError> {
+        Ok(blueprint.export()?)
+    }
+
+    pub fn load_blueprint(&self, bytes: &[u8]) -> Result<WorkflowDefinition, ProjectError> {
+        Ok(WorkflowDefinition::import(bytes, self.graph.registry())?)
+    }
+
+    pub fn instantiate_blueprint(
+        &mut self,
+        blueprint: &WorkflowDefinition,
+    ) -> Result<(), ProjectError> {
+        blueprint.validate()?;
+        self.graph = blueprint.instantiate();
+        Ok(())
+    }
+
+    pub fn expose_blueprint_parameter(
+        &self,
+        blueprint: &mut WorkflowDefinition,
+        id: &str,
+    ) -> Result<(), ProjectError> {
+        let (node_id, parameter_id) = split_blueprint_parameter_id(id)?;
+        blueprint.expose_parameter(&NodeId::from(node_id), parameter_id)?;
+        Ok(())
+    }
+
+    pub fn set_blueprint_parameter(
+        &self,
+        blueprint: &mut WorkflowDefinition,
+        id: &str,
+        value: ParameterValue,
+    ) -> Result<(), ProjectError> {
+        blueprint.set_parameter(id, value)?;
+        Ok(())
+    }
+
+    pub fn hide_blueprint_parameter(
+        &self,
+        blueprint: &mut WorkflowDefinition,
+        id: &str,
+    ) -> Result<(), ProjectError> {
+        blueprint.hide_parameter(id)?;
+        Ok(())
+    }
+}
+
+fn split_blueprint_parameter_id(id: &str) -> Result<(&str, &str), ProjectError> {
+    let mut parts = id.split(':');
+    let Some(node_id) = parts.next() else {
+        return Err(ProjectError::InvalidBlueprintParameterId(id.to_owned()));
+    };
+    let Some(parameter_id) = parts.next() else {
+        return Err(ProjectError::InvalidBlueprintParameterId(id.to_owned()));
+    };
+    if node_id.is_empty() || parameter_id.is_empty() || parts.next().is_some() {
+        return Err(ProjectError::InvalidBlueprintParameterId(id.to_owned()));
+    }
+    Ok((node_id, parameter_id))
 }
