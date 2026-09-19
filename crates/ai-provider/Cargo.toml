@@ -1,0 +1,15 @@
+[package]
+name = "rawweave-ai-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rawweave-graph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rawweave-image.workspace = true

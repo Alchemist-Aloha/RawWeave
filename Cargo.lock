@@ -1003,6 +1003,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawweave-ai-provider"
+version = "0.1.0"
+dependencies = [
+ "rawweave-graph",
+ "rawweave-image",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "rawweave-batch"
 version = "0.1.0"
 dependencies = [
