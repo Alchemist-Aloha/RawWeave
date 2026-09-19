@@ -107,7 +107,9 @@ fn encode_jpeg(image: &Image, recipe: &OutputRecipe, path: &Path) -> Result<(), 
     }
     let bytes = rgba8(image);
     let rgb = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect::<Vec<_>>();
     let file = File::create(path).map_err(|source| BatchError::Io {

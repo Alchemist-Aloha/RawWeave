@@ -300,10 +300,10 @@ fn check_recipes(job: &BatchJob, options: &PreflightOptions, report: &mut Prefli
         }
         for (item_index, item) in job.items.iter().enumerate() {
             let path = rendered_output_path(recipe, item, item_index);
-            if let Some((previous_index, previous_id)) =
-                planned.insert(path.clone(), (recipe_index, item.id.clone()))
-            {
-                if recipe.collision_policy == CollisionPolicy::Error {
+            match planned.insert(path.clone(), (recipe_index, item.id.clone())) {
+                Some((previous_index, previous_id))
+                    if recipe.collision_policy == CollisionPolicy::Error =>
+                {
                     report.push(Diagnostic::for_item(
                         DiagnosticSeverity::Error,
                         "naming-collision",
@@ -316,6 +316,7 @@ fn check_recipes(job: &BatchJob, options: &PreflightOptions, report: &mut Prefli
                         Some(path.clone()),
                     ));
                 }
+                _ => {}
             }
             if options.check_collisions
                 && path.exists()

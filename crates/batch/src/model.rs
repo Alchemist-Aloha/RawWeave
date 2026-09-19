@@ -61,21 +61,16 @@ pub enum CheckpointPolicy {
     Manual,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemState {
+    #[default]
     Waiting,
     Running,
     Completed,
     Skipped,
     Failed,
     Cancelled,
-}
-
-impl Default for ItemState {
-    fn default() -> Self {
-        Self::Waiting
-    }
 }
 
 impl ItemState {
@@ -87,14 +82,20 @@ impl ItemState {
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
-        match (self, next) {
-            (Self::Waiting, Self::Running | Self::Skipped | Self::Cancelled) => true,
-            (Self::Running, Self::Completed | Self::Failed | Self::Cancelled) => true,
-            (Self::Failed, Self::Waiting | Self::Skipped | Self::Cancelled) => true,
-            (Self::Skipped, Self::Waiting | Self::Cancelled) => true,
-            (Self::Cancelled, Self::Waiting) => true,
-            _ => false,
-        }
+        matches!(
+            (self, next),
+            (
+                Self::Waiting,
+                Self::Running | Self::Skipped | Self::Cancelled
+            ) | (
+                Self::Running,
+                Self::Completed | Self::Failed | Self::Cancelled
+            ) | (
+                Self::Failed,
+                Self::Waiting | Self::Skipped | Self::Cancelled
+            ) | (Self::Skipped, Self::Waiting | Self::Cancelled)
+                | (Self::Cancelled, Self::Waiting)
+        )
     }
 }
 
@@ -193,65 +194,49 @@ impl OutputFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Resolution {
+    #[default]
     Original,
-    Exact { width: u32, height: u32 },
+    Exact {
+        width: u32,
+        height: u32,
+    },
     LongEdge(u32),
 }
 
-impl Default for Resolution {
-    fn default() -> Self {
-        Self::Original
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BitDepth {
+    #[default]
     Eight,
     Sixteen,
     Float32,
 }
 
-impl Default for BitDepth {
-    fn default() -> Self {
-        Self::Eight
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ColorSpace {
     LinearSrgb,
+    #[default]
     Srgb,
     DisplayP3,
     Named(String),
 }
 
-impl Default for ColorSpace {
-    fn default() -> Self {
-        Self::Srgb
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataPolicy {
+    #[default]
     Preserve,
     Strip,
     Sidecar,
 }
 
-impl Default for MetadataPolicy {
-    fn default() -> Self {
-        Self::Preserve
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum OutputSharpening {
+    #[default]
     None,
     UnsharpMask {
         radius: u32,
@@ -260,40 +245,24 @@ pub enum OutputSharpening {
     },
 }
 
-impl Default for OutputSharpening {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Compression {
+    #[default]
     Default,
     Fast,
     Best,
     Lossless,
 }
 
-impl Default for Compression {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CollisionPolicy {
     Error,
     Skip,
     Overwrite,
+    #[default]
     Suffix,
-}
-
-impl Default for CollisionPolicy {
-    fn default() -> Self {
-        Self::Suffix
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
