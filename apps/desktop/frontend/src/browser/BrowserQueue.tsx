@@ -5,6 +5,11 @@ import { QueueController, type QueueState } from '../queue/controller';
 import { createBrowserPlatform } from '../platform/browser';
 import type { BrowserEntry, BrowserFlag, BrowserSession, QueueItem, WorkflowBinding } from './types';
 import type { ParameterValue, WorkflowParameter } from '../editor/types';
+import { BatchController } from '../batch/controller';
+import type { BatchSessionReference } from '../batch/types';
+import type { BatchWorkflowContext } from '../batch/model';
+import { BatchPanel } from '../components/BatchPanel';
+import { createBatchPlatform } from '../platform/batch';
 
 export interface BrowserQueueProps {
   platform?: BrowserPlatform;
@@ -17,6 +22,9 @@ export interface BrowserQueueProps {
   panelLayout?: string;
   onSessionLoaded?: (session: BrowserSession) => void;
   onOpenImage?: (path: string) => void | Promise<void>;
+  batchPlatform?: import('../batch/types').BatchPlatform;
+  batchWorkflow?: BatchWorkflowContext | null;
+  onOpenFailedItem?: (item: import('../batch/types').BatchItem) => void | Promise<void>;
 }
 
 function errorMessage(error: unknown): string {
@@ -34,6 +42,7 @@ export function createBrowserSession(
     workflowBinding?: WorkflowBinding | null;
     unsavedWorkflowWorkingCopy?: string | null;
     viewerTargets?: BrowserSession['viewer']['targets'];
+    batchReference?: BatchSessionReference;
     panelLayout?: string;
   },
 ): BrowserSession {
@@ -55,6 +64,7 @@ export function createBrowserSession(
       unsavedWorkingCopy: options.unsavedWorkflowWorkingCopy ?? null,
     },
     viewer: { targets: options.viewerTargets ?? { A: null, B: null } },
+    batch: options.batchReference ?? { jobId: null, statePath: null },
     panelLayout: options.panelLayout ?? 'default',
   };
 }
@@ -70,12 +80,18 @@ export function BrowserQueue({
   panelLayout = 'default',
   onSessionLoaded,
   onOpenImage,
+  batchPlatform: providedBatchPlatform,
+  batchWorkflow = null,
+  onOpenFailedItem,
 }: BrowserQueueProps) {
   const [platform] = useState<BrowserPlatform>(() => providedPlatform ?? createBrowserPlatform());
   const [browserController] = useState(() => new BrowserController(platform));
   const [queueController] = useState(() => new QueueController());
+  const [batchController] = useState(() => new BatchController(providedBatchPlatform ?? createBatchPlatform()));
   const [browser, setBrowser] = useState(browserController.state);
   const [queue, setQueue] = useState(queueController.state);
+  const [, setBatchRevision] = useState(0);
+  const [batchReference, setBatchReference] = useState<BatchSessionReference>(batchController.sessionReference);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +106,11 @@ export function BrowserQueue({
       unsubscribeQueue();
     };
   }, [browserController, queueController]);
+
+  useEffect(() => batchController.subscribe(() => {
+    setBatchRevision((revision) => revision + 1);
+    setBatchReference(batchController.sessionReference);
+  }), [batchController]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,6 +128,8 @@ export function BrowserQueue({
             selectedPaths: saved.queue.selectedPaths,
             testSetCurrentPath: saved.testSet.currentPath,
           });
+          setBatchReference(saved.batch ?? { jobId: null, statePath: null });
+          if (saved.batch?.statePath) void batchController.load(saved.batch.statePath).catch(() => undefined);
         }
         if (folder) {
           await browserController.loadFolder(folder);
@@ -124,7 +147,7 @@ export function BrowserQueue({
     return () => {
       cancelled = true;
     };
-  }, [browserController, initialFolder, onSessionLoaded, platform, queueController]);
+  }, [batchController, browserController, initialFolder, onSessionLoaded, platform, queueController]);
 
   useEffect(() => {
     if (!ready) return;
@@ -133,13 +156,14 @@ export function BrowserQueue({
         workflowBinding,
         unsavedWorkflowWorkingCopy,
         viewerTargets,
+        batchReference,
         panelLayout,
       })).catch((caught) => {
         setError(errorMessage(caught));
       });
     }, 150);
     return () => window.clearTimeout(timeout);
-  }, [browser, panelLayout, platform, queue, ready, unsavedWorkflowWorkingCopy, viewerTargets, workflowBinding]);
+  }, [batchReference, browser, panelLayout, platform, queue, ready, unsavedWorkflowWorkingCopy, viewerTargets, workflowBinding]);
 
   const visibleEntries = useMemo(
     () => sortBrowserEntries(
@@ -481,6 +505,17 @@ export function BrowserQueue({
           </div>
         </aside>
       </div>
+      <BatchPanel
+        controller={batchController}
+        onOpenItem={(item) => {
+          void run(async () => {
+            openPreview(item.sourcePath);
+            await onOpenFailedItem?.(item);
+          });
+        }}
+        queueItems={queue.items}
+        workflow={batchWorkflow}
+      />
       {error && <p className="browser-queue__error" role="alert">{error}</p>}
     </section>
   );

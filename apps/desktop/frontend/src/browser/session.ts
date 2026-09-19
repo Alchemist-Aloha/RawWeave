@@ -22,6 +22,7 @@ export function defaultSession(currentFolder = ''): BrowserSession {
     testSet: { currentPath: null },
     workflow: { selected: null, unsavedWorkingCopy: null },
     viewer: { targets: { A: null, B: null } },
+    batch: { jobId: null, statePath: null },
     panelLayout: 'default',
   };
 }
@@ -36,6 +37,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string';
+}
+
+function isBatchReference(value: unknown): value is { jobId: string | null; statePath: string | null } {
+  return isRecord(value) && isNullableString(value.jobId) && isNullableString(value.statePath);
 }
 
 function isViewSettings(value: unknown): value is BrowserViewSettings {
@@ -64,6 +69,8 @@ export function parseSession(serialized: string): BrowserSession | null {
     if (!isRecord(parsed.testSet) || !isNullableString(parsed.testSet.currentPath)) return null;
     if (!isRecord(parsed.workflow) || !isNullableString(parsed.workflow.unsavedWorkingCopy)) return null;
     if (!isRecord(parsed.viewer) || !isRecord(parsed.viewer.targets)) return null;
+    if (parsed.batch !== undefined && !isBatchReference(parsed.batch)) return null;
+    if (parsed.batch === undefined) parsed.batch = { jobId: null, statePath: null };
     if (typeof parsed.panelLayout !== 'string') return null;
     return parsed as unknown as BrowserSession;
   } catch {

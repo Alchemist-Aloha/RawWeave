@@ -20,6 +20,8 @@ import { ViewerController } from './viewer/controller';
 import { createPreviewTransport } from './platform/preview';
 import { BrowserQueue } from './browser/BrowserQueue';
 import type { BrowserSession } from './browser/types';
+import type { BatchWorkflowContext } from './batch/model';
+import { createBatchPlatform } from './platform/batch';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -163,6 +165,7 @@ function DependencySummary({
 
 export default function App() {
   const [platform] = useState(() => createPlatform());
+  const [batchPlatform] = useState(() => createBatchPlatform());
   const [controller] = useState(() => new EditorController(platform));
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
@@ -216,6 +219,24 @@ export default function App() {
     if (!scope || !controller.state.workflowHash) return null;
     return { id: scope.id, version: scope.version ?? '1.0.0', hash: controller.state.workflowHash };
   }, [controller.state.scopePath, controller.state.workflowHash]);
+
+  const batchWorkflow = useMemo<BatchWorkflowContext | null>(() => {
+    if (!browserWorkflowBinding) return null;
+    const definition = controller.state.blueprint;
+    const scope = controller.state.scopePath.at(-1);
+    return {
+      binding: browserWorkflowBinding,
+      revision: controller.state.revision,
+      nodes: controller.state.nodes,
+      edges: controller.state.edges,
+      parameters: controller.state.workflowParameters,
+      inputs: controller.state.workflowInputs,
+      outputs: controller.state.workflowOutputs,
+      metadata: definition?.metadata ?? { name: scope?.name ?? 'Workflow' },
+      nodePackDependencies: definition?.nodePackDependencies ?? [],
+      subgraphDependencies: definition?.subgraphDependencies ?? [],
+    };
+  }, [browserWorkflowBinding, controller.state.blueprint, controller.state.edges, controller.state.nodes, controller.state.revision, controller.state.scopePath, controller.state.workflowInputs, controller.state.workflowOutputs, controller.state.workflowParameters]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -531,7 +552,10 @@ export default function App() {
 
       <SourceMetadata source={controller.state.source} />
       <BrowserQueue
+        batchPlatform={batchPlatform}
+        batchWorkflow={batchWorkflow}
         onOpenImage={openImagePath}
+        onOpenFailedItem={(item) => openImagePath(item.sourcePath)}
         onPromoteOverrides={promoteOverrides}
         onSessionLoaded={onBrowserSessionLoaded}
         panelLayout={viewerController.state.layout}

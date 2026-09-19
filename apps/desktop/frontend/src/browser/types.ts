@@ -1,3 +1,4 @@
+import type { BatchSessionReference } from '../batch/types';
 import type { ParameterValue, WorkflowSummary } from '../editor/types';
 
 export type BrowserEntryKind = 'file' | 'directory';
@@ -126,5 +127,6 @@ export interface BrowserSession {
   viewer: {
     targets: Record<'A' | 'B', { nodeId: string; outputPort: string } | null>;
   };
+  batch: BatchSessionReference;
   panelLayout: string;
 }
