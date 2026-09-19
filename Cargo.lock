@@ -1059,6 +1059,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawweave-external-host"
+version = "0.1.0"
+dependencies = [
+ "rawweave-external-protocol",
+ "rawweave-image",
+ "rawweave-node-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "rawweave-external-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "rawweave-graph"
 version = "0.1.0"
 dependencies = [
