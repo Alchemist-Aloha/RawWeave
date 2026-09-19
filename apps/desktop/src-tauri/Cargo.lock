@@ -2836,7 +2836,9 @@ dependencies = [
 name = "rawweave-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "image",
+ "kamadak-exif",
  "png 0.17.16",
  "rawweave-color",
  "rawweave-core",

@@ -202,6 +202,12 @@ export class EditorController {
     await this.command(() => this.platform.setParameter(nodeId, parameterId, value));
   }
 
+  public async setWorkflowParameter(workflowParameterId: string, value: ParameterValue): Promise<void> {
+    const parameter = this.state.workflowParameters.find((candidate) => candidate.id === workflowParameterId);
+    if (!parameter) throw new Error(`workflow parameter '${workflowParameterId}' does not exist`);
+    await this.setParameter(parameter.nodeId, parameter.parameterId, value);
+  }
+
   public async exposeParameter(nodeId: string, parameterId: string): Promise<void> {
     await this.command(() => this.platform.exposeParameter(nodeId, parameterId));
   }

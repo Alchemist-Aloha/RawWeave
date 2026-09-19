@@ -1,3 +1,4 @@
+mod browser;
 mod preview;
 
 use std::collections::BTreeMap;
@@ -592,13 +593,13 @@ fn read_bounded_raw<R: Read>(
     Ok(bytes)
 }
 
-fn read_raw_file(path: &Path, limits: RawDecodeLimits) -> Result<Vec<u8>, String> {
+pub(crate) fn read_raw_file(path: &Path, limits: RawDecodeLimits) -> Result<Vec<u8>, String> {
     let file = File::open(path)
         .map_err(|error| format!("could not open RAW '{}': {error}", path.display()))?;
     read_bounded_raw(file, &path.display().to_string(), limits.max_input_bytes)
 }
 
-fn raw_metadata(frame: &RawFrame) -> OpenMetadataSummary {
+pub(crate) fn raw_metadata(frame: &RawFrame) -> OpenMetadataSummary {
     let camera = [frame.camera().make.trim(), frame.camera().model.trim()]
         .into_iter()
         .filter(|value| !value.is_empty())
@@ -1557,6 +1558,16 @@ pub fn run() {
             request_preview,
             cancel_preview,
             release_preview,
+            browser::list_directory,
+            browser::inspect_file,
+            browser::set_file_marks,
+            browser::rename_file,
+            browser::move_file,
+            browser::copy_file,
+            browser::reveal_file,
+            browser::trash_file,
+            browser::save_session,
+            browser::load_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RawWeave");

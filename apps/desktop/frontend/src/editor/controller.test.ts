@@ -105,6 +105,19 @@ describe('editor controller', () => {
     expect(editor.state.nodes[0].parameters.exposure).toBe(1.25);
   });
 
+  it('promotes a current workflow parameter without cloning the graph', async () => {
+    const editor = await controller();
+    await editor.createNode('core.exposure', 'exposure');
+    await editor.exposeParameter('exposure', 'exposure');
+    const originalNode = editor.state.nodes[0];
+
+    await editor.setWorkflowParameter('exposure:exposure', 1.5);
+
+    expect(editor.state.nodes[0]).not.toBe(originalNode);
+    expect(editor.state.nodes[0].parameters.exposure).toBe(1.5);
+    expect(editor.state.workflowParameters[0].default).toBe(1.5);
+  });
+
   it('exposes a parameter as a connectable input port', async () => {
     const editor = await controller();
     await editor.createNode('core.blur', 'blur');

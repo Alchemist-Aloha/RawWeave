@@ -15,9 +15,11 @@ import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
 import { NodeLibrary } from './components/NodeLibrary';
-import { Viewer } from './components/Viewer';
+import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
 import { createPreviewTransport } from './platform/preview';
+import { BrowserQueue } from './browser/BrowserQueue';
+import type { BrowserSession } from './browser/types';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -164,6 +166,8 @@ export default function App() {
   const [controller] = useState(() => new EditorController(platform));
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
+  const [, setViewerRevision] = useState(0);
+  const [restoredSession, setRestoredSession] = useState<BrowserSession | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -176,6 +180,8 @@ export default function App() {
     void controller.initialize().catch(() => undefined);
     return unsubscribe;
   }, [controller]);
+
+  useEffect(() => viewerController.subscribe(() => setViewerRevision((revision) => revision + 1)), [viewerController]);
 
   const flowNodes = useMemo<RawWeaveFlowNode[]>(
     () =>
@@ -205,6 +211,11 @@ export default function App() {
   const selectedNode = controller.state.nodes.find(
     (node) => node.id === controller.state.selectedNodeId,
   );
+  const browserWorkflowBinding = useMemo(() => {
+    const scope = controller.state.scopePath.at(-1);
+    if (!scope || !controller.state.workflowHash) return null;
+    return { id: scope.id, version: scope.version ?? '1.0.0', hash: controller.state.workflowHash };
+  }, [controller.state.scopePath, controller.state.workflowHash]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -279,6 +290,43 @@ export default function App() {
     },
     [controller],
   );
+
+  const promoteOverrides = useCallback(async (overrides: Record<string, ParameterValue>) => {
+    for (const [workflowParameterId, value] of Object.entries(overrides)) {
+      await controller.setWorkflowParameter(workflowParameterId, value);
+    }
+  }, [controller]);
+
+  const onBrowserSessionLoaded = useCallback((session: BrowserSession) => {
+    setRestoredSession(session);
+    if (session.panelLayout === 'side-by-side' || session.panelLayout === 'split') {
+      viewerController.setLayout(session.panelLayout);
+    }
+  }, [viewerController]);
+
+  useEffect(() => {
+    if (!restoredSession || !controller.state.source) return;
+    const options = targetsFor(controller.state.nodes);
+    for (const viewer of ['A', 'B'] as const) {
+      const savedTarget = restoredSession.viewer.targets[viewer];
+      if (!savedTarget) continue;
+      const target = options.find((option) => option.nodeId === savedTarget.nodeId && option.outputPort === savedTarget.outputPort);
+      if (target
+        && (viewerController.state.panes[viewer].target?.nodeId !== target.nodeId
+          || viewerController.state.panes[viewer].target?.outputPort !== target.outputPort)) {
+        viewerController.setTarget(viewer, target);
+      }
+    }
+  }, [controller.state.nodes, controller.state.source, restoredSession, viewerController]);
+
+  const persistedViewerTargets = useMemo<BrowserSession['viewer']['targets']>(() => ({
+    A: viewerController.state.panes.A.target
+      ? { nodeId: viewerController.state.panes.A.target.nodeId, outputPort: viewerController.state.panes.A.target.outputPort }
+      : null,
+    B: viewerController.state.panes.B.target
+      ? { nodeId: viewerController.state.panes.B.target.nodeId, outputPort: viewerController.state.panes.B.target.outputPort }
+      : null,
+  }), [viewerController.state.panes.A.target, viewerController.state.panes.B.target]);
 
   const createSubgraph = useCallback(
     (options: { id: string; version: string; metadata: WorkflowMetadata }) => {
@@ -475,6 +523,15 @@ export default function App() {
       </header>
 
       <SourceMetadata source={controller.state.source} />
+      <BrowserQueue
+        onOpenImage={openImagePath}
+        onPromoteOverrides={promoteOverrides}
+        onSessionLoaded={onBrowserSessionLoaded}
+        panelLayout={viewerController.state.layout}
+        viewerTargets={persistedViewerTargets}
+        workflowBinding={browserWorkflowBinding}
+        workflowParameters={controller.state.workflowParameters}
+      />
 
       <section className="workspace">
         <NodeLibrary
