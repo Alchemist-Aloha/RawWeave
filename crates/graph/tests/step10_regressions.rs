@@ -81,6 +81,29 @@ fn store_put_enforces_serialized_byte_limit() {
 }
 
 #[test]
+fn file_store_rejects_an_artifact_whose_id_differs_from_the_requested_filename() {
+    let root = temporary_store_root();
+    let store = ArtifactStore::new(&root);
+    let first = artifact(CheckpointPayload::SpatialData(vec![1]), "first");
+    let second = artifact(CheckpointPayload::SpatialData(vec![2]), "second");
+    store.put(&first).unwrap();
+    store.put(&second).unwrap();
+
+    fs::write(
+        root.join(format!("{}.json", first.id())),
+        serde_json::to_vec(&second).unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        store.get(first.id()),
+        Err(CheckpointError::ArtifactIdMismatch { expected, actual })
+            if expected == *first.id() && actual == *second.id()
+    ));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn imported_payload_geometry_and_counts_are_validated_deeply() {
     let store = ArtifactStore::memory();
     let valid = artifact(CheckpointPayload::Image(image(0.5)), "input");
@@ -156,4 +179,44 @@ fn generation_tokens_reject_cancelled_failed_and_older_commits() {
         )
         .unwrap();
     assert_eq!(checkpoint.state(), CheckpointState::Current);
+}
+
+#[test]
+fn restoring_a_generating_checkpoint_makes_it_retryable() {
+    let mut checkpoint = Checkpoint::new("manual", 1);
+    checkpoint.set_dependency_hash("input");
+    checkpoint.begin_generation_token().unwrap();
+
+    let restored: Checkpoint =
+        serde_json::from_str(&serde_json::to_string(&checkpoint).unwrap()).unwrap();
+    assert_ne!(restored.state(), CheckpointState::Generating);
+
+    let mut restored = restored;
+    let token = restored.begin_generation_token().unwrap();
+    restored.cancel_generation(&token).unwrap();
+}
+
+#[test]
+fn generation_store_errors_clear_the_active_token_and_leave_a_retryable_failure() {
+    let store = ArtifactStore::memory().with_limits(ArtifactImportLimits {
+        max_bytes: 1,
+        ..ArtifactImportLimits::default()
+    });
+    let mut checkpoint = Checkpoint::new("manual", 1);
+    checkpoint.set_dependency_hash("input");
+    let token = checkpoint.begin_generation_token().unwrap();
+
+    assert!(
+        checkpoint
+            .commit_generation(
+                token,
+                artifact(CheckpointPayload::SpatialData(vec![1]), "input"),
+                &store,
+            )
+            .is_err()
+    );
+    assert_eq!(checkpoint.state(), CheckpointState::Failed);
+
+    let retry = checkpoint.begin_generation_token().unwrap();
+    checkpoint.cancel_generation(&retry).unwrap();
 }

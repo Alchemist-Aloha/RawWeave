@@ -203,3 +203,38 @@ fn missing_and_corrupt_checkpoint_artifacts_are_rejected_on_restore() {
         Err(GraphError::Checkpoint(CheckpointError::Serialization(_)))
     ));
 }
+
+#[test]
+fn normal_graph_evaluation_rejects_an_incompatible_checkpoint_artifact() {
+    let store = ArtifactStore::memory();
+    let graph = graph(store.clone());
+    commit(&graph, 0.75);
+    let checkpoint = graph.checkpoint(&NodeId::from("manual")).unwrap().unwrap();
+    let dependency = checkpoint.committed_dependency_hash().unwrap().to_owned();
+    let incompatible = CheckpointArtifact::new(
+        CheckpointPayload::Image(image(0.9)),
+        dependency.clone(),
+        Provenance::new(dependency, 2),
+        GenerationMetadata::new(2),
+    )
+    .unwrap();
+    store.put(&incompatible).unwrap();
+
+    let mut document: serde_json::Value = serde_json::from_str(&graph.to_json().unwrap()).unwrap();
+    document["checkpoints"]["manual"]["committed_artifact_id"] =
+        serde_json::json!({ "Sha256": incompatible.id().as_str() });
+    let restored = Graph::from_json(&serde_json::to_string(&document).unwrap(), registry())
+        .unwrap()
+        .with_artifact_store(store);
+
+    assert!(matches!(
+        restored.evaluate(
+            &NodeId::from("manual"),
+            "image",
+            &EvaluationContext::with_source_image(image(0.25)),
+        ),
+        Err(GraphError::Checkpoint(
+            CheckpointError::NodeVersionMismatch { .. }
+        ))
+    ));
+}

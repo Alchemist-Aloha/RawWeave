@@ -956,6 +956,19 @@ fn collect_checkpoints(
             .checkpoint(&node_id)
             .map_err(|error| BatchError::CheckpointPolicy(format!("{key}: {error}")))?
             .unwrap_or_else(|| Checkpoint::new(node_id.as_str(), node_version));
+        if checkpoint.node_id != node_id.as_str() {
+            return Err(BatchError::CheckpointPolicy(format!(
+                "{key}: checkpoint provenance belongs to a different node"
+            )));
+        }
+        if checkpoint.node_version != node_version {
+            return Err(BatchError::Checkpoint(
+                rawweave_graph::CheckpointError::NodeVersionMismatch {
+                    expected: node_version,
+                    actual: checkpoint.node_version,
+                },
+            ));
+        }
         checkpoints.insert(key, checkpoint);
     }
     for (nested_id, nested) in &definition.nested_subgraphs {
@@ -1086,6 +1099,10 @@ fn process_with_checkpoint_policy(
                     ));
                 }
             };
+            if inner.cancel.is_cancelled() {
+                let _ = runtime.cancel_generation(&node_id, token);
+                return Err(BatchError::Cancelled);
+            }
             runtime
                 .commit_generation(&node_id, token, artifact)
                 .map_err(|error| checkpoint_policy_failure(&item.id, error))?;

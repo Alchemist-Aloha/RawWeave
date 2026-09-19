@@ -67,6 +67,13 @@ impl<'a> CheckpointRuntime<'a> {
                 "checkpoint '{node_id}' is not registered in the pinned workflow"
             ))
         })?;
+        if checkpoint.node_id != node_id {
+            return Err(Self::policy_error(
+                policy,
+                node_id,
+                "the checkpoint provenance belongs to a different node",
+            ));
+        }
         let availability = checkpoint.availability_with_store(store)?;
         match policy {
             CheckpointPolicy::UseCommitted => {
@@ -165,6 +172,13 @@ impl<'a> CheckpointRuntime<'a> {
         availability: CheckpointAvailability,
         store: &ArtifactStore,
     ) -> Result<CheckpointResolution, BatchError> {
+        if availability == CheckpointAvailability::Incompatible {
+            return Err(Self::policy_error(
+                policy,
+                node_id,
+                "the committed artifact is incompatible with this checkpoint; regenerate it",
+            ));
+        }
         let artifact = checkpoint
             .committed_artifact(store)?
             .ok_or_else(|| match availability {

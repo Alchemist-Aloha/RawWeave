@@ -1003,7 +1003,11 @@ impl Graph {
                 &upstream_values,
                 &execution_context,
             );
-            let value = self.resolve_registered_checkpoint(node_id, dependency_hash)?;
+            let value = self.resolve_registered_checkpoint(
+                node_id,
+                dependency_hash,
+                node.descriptor.version,
+            )?;
             let output = node.descriptor.output(requested_output).ok_or_else(|| {
                 GraphError::MissingPort {
                     node: node_id.clone(),
@@ -1089,6 +1093,7 @@ impl Graph {
         &self,
         node_id: &NodeId,
         dependency_hash: String,
+        node_version: u32,
     ) -> Result<Value, GraphError> {
         let mut checkpoints = self
             .checkpoints
@@ -1097,6 +1102,19 @@ impl Graph {
         let checkpoint = checkpoints
             .get_mut(node_id)
             .ok_or(GraphError::Checkpoint(CheckpointError::NoCommittedArtifact))?;
+        if checkpoint.node_id != node_id.as_str() {
+            return Err(GraphError::Checkpoint(CheckpointError::InvalidProvenance(
+                "checkpoint belongs to a different node".to_owned(),
+            )));
+        }
+        if checkpoint.node_version != node_version {
+            return Err(GraphError::Checkpoint(
+                CheckpointError::NodeVersionMismatch {
+                    expected: node_version,
+                    actual: checkpoint.node_version,
+                },
+            ));
+        }
         checkpoint.set_dependency_hash(dependency_hash);
         let artifact = checkpoint
             .committed_artifact(&self.artifact_store)?

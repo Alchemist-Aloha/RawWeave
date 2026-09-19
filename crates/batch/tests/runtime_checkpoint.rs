@@ -116,6 +116,7 @@ struct EngineCheckpointProcessor {
     generated: Arc<AtomicUsize>,
     processed: Arc<AtomicUsize>,
     generated_value: f32,
+    cancel_after_generation: bool,
 }
 
 impl EngineCheckpointProcessor {
@@ -170,6 +171,9 @@ impl BatchProcessor for EngineCheckpointProcessor {
                 BatchError::CheckpointPolicy("checkpoint dependency is missing".to_owned())
             })?
             .to_owned();
+        if self.cancel_after_generation {
+            cancel.cancel();
+        }
         Ok(artifact_with_value(&dependency, self.generated_value))
     }
 }
@@ -243,6 +247,34 @@ fn runtime_policies_choose_their_documented_checkpoint_action() {
 }
 
 #[test]
+fn use_committed_rejects_an_incompatible_artifact_instead_of_serving_it() {
+    let store = ArtifactStore::memory();
+    let mut checkpoint = Checkpoint::new("manual", 1);
+    checkpoint.set_dependency_hash("fresh");
+    checkpoint.commit(artifact("fresh"), &store).unwrap();
+
+    let incompatible = CheckpointArtifact::new(
+        CheckpointPayload::Image(Image::from_pixels(1, 1, vec![[0.9, 0.9, 0.9, 1.0]]).unwrap()),
+        "fresh",
+        Provenance::new("fresh", 2),
+        GenerationMetadata::new(2),
+    )
+    .unwrap();
+    store.put(&incompatible).unwrap();
+    let mut document = serde_json::to_value(&checkpoint).unwrap();
+    document["committed_artifact_id"] = serde_json::json!({ "Sha256": incompatible.id().as_str() });
+    let checkpoint: Checkpoint = serde_json::from_value(document).unwrap();
+
+    let mut checkpoints = BTreeMap::from([("manual".to_owned(), checkpoint)]);
+    let mut runtime =
+        CheckpointRuntime::new(CheckpointPolicy::UseCommitted, &mut checkpoints, &store);
+    assert!(matches!(
+        runtime.resolve("manual"),
+        Err(BatchError::CheckpointPolicy(_))
+    ));
+}
+
+#[test]
 fn batch_engine_use_committed_completes_with_a_stale_artifact() {
     let directory = tempfile::tempdir().unwrap();
     let store = ArtifactStore::memory();
@@ -252,6 +284,7 @@ fn batch_engine_use_committed_completes_with_a_stale_artifact() {
         generated: Arc::clone(&generated),
         processed: Arc::clone(&processed),
         generated_value: 0.75,
+        cancel_after_generation: false,
     });
 
     let snapshot = run_engine(
@@ -278,6 +311,7 @@ fn batch_engine_generate_if_missing_generates_and_completes_the_item() {
         generated: Arc::clone(&generated),
         processed: Arc::clone(&processed),
         generated_value: 0.75,
+        cancel_after_generation: false,
     });
 
     let snapshot = run_engine(
@@ -295,6 +329,33 @@ fn batch_engine_generate_if_missing_generates_and_completes_the_item() {
 }
 
 #[test]
+fn batch_cancellation_before_generation_commit_does_not_store_a_late_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::memory();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let processed = Arc::new(AtomicUsize::new(0));
+    let processor = Arc::new(EngineCheckpointProcessor {
+        generated: Arc::clone(&generated),
+        processed: Arc::clone(&processed),
+        generated_value: 0.75,
+        cancel_after_generation: true,
+    });
+
+    let snapshot = run_engine(
+        CheckpointPolicy::GenerateIfMissing,
+        &store,
+        missing_checkpoint(),
+        processor,
+        directory.path(),
+    );
+    assert_eq!(snapshot.items[0].state, ItemState::Cancelled);
+    assert_eq!(generated.load(Ordering::SeqCst), 1);
+    assert_eq!(processed.load(Ordering::SeqCst), 0);
+    let generated_artifact = artifact_with_value("missing", 0.75);
+    assert!(store.get(generated_artifact.id()).unwrap().is_none());
+}
+
+#[test]
 fn batch_engine_regenerate_all_generates_and_completes_the_item() {
     let directory = tempfile::tempdir().unwrap();
     let store = ArtifactStore::memory();
@@ -304,6 +365,7 @@ fn batch_engine_regenerate_all_generates_and_completes_the_item() {
         generated: Arc::clone(&generated),
         processed: Arc::clone(&processed),
         generated_value: 0.75,
+        cancel_after_generation: false,
     });
 
     let snapshot = run_engine(
@@ -330,6 +392,7 @@ fn batch_engine_fail_if_stale_fails_the_item_without_processing_or_generation() 
         generated: Arc::clone(&generated),
         processed: Arc::clone(&processed),
         generated_value: 0.75,
+        cancel_after_generation: false,
     });
 
     let snapshot = run_engine(

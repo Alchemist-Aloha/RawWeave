@@ -663,6 +663,12 @@ impl ArtifactStore {
             }
         };
         if let Some(artifact) = &artifact {
+            if artifact.id() != id {
+                return Err(CheckpointError::ArtifactIdMismatch {
+                    expected: id.clone(),
+                    actual: artifact.id().clone(),
+                });
+            }
             artifact.validate_with_limits(&self.limits)?;
         }
         Ok(artifact)
@@ -796,7 +802,7 @@ impl GenerationToken {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Checkpoint {
     pub node_id: String,
     pub node_version: u32,
@@ -812,6 +818,60 @@ pub struct Checkpoint {
     next_generation_id: u64,
     #[serde(skip)]
     active_generation: Option<GenerationToken>,
+}
+
+#[derive(Deserialize)]
+struct CheckpointDocument {
+    node_id: String,
+    node_version: u32,
+    #[serde(default)]
+    current_dependency_hash: Option<String>,
+    #[serde(default)]
+    committed_dependency_hash: Option<String>,
+    #[serde(default)]
+    committed_artifact_id: Option<ArtifactId>,
+    #[serde(default)]
+    state: CheckpointState,
+    #[serde(default)]
+    generation: Option<GenerationMetadata>,
+    #[serde(default)]
+    failure: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Checkpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let document = CheckpointDocument::deserialize(deserializer)?;
+        let state = if document.state == CheckpointState::Generating {
+            match (
+                document.committed_artifact_id.is_some(),
+                document.current_dependency_hash.as_deref(),
+                document.committed_dependency_hash.as_deref(),
+            ) {
+                (true, Some(current), Some(committed)) if current == committed => {
+                    CheckpointState::Current
+                }
+                (true, _, _) => CheckpointState::Stale,
+                (false, _, _) => CheckpointState::Ungenerated,
+            }
+        } else {
+            document.state
+        };
+        Ok(Self {
+            node_id: document.node_id,
+            node_version: document.node_version,
+            current_dependency_hash: document.current_dependency_hash,
+            committed_dependency_hash: document.committed_dependency_hash,
+            committed_artifact_id: document.committed_artifact_id,
+            state,
+            generation: document.generation,
+            failure: document.failure,
+            next_generation_id: 0,
+            active_generation: None,
+        })
+    }
 }
 
 impl PartialEq for Checkpoint {
@@ -902,6 +962,7 @@ impl Checkpoint {
         if artifact.provenance.node_version != self.node_version {
             return Ok(CheckpointAvailability::Incompatible);
         }
+        self.validate_artifact_provenance(&artifact)?;
         Ok(self.availability())
     }
 
@@ -971,10 +1032,15 @@ impl Checkpoint {
                 actual: artifact.provenance.node_version,
             });
         }
-        let expected = self
-            .current_dependency_hash
-            .clone()
-            .ok_or(CheckpointError::NoCommittedArtifact)?;
+        let expected = match self.current_dependency_hash.clone() {
+            Some(expected) => expected,
+            None => {
+                if tokenized {
+                    self.finish_failed_generation("checkpoint has no current dependency hash");
+                }
+                return Err(CheckpointError::NoCommittedArtifact);
+            }
+        };
         if artifact.dependency_hash.as_str() != expected.as_str() {
             // The upstream graph changed while this generation was running.
             // Keep the committed artifact available, but expose that it no
@@ -990,7 +1056,12 @@ impl Checkpoint {
                 actual: artifact.dependency_hash.clone(),
             });
         }
-        store.put(&artifact)?;
+        if let Err(error) = store.put(&artifact) {
+            if tokenized {
+                self.finish_failed_generation(&error.to_string());
+            }
+            return Err(error);
+        }
         self.committed_dependency_hash = Some(artifact.dependency_hash.clone());
         self.committed_artifact_id = Some(artifact.id.clone());
         self.generation = Some(artifact.generation.clone());
@@ -1051,9 +1122,40 @@ impl Checkpoint {
         &self,
         store: &ArtifactStore,
     ) -> Result<Option<CheckpointArtifact>, CheckpointError> {
-        self.committed_artifact_id
-            .as_ref()
-            .map_or(Ok(None), |id| store.get(id))
+        let Some(id) = self.committed_artifact_id.as_ref() else {
+            return Ok(None);
+        };
+        let Some(artifact) = store.get(id)? else {
+            return Ok(None);
+        };
+        if artifact.provenance.node_version != self.node_version {
+            return Err(CheckpointError::NodeVersionMismatch {
+                expected: self.node_version,
+                actual: artifact.provenance.node_version,
+            });
+        }
+        self.validate_artifact_provenance(&artifact)?;
+        Ok(Some(artifact))
+    }
+
+    fn validate_artifact_provenance(
+        &self,
+        artifact: &CheckpointArtifact,
+    ) -> Result<(), CheckpointError> {
+        let committed_dependency_hash =
+            self.committed_dependency_hash.as_deref().ok_or_else(|| {
+                CheckpointError::InvalidProvenance(
+                    "checkpoint is missing its committed dependency hash".to_owned(),
+                )
+            })?;
+        if committed_dependency_hash != artifact.provenance.dependency_hash
+            || committed_dependency_hash != artifact.dependency_hash
+        {
+            return Err(CheckpointError::InvalidProvenance(
+                "checkpoint and artifact dependency hashes differ".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
