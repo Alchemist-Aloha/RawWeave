@@ -1,5 +1,6 @@
 use crate::model::{BatchJob, CollisionPolicy, rendered_output_path};
 use rawweave_graph::NodePackManifest;
+use rawweave_node_api::EvaluationPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -173,11 +174,55 @@ pub fn preflight(job: &BatchJob, options: &PreflightOptions) -> PreflightReport 
         "checkpoint-policy",
         format!("checkpoint policy is {:?}", job.checkpoint_policy),
     ));
+    check_checkpoint_policy(job, &mut report);
     check_dependencies(job, options, &mut report);
     check_recipes(job, options, &mut report);
     check_items(job, options, &mut report);
     check_disk_space(job, options, &mut report);
     report
+}
+
+fn check_checkpoint_policy(job: &BatchJob, report: &mut PreflightReport) {
+    let checkpoint_nodes = job
+        .workflow
+        .definition
+        .graph
+        .nodes()
+        .values()
+        .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    if checkpoint_nodes.is_empty() {
+        return;
+    }
+
+    if !job.checkpoint_policy.is_explicit_checkpoint_policy() {
+        report.push(Diagnostic::new(
+            DiagnosticSeverity::Error,
+            "checkpoint-policy-required",
+            format!(
+                "workflow contains {} manual checkpoint node(s); choose use_committed, generate_if_missing, regenerate_all, or fail_if_stale",
+                checkpoint_nodes.len()
+            ),
+        ));
+        return;
+    }
+
+    let severity = if job.checkpoint_policy == crate::CheckpointPolicy::FailIfStale {
+        DiagnosticSeverity::Info
+    } else {
+        DiagnosticSeverity::Warning
+    };
+    report.push(Diagnostic::new(
+        severity,
+        "checkpoint-policy-selected",
+        format!(
+            "{} applies to {} manual checkpoint node(s)",
+            serde_json::to_string(&job.checkpoint_policy)
+                .unwrap_or_else(|_| "checkpoint policy".into()),
+            checkpoint_nodes.len()
+        ),
+    ));
 }
 
 fn check_dependencies(job: &BatchJob, options: &PreflightOptions, report: &mut PreflightReport) {

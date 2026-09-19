@@ -1,7 +1,7 @@
 use rawweave_core::NodeId;
 use rawweave_graph::{
-    Graph, GraphError, NodeManifest, NodePackManifest, WorkflowDefinition, WorkflowError,
-    WorkflowMetadata,
+    ArtifactStore, Checkpoint, CheckpointArtifact, CheckpointError, Graph, GraphError,
+    NodeManifest, NodePackManifest, WorkflowDefinition, WorkflowError, WorkflowMetadata,
 };
 use rawweave_node_api::{
     EvaluationContext, NodeDescriptor, NodePack, NodeRegistry, ParameterValue, RegistryError, Value,
@@ -23,6 +23,8 @@ pub enum ProjectError {
     External(#[from] ExternalError),
     #[error(transparent)]
     Registry(#[from] RegistryError),
+    #[error(transparent)]
+    Checkpoint(#[from] CheckpointError),
     #[error("blueprint parameter id '{0}' must contain exactly one ':'")]
     InvalidBlueprintParameterId(String),
 }
@@ -207,6 +209,35 @@ impl EditorCore {
         Ok(self
             .graph
             .evaluate(&NodeId::from(node_id), output_port, &context)?)
+    }
+
+    /// Resolve a manual checkpoint from its committed artifact. This explicit
+    /// path never invokes the manual node instance itself.
+    pub fn evaluate_checkpoint(
+        &self,
+        node_id: &str,
+        output_port: &str,
+        context: EvaluationContext,
+        checkpoint: &mut Checkpoint,
+        store: &ArtifactStore,
+    ) -> Result<Value, ProjectError> {
+        Ok(self.graph.evaluate_checkpoint(
+            &NodeId::from(node_id),
+            output_port,
+            &context,
+            checkpoint,
+            store,
+        )?)
+    }
+
+    pub fn commit_checkpoint(
+        &self,
+        checkpoint: &mut Checkpoint,
+        artifact: CheckpointArtifact,
+        store: &ArtifactStore,
+    ) -> Result<(), ProjectError> {
+        checkpoint.commit(artifact, store)?;
+        Ok(())
     }
 
     pub fn evaluate_raw_workflow_with_bytes(

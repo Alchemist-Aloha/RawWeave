@@ -55,10 +55,30 @@ pub struct PinnedDependencies {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointPolicy {
+    /// Legacy job-progress persistence cadence.
     #[default]
     AfterEachItem,
+    /// Legacy job-progress persistence cadence.
     AfterEachOutput,
+    /// Legacy explicit manual progression mode.
     Manual,
+    /// Use a previously committed manual-checkpoint artifact only.
+    UseCommitted,
+    /// Generate a checkpoint only when no committed artifact exists.
+    GenerateIfMissing,
+    /// Ignore existing checkpoint artifacts and generate fresh results.
+    RegenerateAll,
+    /// Refuse to run when any required checkpoint is stale or missing.
+    FailIfStale,
+}
+
+impl CheckpointPolicy {
+    pub const fn is_explicit_checkpoint_policy(self) -> bool {
+        matches!(
+            self,
+            Self::UseCommitted | Self::GenerateIfMissing | Self::RegenerateAll | Self::FailIfStale
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

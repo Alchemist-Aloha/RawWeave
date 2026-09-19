@@ -16,6 +16,21 @@ pub type Parameters = BTreeMap<String, ParameterValue>;
 pub type Inputs = BTreeMap<String, Value>;
 pub type Outputs = BTreeMap<String, Value>;
 
+/// Whether a node may be evaluated automatically by the graph scheduler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationPolicy {
+    #[default]
+    Automatic,
+    ManualCheckpoint,
+}
+
+impl EvaluationPolicy {
+    pub const fn is_automatic(&self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortDescriptor {
     pub id: PortId,
@@ -312,6 +327,10 @@ pub struct NodeDescriptor {
     pub parameters: Vec<ParameterDescriptor>,
     #[serde(default)]
     pub capabilities: Vec<ExecutionCapability>,
+    /// Manual checkpoint nodes are not evaluated when their upstream graph
+    /// changes; the graph scheduler serves their last committed artifact.
+    #[serde(default, skip_serializing_if = "EvaluationPolicy::is_automatic")]
+    pub evaluation_policy: EvaluationPolicy,
     /// Selector-gated input ports. When present, the graph evaluates the
     /// selector first and skips input ports outside the selected branch so
     /// unselected expensive image branches are not rendered.
@@ -364,6 +383,7 @@ impl NodeDescriptor {
             outputs: Vec::new(),
             parameters: Vec::new(),
             capabilities: Vec::new(),
+            evaluation_policy: EvaluationPolicy::Automatic,
             lazy_inputs: Vec::new(),
         }
     }

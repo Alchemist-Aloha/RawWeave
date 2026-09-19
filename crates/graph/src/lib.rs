@@ -14,8 +14,11 @@ use rawweave_rendering::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod checkpoint;
 mod workflow;
 
+pub use checkpoint::*;
+pub use rawweave_node_api::EvaluationPolicy;
 pub use workflow::*;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,6 +78,8 @@ pub enum GraphError {
     InvalidNodeId(#[from] CoreError),
     #[error("workflow serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("checkpoint evaluation failed: {0}")]
+    Checkpoint(#[from] CheckpointError),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -555,6 +560,77 @@ impl Graph {
                 node: node_id.clone(),
                 port: output_port.to_owned(),
             })
+    }
+
+    /// Resolve a manual checkpoint without executing its node instance.
+    ///
+    /// The dependency hash is refreshed from the evaluated upstream outputs;
+    /// stale checkpoints continue to serve their last committed artifact so
+    /// downstream automatic nodes remain usable until an explicit regenerate.
+    pub fn evaluate_checkpoint(
+        &self,
+        node_id: &NodeId,
+        output_port: &str,
+        context: &EvaluationContext,
+        checkpoint: &mut Checkpoint,
+        store: &ArtifactStore,
+    ) -> Result<Value, GraphError> {
+        let node = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        if node.descriptor.evaluation_policy != EvaluationPolicy::ManualCheckpoint {
+            return Err(GraphError::Evaluation {
+                node: node_id.clone(),
+                source: NodeError::Message("node is not a manual checkpoint".to_owned()),
+            });
+        }
+        let output =
+            node.descriptor
+                .output(output_port)
+                .ok_or_else(|| GraphError::MissingPort {
+                    node: node_id.clone(),
+                    port: output_port.to_owned(),
+                })?;
+        if checkpoint.node_id != node_id.as_str() {
+            return Err(GraphError::Checkpoint(CheckpointError::InvalidProvenance(
+                "checkpoint belongs to a different node".to_owned(),
+            )));
+        }
+        if checkpoint.node_version != node.descriptor.version {
+            return Err(GraphError::Checkpoint(
+                CheckpointError::NodeVersionMismatch {
+                    expected: node.descriptor.version,
+                    actual: checkpoint.node_version,
+                },
+            ));
+        }
+
+        let mut upstream_hashes = BTreeMap::new();
+        for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
+            let value = self.evaluate(&edge.from_node, &edge.from_port, context)?;
+            let mut hasher = DefaultHasher::new();
+            hash_value(&value, &mut hasher);
+            upstream_hashes.insert(
+                format!("{}:{}->{}", edge.from_node, edge.from_port, edge.to_port),
+                format!("{:016x}", hasher.finish()),
+            );
+        }
+        checkpoint.set_dependency_hash(hash_upstream_inputs(
+            &upstream_hashes,
+            node.descriptor.version,
+        ));
+        let artifact = checkpoint
+            .committed_artifact(store)?
+            .ok_or(CheckpointError::NoCommittedArtifact)?;
+        let value = artifact.payload.to_value();
+        if !types_compatible(&output.data_type, value.data_type()) {
+            return Err(GraphError::TypeMismatch {
+                expected: output.data_type.clone(),
+                actual: value.data_type().to_owned(),
+            });
+        }
+        Ok(value)
     }
 
     pub fn to_json(&self) -> Result<String, GraphError> {
