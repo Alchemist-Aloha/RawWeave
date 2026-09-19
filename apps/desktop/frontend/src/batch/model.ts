@@ -25,6 +25,8 @@ export interface BatchWorkflowContext {
   metadata: WorkflowMetadata;
   nodePackDependencies: WorkflowDependency[];
   subgraphDependencies: WorkflowDependency[];
+  nestedSubgraphs?: Record<string, BatchWorkflowDefinition>;
+  containsManualCheckpoints?: boolean;
 }
 
 export function defaultBatchRecipe(destination = ''): BatchRecipe {
@@ -93,8 +95,16 @@ function definitionFromContext(context: BatchWorkflowContext): BatchWorkflowDefi
     subgraphDependencies: clone(context.subgraphDependencies),
     nodePackDependencies: clone(context.nodePackDependencies),
     metadata: clone(context.metadata),
-    nestedSubgraphs: {},
+    nestedSubgraphs: clone(context.nestedSubgraphs ?? {}),
   };
+}
+
+export function containsManualCheckpoints(definition: BatchWorkflowDefinition): boolean {
+  const nodes = Array.isArray(definition.graph.nodes)
+    ? definition.graph.nodes
+    : Object.values(definition.graph.nodes);
+  return nodes.some((node) => node.descriptor.evaluationPolicy === 'manual_checkpoint')
+    || Object.values(definition.nestedSubgraphs).some(containsManualCheckpoints);
 }
 
 function workflowOverrides(items: QueueItem[]): Record<string, ParameterValue> {

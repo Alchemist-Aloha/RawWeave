@@ -1,7 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CheckpointPanel } from './CheckpointPanel';
+import { CheckpointPanel, type CheckpointPreviewActions } from './CheckpointPanel';
 import type { CheckpointStatus } from '../checkpoint/types';
 
 const stale: CheckpointStatus = {
@@ -35,5 +35,31 @@ describe('CheckpointPanel', () => {
     expect(host.textContent).toContain('committed-hash');
     expect(host.querySelector('[aria-label="Regenerate checkpoint"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Checkpoint provenance"]')).not.toBeNull();
+  });
+
+  it('opens input, committed, and comparison previews through explicit actions', async () => {
+    const previews: CheckpointPreviewActions = {
+      input: { onClick: () => undefined },
+      generated: { onClick: () => undefined },
+      difference: { onClick: () => undefined },
+    };
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(
+        <CheckpointPanel
+          previewActions={previews}
+          status={stale}
+          loading={false}
+          onGenerate={() => undefined}
+          onCancel={() => undefined}
+        />,
+      );
+    });
+
+    expect(host.querySelector('[aria-label="Preview checkpoint inputs"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Preview committed checkpoint"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Compare checkpoint previews"]')).not.toBeNull();
   });
 });

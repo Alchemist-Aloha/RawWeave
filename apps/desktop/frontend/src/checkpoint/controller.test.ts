@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CheckpointController } from './controller';
-import type { CheckpointPlatform, CheckpointStatus } from './types';
+import type { CheckpointPlatform, CheckpointProgressEvent, CheckpointStatus } from './types';
 
 const status = (state: CheckpointStatus['state']): CheckpointStatus => ({
   nodeId: 'manual-1',
@@ -50,5 +50,49 @@ describe('CheckpointController', () => {
     expect(controller.state.status?.state).toBe('failed');
     expect(controller.state.status?.failure).toBe('provider unavailable');
     expect(controller.state.error).toBe('provider unavailable');
+  });
+
+  it('ignores progress for a different output port on the same node', async () => {
+    let progressListener: ((event: CheckpointProgressEvent) => void) | undefined;
+    const platform: CheckpointPlatform = {
+      async list() { return [status('generating')]; },
+      async status() { return status('generating'); },
+      async generate() { return status('fresh'); },
+      async cancel() { return status('cancelled'); },
+      subscribeProgress(listener) {
+        progressListener = listener;
+        return () => undefined;
+      },
+    };
+    const controller = new CheckpointController(platform);
+    await controller.refresh('manual-1');
+    expect(controller.state.status?.progress).toBe(42);
+
+    progressListener?.({
+      nodeId: 'manual-1',
+      outputPort: 'mask',
+      progress: 0.9,
+      phase: 'committing',
+    });
+
+    expect(controller.state.status?.outputPort).toBe('image');
+    expect(controller.state.status?.progress).toBe(42);
+  });
+
+  it('can dismiss an operation error after it has been rendered', async () => {
+    const platform: CheckpointPlatform = {
+      async list() { throw new Error('checkpoint service unavailable'); },
+      async status() { return status('ungenerated'); },
+      async generate() { return status('fresh'); },
+      async cancel() { return status('cancelled'); },
+    };
+    const controller = new CheckpointController(platform);
+
+    await expect(controller.refresh()).rejects.toThrow('checkpoint service unavailable');
+    expect(controller.state.error).toBe('checkpoint service unavailable');
+
+    controller.clearError();
+
+    expect(controller.state.error).toBeNull();
   });
 });

@@ -6,6 +6,7 @@ import {
   recipeCompressionLabel,
   recipeFormatLabel,
   recipeSharpeningLabel,
+  containsManualCheckpoints,
   type BatchWorkflowContext,
 } from '../batch/model';
 import type {
@@ -94,9 +95,10 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
   const failedItems = items.filter((item) => item.state === 'failed');
   const terminalCount = items.filter((item) => ['completed', 'skipped', 'failed', 'cancelled'].includes(item.state)).length;
   const progress = items.length === 0 ? 0 : Math.round((terminalCount / items.length) * 100);
-  const hasManualCheckpoints = workflow?.nodes.some(
+  const hasManualCheckpoints = Boolean(workflow?.containsManualCheckpoints)
+    || (workflow?.nodes.some(
     (node) => node.descriptor.evaluationPolicy === 'manual_checkpoint',
-  ) ?? false;
+  ) || Object.values(workflow?.nestedSubgraphs ?? {}).some(containsManualCheckpoints));
   const requiresExplicitCheckpointPolicy = hasManualCheckpoints && !isExplicitCheckpointPolicy(controller.checkpointPolicy);
 
   const updateRecipe = <K extends keyof BatchRecipe>(key: K, value: BatchRecipe[K]) => {

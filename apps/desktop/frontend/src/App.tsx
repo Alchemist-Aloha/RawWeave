@@ -14,6 +14,7 @@ import type { OpenImageResult, ParameterValue, WorkflowMetadata } from './editor
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
+import type { CheckpointPreviewActions } from './components/CheckpointPanel';
 import { NodeLibrary } from './components/NodeLibrary';
 import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
@@ -243,6 +244,41 @@ export default function App() {
     ? checkpointController.state.statuses.find((status) => status.nodeId === selectedNode.id) ?? null
     : null;
 
+  const checkpointPreviewActions = useMemo<CheckpointPreviewActions | undefined>(() => {
+    if (!selectedNode || selectedNode.descriptor.evaluationPolicy !== 'manual_checkpoint') return undefined;
+    const targets = targetsFor(controller.state.nodes);
+    const outputPort = selectedCheckpointStatus?.outputPort ?? selectedNode.descriptor.outputs[0]?.id;
+    const generatedTarget = outputPort
+      ? targets.find((target) => target.nodeId === selectedNode.id && target.outputPort === outputPort) ?? null
+      : null;
+    const inputTarget = controller.state.edges
+      .filter((edge) => edge.target === selectedNode.id)
+      .map((edge) => targets.find((target) => target.nodeId === edge.source && target.outputPort === edge.sourceHandle) ?? null)
+      .find((target) => target !== null) ?? null;
+    const canPreviewCommitted = Boolean(
+      generatedTarget
+      && selectedCheckpointStatus?.committedArtifactId
+      && selectedCheckpointStatus.canUseCommitted,
+    );
+    const showInput = () => {
+      if (inputTarget) viewerController.setTarget('A', inputTarget);
+    };
+    const showGenerated = () => {
+      if (canPreviewCommitted && generatedTarget) viewerController.setTarget('B', generatedTarget);
+    };
+    const showDifference = () => {
+      if (!inputTarget || !canPreviewCommitted || !generatedTarget) return;
+      viewerController.setLayout('side-by-side');
+      viewerController.setTarget('A', inputTarget);
+      viewerController.setTarget('B', generatedTarget);
+    };
+    return {
+      input: inputTarget ? { onClick: showInput } : undefined,
+      generated: canPreviewCommitted ? { onClick: showGenerated } : undefined,
+      difference: inputTarget && canPreviewCommitted ? { onClick: showDifference } : undefined,
+    };
+  }, [controller.state.edges, controller.state.nodes, selectedCheckpointStatus, selectedNode, viewerController]);
+
   useEffect(() => {
     if (selectedNode?.descriptor.evaluationPolicy !== 'manual_checkpoint') return;
     void checkpointController.refresh(selectedNode.id).catch(() => undefined);
@@ -279,8 +315,13 @@ export default function App() {
       metadata: definition?.metadata ?? { name: scope?.name ?? 'Workflow' },
       nodePackDependencies: definition?.nodePackDependencies ?? [],
       subgraphDependencies: definition?.subgraphDependencies ?? [],
+      // The active snapshot exposes nested scopes as summaries. Keep batch
+      // creation conservative until their full definitions are pinned.
+      containsManualCheckpoints: controller.state.nodes.some(
+        (node) => node.descriptor.evaluationPolicy === 'manual_checkpoint',
+      ) || controller.state.nestedSubgraphs.length > 0,
     };
-  }, [browserWorkflowBinding, controller.state.blueprint, controller.state.edges, controller.state.nodes, controller.state.revision, controller.state.scopePath, controller.state.workflowInputs, controller.state.workflowOutputs, controller.state.workflowParameters]);
+  }, [browserWorkflowBinding, controller.state.blueprint, controller.state.edges, controller.state.nodes, controller.state.nestedSubgraphs, controller.state.revision, controller.state.scopePath, controller.state.workflowInputs, controller.state.workflowOutputs, controller.state.workflowParameters]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -709,6 +750,7 @@ export default function App() {
           checkpointStatus={selectedCheckpointStatus}
           onCancelCheckpoint={cancelCheckpoint}
           onGenerateCheckpoint={generateCheckpoint}
+          checkpointPreviewActions={checkpointPreviewActions}
         />
       </section>
 
@@ -726,6 +768,15 @@ export default function App() {
           <strong>Command failed</strong>
           <span>{controller.state.error}</span>
           <button onClick={() => controller.selectNode(controller.state.selectedNodeId)} type="button">
+            ×
+          </button>
+        </div>
+      )}
+      {checkpointController.state.error && (
+        <div className="error-toast" role="alert">
+          <strong>Checkpoint operation failed</strong>
+          <span>{checkpointController.state.error}</span>
+          <button aria-label="Dismiss checkpoint error" onClick={() => checkpointController.clearError()} type="button">
             ×
           </button>
         </div>

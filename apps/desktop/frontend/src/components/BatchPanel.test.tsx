@@ -41,6 +41,33 @@ const manualContext: BatchWorkflowContext = {
   }],
 };
 
+const nestedManualContext: BatchWorkflowContext = {
+  ...context,
+  nestedSubgraphs: {
+    nested: {
+      identity: { id: 'nested', version: '1.0.0' },
+      graph: {
+        nodes: [{
+          id: 'nested-manual',
+          typeId: 'test.manual',
+          parameters: {},
+          exposedParameters: [],
+          descriptor: manualContext.nodes[0].descriptor,
+        }],
+        edges: [],
+        revision: 1,
+      },
+      parameters: [],
+      inputs: [],
+      outputs: [],
+      subgraphDependencies: [],
+      nodePackDependencies: [],
+      metadata: { name: 'Nested' },
+      nestedSubgraphs: {},
+    },
+  },
+};
+
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 afterEach(() => {
@@ -89,5 +116,18 @@ describe('BatchPanel', () => {
     });
 
     expect(create?.disabled).toBe(false);
+  });
+
+  it('requires an explicit checkpoint policy when a nested workflow contains one', async () => {
+    const controller = new BatchController(createMemoryBatchPlatform(), () => 'nested-policy-ui');
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<BatchPanel controller={controller} queueItems={[item]} workflow={nestedManualContext} />);
+    });
+
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Create batch"]')?.disabled).toBe(true);
+    expect(host.textContent).toContain('Choose an explicit policy');
   });
 });

@@ -2,10 +2,9 @@ mod browser;
 mod hosts;
 mod preview;
 
-use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
-use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::Read;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +24,7 @@ use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value
 use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Clone, Debug)]
 pub(crate) enum SourceAsset {
@@ -449,17 +448,27 @@ impl BatchManager {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct CheckpointRecord {
     output_port: String,
     checkpoint: Checkpoint,
+    #[serde(skip)]
     progress: Option<f32>,
 }
 
-#[derive(Default)]
 struct CheckpointManager {
     checkpoints: Mutex<BTreeMap<String, CheckpointRecord>>,
     store: ArtifactStore,
     cancellation_requests: Mutex<BTreeSet<String>>,
+    state_path: Option<PathBuf>,
+}
+
+const CHECKPOINT_STATE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+impl Default for CheckpointManager {
+    fn default() -> Self {
+        Self::memory()
+    }
 }
 
 impl CheckpointManager {
@@ -472,8 +481,155 @@ impl CheckpointManager {
             .lock()
             .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
             .clear();
-        Ok(())
+        self.persist()
     }
+
+    fn memory() -> Self {
+        Self {
+            checkpoints: Mutex::new(BTreeMap::new()),
+            store: ArtifactStore::memory(),
+            cancellation_requests: Mutex::new(BTreeSet::new()),
+            state_path: None,
+        }
+    }
+
+    fn persistent(root: impl Into<PathBuf>) -> Result<Self, String> {
+        let root = root.into();
+        let state_path = root.join("checkpoints.json");
+        let checkpoints = load_checkpoint_records(&state_path)?;
+        Ok(Self {
+            checkpoints: Mutex::new(checkpoints),
+            store: ArtifactStore::new(root.join("artifacts")),
+            cancellation_requests: Mutex::new(BTreeSet::new()),
+            state_path: Some(state_path),
+        })
+    }
+
+    fn persist(&self) -> Result<(), String> {
+        let Some(path) = &self.state_path else {
+            return Ok(());
+        };
+        let checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| "checkpoint state is unavailable".to_owned())?
+            .clone();
+        let bytes = serde_json::to_vec_pretty(&checkpoints)
+            .map_err(|error| format!("could not serialize checkpoint state: {error}"))?;
+        write_checkpoint_state(path, &bytes)
+    }
+
+    fn replace_from_graph(&self, editor: &EditorCore) -> Result<(), String> {
+        let records = editor
+            .graph()
+            .nodes()
+            .values()
+            .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+            .filter_map(|node| {
+                let checkpoint = editor.graph().checkpoint(&node.id).ok().flatten()?;
+                let output_port = node.descriptor.outputs.first()?.id.clone();
+                Some((
+                    node.id.as_str().to_owned(),
+                    CheckpointRecord {
+                        output_port,
+                        checkpoint,
+                        progress: None,
+                    },
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        *self
+            .checkpoints
+            .lock()
+            .map_err(|_| "checkpoint state is unavailable".to_owned())? = records;
+        self.cancellation_requests
+            .lock()
+            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+            .clear();
+        self.persist()
+    }
+}
+
+fn load_checkpoint_records(path: &Path) -> Result<BTreeMap<String, CheckpointRecord>, String> {
+    if !path.is_file() {
+        return Ok(BTreeMap::new());
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        format!(
+            "could not inspect checkpoint state '{}': {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > CHECKPOINT_STATE_MAX_BYTES as u64 {
+        return Err(format!(
+            "checkpoint state '{}' exceeds the {CHECKPOINT_STATE_MAX_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().try_into().unwrap_or(0));
+    File::open(path)
+        .map_err(|error| {
+            format!(
+                "could not open checkpoint state '{}': {error}",
+                path.display()
+            )
+        })?
+        .take((CHECKPOINT_STATE_MAX_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "could not read checkpoint state '{}': {error}",
+                path.display()
+            )
+        })?;
+    if bytes.len() > CHECKPOINT_STATE_MAX_BYTES {
+        return Err(format!(
+            "checkpoint state '{}' exceeds the {CHECKPOINT_STATE_MAX_BYTES}-byte limit",
+            path.display()
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "could not parse checkpoint state '{}': {error}",
+            path.display()
+        )
+    })
+}
+
+fn write_checkpoint_state(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "could not create checkpoint state directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("checkpoints.json"),
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| {
+                format!("could not create checkpoint state temporary file: {error}")
+            })?;
+        file.write_all(bytes)
+            .map_err(|error| format!("could not write checkpoint state: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not sync checkpoint state: {error}"))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("could not install checkpoint state: {error}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -518,6 +674,24 @@ pub struct AppState {
     blueprint_stack: Mutex<Vec<WorkflowDefinition>>,
     batch: Arc<BatchManager>,
     checkpoint: Arc<CheckpointManager>,
+}
+
+impl AppState {
+    fn with_checkpoint_manager(checkpoint: Arc<CheckpointManager>) -> Self {
+        Self {
+            editor: Arc::new(Mutex::new(EditorCore::default())),
+            hosts: Arc::new(Mutex::new(
+                hosts::HostManager::load_default().unwrap_or_default(),
+            )),
+            preview: Arc::new(preview::PreviewManager::default()),
+            source_image: Mutex::new(None),
+            source_selection: Mutex::new(SourceSelectionIntent::default()),
+            blueprint: Mutex::new(None),
+            blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
+            checkpoint,
+        }
+    }
 }
 
 fn lock_hosts(
@@ -613,10 +787,14 @@ fn build_subgraph_definition(
 fn import_blueprint_definition(
     editor: &EditorCore,
     serialized: &str,
+    store: &ArtifactStore,
 ) -> Result<WorkflowDefinition, String> {
-    editor
-        .load_blueprint(serialized.as_bytes())
-        .map_err(|error| error.to_string())
+    WorkflowDefinition::from_json_with_artifact_store(
+        serialized,
+        editor.graph().registry(),
+        store.clone(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn mutate_current_blueprint<F>(state: &AppState, mutate: F) -> Result<WorkflowDefinitionDto, String>
@@ -650,33 +828,40 @@ fn current_or_flat_blueprint(state: &AppState) -> Result<WorkflowDefinition, Str
 }
 
 fn hash_checkpoint_input(bytes: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let encoded = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    hash_upstream_inputs(&BTreeMap::from([("bytes".to_owned(), encoded)]), 0)
 }
 
 fn checkpoint_source_hash(source: Option<&SourceAsset>) -> String {
-    let mut hasher = DefaultHasher::new();
+    let mut inputs = BTreeMap::new();
     match source {
         Some(SourceAsset::Ordinary(image)) => {
-            "ordinary".hash(&mut hasher);
-            image.width().hash(&mut hasher);
-            image.height().hash(&mut hasher);
-            image.revision().hash(&mut hasher);
-            for pixel in image.pixels() {
-                for channel in pixel {
-                    channel.to_bits().hash(&mut hasher);
-                }
-            }
+            inputs.insert("kind".to_owned(), "ordinary".to_owned());
+            inputs.insert("width".to_owned(), image.width().to_string());
+            inputs.insert("height".to_owned(), image.height().to_string());
+            inputs.insert(
+                "pixels".to_owned(),
+                image
+                    .pixels()
+                    .iter()
+                    .flat_map(|pixel| pixel.iter())
+                    .map(|channel| format!("{:08x}", channel.to_bits()))
+                    .collect(),
+            );
         }
         Some(SourceAsset::Raw { bytes, path }) => {
-            "raw".hash(&mut hasher);
-            bytes.hash(&mut hasher);
-            path.hash(&mut hasher);
+            inputs.insert("kind".to_owned(), "raw".to_owned());
+            inputs.insert("bytes".to_owned(), hash_checkpoint_input(bytes));
+            inputs.insert("path".to_owned(), path.to_string_lossy().into_owned());
         }
-        None => "none".hash(&mut hasher),
+        None => {
+            inputs.insert("kind".to_owned(), "none".to_owned());
+        }
     }
-    format!("{:016x}", hasher.finish())
+    hash_upstream_inputs(&inputs, 0)
 }
 
 fn checkpoint_dependencies(
@@ -1559,9 +1744,10 @@ fn load_blueprint_command(
     serialized: &str,
 ) -> Result<WorkflowDefinitionDto, String> {
     let editor = lock_editor(&state.editor)?.clone();
-    let blueprint = import_blueprint_definition(&editor, serialized)?;
+    let blueprint = import_blueprint_definition(&editor, serialized, &state.checkpoint.store)?;
     let dto = workflow_definition_dto(&blueprint);
-    store_blueprint(state, blueprint)?;
+    store_blueprint(state, blueprint.clone())?;
+    state.checkpoint.replace_from_graph(&editor)?;
     state
         .blueprint_stack
         .lock()
@@ -2356,18 +2542,17 @@ pub fn run() {
         .register_uri_scheme_protocol("rawweave-preview", move |_ctx, request| {
             protocol_preview.response(&request)
         })
-        .manage(AppState {
-            editor: Arc::new(Mutex::new(EditorCore::default())),
-            hosts: Arc::new(Mutex::new(
-                hosts::HostManager::load_default().unwrap_or_default(),
-            )),
-            preview,
-            source_image: Mutex::new(None),
-            source_selection: Mutex::new(SourceSelectionIntent::default()),
-            blueprint: Mutex::new(None),
-            blueprint_stack: Mutex::new(Vec::new()),
-            batch: Arc::new(BatchManager::default()),
-            checkpoint: Arc::new(CheckpointManager::default()),
+        .setup(|app| {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let checkpoint = Arc::new(
+                CheckpointManager::persistent(data_dir.join("checkpoints"))
+                    .map_err(std::io::Error::other)?,
+            );
+            app.manage(AppState::with_checkpoint_manager(checkpoint));
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             node_descriptors,

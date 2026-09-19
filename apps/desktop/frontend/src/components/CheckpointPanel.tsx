@@ -5,6 +5,18 @@ export interface CheckpointPanelProps {
   loading: boolean;
   onGenerate: () => void | Promise<void>;
   onCancel: () => void | Promise<void>;
+  previewActions?: CheckpointPreviewActions;
+}
+
+export interface CheckpointPreviewAction {
+  onClick: () => void;
+  disabled?: boolean;
+}
+
+export interface CheckpointPreviewActions {
+  input?: CheckpointPreviewAction;
+  generated?: CheckpointPreviewAction;
+  difference?: CheckpointPreviewAction;
 }
 
 const labels: Record<CheckpointStatus['state'], string> = {
@@ -16,7 +28,7 @@ const labels: Record<CheckpointStatus['state'], string> = {
   cancelled: 'Cancelled',
 };
 
-export function CheckpointPanel({ status, loading, onGenerate, onCancel }: CheckpointPanelProps) {
+export function CheckpointPanel({ status, loading, onGenerate, onCancel, previewActions }: CheckpointPanelProps) {
   if (!status) {
     return (
       <section aria-label="Checkpoint" className="checkpoint-panel">
@@ -77,9 +89,42 @@ export function CheckpointPanel({ status, loading, onGenerate, onCancel }: Check
         )}
       </details>
       <div className="checkpoint-panel__previews" aria-label="Checkpoint previews">
-        <div><span>Input preview</span><strong>Upstream inputs</strong></div>
-        <div><span>Generated preview</span><strong>{status.committedArtifactId ? 'Committed artifact' : 'Not generated'}</strong></div>
-        <div><span>Difference view</span><strong>{status.state === 'stale' ? 'Changes pending' : 'No difference'}</strong></div>
+        <div>
+          <span>Input preview</span>
+          <button
+            aria-label="Preview checkpoint inputs"
+            className="button button--quiet"
+            disabled={!previewActions?.input || previewActions.input.disabled}
+            onClick={() => void previewActions?.input?.onClick()}
+            type="button"
+          >
+            Open in Viewer
+          </button>
+        </div>
+        <div>
+          <span>Generated preview</span>
+          <button
+            aria-label="Preview committed checkpoint"
+            className="button button--quiet"
+            disabled={!previewActions?.generated || previewActions.generated.disabled}
+            onClick={() => void previewActions?.generated?.onClick()}
+            type="button"
+          >
+            {status.committedArtifactId ? 'Open in Viewer' : 'Not generated'}
+          </button>
+        </div>
+        <div>
+          <span>Difference view</span>
+          <button
+            aria-label="Compare checkpoint previews"
+            className="button button--quiet"
+            disabled={!previewActions?.difference || previewActions.difference.disabled}
+            onClick={() => void previewActions?.difference?.onClick()}
+            type="button"
+          >
+            {status.state === 'stale' ? 'Compare in Viewer' : 'Compare in Viewer'}
+          </button>
+        </div>
       </div>
     </section>
   );
