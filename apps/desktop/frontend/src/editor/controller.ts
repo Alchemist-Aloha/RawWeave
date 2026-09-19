@@ -79,6 +79,17 @@ export class EditorController {
     }
   }
 
+  public async refreshDescriptors(): Promise<void> {
+    try {
+      const descriptors = await this.platform.nodeDescriptors();
+      this.setState({ descriptors, error: null });
+      await this.refresh();
+    } catch (error) {
+      this.setState({ error: errorMessage(error) });
+      throw error;
+    }
+  }
+
   private async refresh(loadedPositions?: Record<string, Position>): Promise<void> {
     const snapshot = await this.platform.snapshot();
     const descriptors = this.state.descriptors;

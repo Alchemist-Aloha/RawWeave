@@ -1,4 +1,5 @@
 mod browser;
+mod hosts;
 mod preview;
 
 use std::collections::BTreeMap;
@@ -8,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rawweave_batch::{
-    dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore,
-    PreflightOptions,
+    dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore, PreflightOptions,
 };
 use rawweave_core::NodeId;
 use rawweave_graph::{
@@ -452,12 +452,21 @@ struct BatchDryRunResponse {
 #[derive(Default)]
 pub struct AppState {
     pub editor: Arc<Mutex<EditorCore>>,
+    pub(crate) hosts: Arc<Mutex<hosts::HostManager>>,
     pub preview: Arc<preview::PreviewManager>,
     pub(crate) source_image: Mutex<Option<SourceAsset>>,
     source_selection: Mutex<SourceSelectionIntent>,
     blueprint: Mutex<Option<WorkflowDefinition>>,
     blueprint_stack: Mutex<Vec<WorkflowDefinition>>,
     batch: Arc<BatchManager>,
+}
+
+fn lock_hosts(
+    hosts: &Arc<Mutex<hosts::HostManager>>,
+) -> Result<MutexGuard<'_, hosts::HostManager>, String> {
+    hosts
+        .lock()
+        .map_err(|_| "external host state is unavailable".to_owned())
 }
 
 fn lock_editor(editor: &Arc<Mutex<EditorCore>>) -> Result<MutexGuard<'_, EditorCore>, String> {
@@ -925,6 +934,71 @@ pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> 
 #[tauri::command]
 fn node_descriptors(state: State<'_, AppState>) -> Result<Vec<NodeDescriptor>, String> {
     Ok(lock_editor(&state.editor)?.node_descriptors())
+}
+
+#[tauri::command]
+fn add_external_host(
+    state: State<'_, AppState>,
+    config: hosts::ExternalHostConfigDto,
+) -> Result<hosts::ExternalHostDto, String> {
+    lock_hosts(&state.hosts)?
+        .add(config)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_external_host(state: State<'_, AppState>, host_id: String) -> Result<(), String> {
+    lock_hosts(&state.hosts)?
+        .remove(&host_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_external_hosts(state: State<'_, AppState>) -> Result<Vec<hosts::ExternalHostDto>, String> {
+    Ok(lock_hosts(&state.hosts)?.list())
+}
+
+#[tauri::command]
+fn test_external_host(
+    state: State<'_, AppState>,
+    host_id: String,
+) -> Result<hosts::ExternalHostDto, String> {
+    lock_hosts(&state.hosts)?
+        .test(&host_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn discover_external_host(
+    state: State<'_, AppState>,
+    host_id: String,
+) -> Result<hosts::ExternalHostDto, String> {
+    let mut hosts = lock_hosts(&state.hosts)?;
+    let mut editor = lock_editor(&state.editor)?;
+    hosts
+        .discover(&host_id, &mut editor)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn discover_external_hosts(
+    state: State<'_, AppState>,
+) -> Result<Vec<hosts::ExternalHostDto>, String> {
+    let mut hosts = lock_hosts(&state.hosts)?;
+    let mut editor = lock_editor(&state.editor)?;
+    hosts
+        .discover_all(&mut editor)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn external_host_diagnostics(
+    state: State<'_, AppState>,
+    host_id: String,
+) -> Result<hosts::ExternalHostDiagnosticsDto, String> {
+    lock_hosts(&state.hosts)?
+        .diagnostics(&host_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1583,12 +1657,8 @@ fn load_batch_job(
     let store = JobStore::new(request.state_path);
     let snapshot = store.load().map_err(|error| error.to_string())?;
     let job_id = snapshot.id.clone();
-    let engine = BatchEngine::resume(
-        store,
-        Arc::new(ImageFileProcessor),
-        request.max_workers,
-    )
-    .map_err(|error| error.to_string())?;
+    let engine = BatchEngine::resume(store, Arc::new(ImageFileProcessor), request.max_workers)
+        .map_err(|error| error.to_string())?;
     let engine = Arc::new(engine);
     let snapshot = engine.snapshot().map_err(|error| error.to_string())?;
     state.batch.insert(job_id, engine)?;
@@ -1758,6 +1828,9 @@ pub fn run() {
         })
         .manage(AppState {
             editor: Arc::new(Mutex::new(EditorCore::default())),
+            hosts: Arc::new(Mutex::new(
+                hosts::HostManager::load_default().unwrap_or_default(),
+            )),
             preview,
             source_image: Mutex::new(None),
             source_selection: Mutex::new(SourceSelectionIntent::default()),
@@ -1767,6 +1840,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             node_descriptors,
+            add_external_host,
+            remove_external_host,
+            list_external_hosts,
+            test_external_host,
+            discover_external_host,
+            discover_external_hosts,
+            external_host_diagnostics,
             add_node,
             remove_node,
             connect_nodes,
@@ -2250,6 +2330,7 @@ mod tests {
             editor: Arc::new(Mutex::new(EditorCore::new_with_raw_decoder(
                 decoder.clone(),
             ))),
+            hosts: Arc::new(Mutex::new(hosts::HostManager::memory())),
             preview: Arc::new(preview::PreviewManager::default()),
             source_image: Mutex::new(None),
             source_selection: Mutex::new(SourceSelectionIntent::default()),
@@ -2336,6 +2417,7 @@ mod tests {
             editor: Arc::new(Mutex::new(EditorCore::new_with_raw_decoder(
                 decoder.clone(),
             ))),
+            hosts: Arc::new(Mutex::new(hosts::HostManager::memory())),
             preview: Arc::new(preview::PreviewManager::default()),
             source_image: Mutex::new(None),
             source_selection: Mutex::new(SourceSelectionIntent::default()),
@@ -2378,6 +2460,7 @@ mod tests {
             .unwrap();
         let state = AppState {
             editor: Arc::new(Mutex::new(EditorCore::default())),
+            hosts: Arc::new(Mutex::new(hosts::HostManager::memory())),
             preview: Arc::clone(&preview),
             source_image: Mutex::new(Some(SourceAsset::Ordinary(Image::new(1, 1).unwrap()))),
             source_selection: Mutex::new(SourceSelectionIntent::default()),

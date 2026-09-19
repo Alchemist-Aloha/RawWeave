@@ -355,11 +355,12 @@ impl HostConfig {
         self
     }
 
-    pub fn with_environment_allowlist<I>(mut self, names: I) -> Self
+    pub fn with_environment_allowlist<I, S>(mut self, names: I) -> Self
     where
-        I: IntoIterator<Item = &'static str>,
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
     {
-        self.environment_allowlist = names.into_iter().map(OsString::from).collect();
+        self.environment_allowlist = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -844,11 +845,12 @@ impl CliHostConfig {
         self
     }
 
-    pub fn with_environment_allowlist<I>(mut self, names: I) -> Self
+    pub fn with_environment_allowlist<I, S>(mut self, names: I) -> Self
     where
-        I: IntoIterator<Item = &'static str>,
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
     {
-        self.environment_allowlist = names.into_iter().map(OsString::from).collect();
+        self.environment_allowlist = names.into_iter().map(Into::into).collect();
         self
     }
 

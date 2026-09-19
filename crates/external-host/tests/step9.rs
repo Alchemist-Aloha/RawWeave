@@ -43,7 +43,7 @@ fn environment_is_cleared_except_for_allowlisted_names() {
     }
     let config = HostConfig::new("/bin/sh")
         .with_args(["-c", "test \"${RAWWEAVE_EXTERNAL_SECRET-unset}\" = unset"])
-        .with_environment_allowlist([]);
+        .with_environment_allowlist(Vec::<String>::new());
     let supervisor = Supervisor::new(config).unwrap();
     let result = supervisor.request(RequestPayload::Discover);
     unsafe {

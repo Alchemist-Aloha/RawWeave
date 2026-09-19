@@ -22,6 +22,8 @@ import { BrowserQueue } from './browser/BrowserQueue';
 import type { BrowserSession } from './browser/types';
 import type { BatchWorkflowContext } from './batch/model';
 import { createBatchPlatform } from './platform/batch';
+import { HostManager } from './components/HostManager';
+import { createTauriHostManager } from './platform/hosts';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -167,6 +169,7 @@ export default function App() {
   const [platform] = useState(() => createPlatform());
   const [batchPlatform] = useState(() => createBatchPlatform());
   const [controller] = useState(() => new EditorController(platform));
+  const [hostManager] = useState(() => createTauriHostManager());
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
   const [, setViewerRevision] = useState(0);
@@ -177,6 +180,11 @@ export default function App() {
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+  const refreshEditorDescriptors = useCallback(
+    () => controller.refreshDescriptors(),
+    [controller],
+  );
 
   useEffect(() => {
     const unsubscribe = controller.subscribe(() => setRevision((revision) => revision + 1));
@@ -549,6 +557,8 @@ export default function App() {
           />
         </div>
       </header>
+
+      <HostManager api={hostManager} onDiscovery={refreshEditorDescriptors} />
 
       <SourceMetadata source={controller.state.source} />
       <BrowserQueue

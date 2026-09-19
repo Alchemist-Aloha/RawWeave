@@ -18,12 +18,19 @@ rawweave-raw = { path = "../../../crates/raw" }
 rawweave-color = { path = "../../../crates/color" }
 rawweave-batch = { path = "../../../crates/batch" }
 rawweave-rendering = { path = "../../../crates/rendering" }
+rawweave-external-host = { path = "../../../crates/external-host" }
+rawweave-external-protocol = { path = "../../../crates/external-protocol" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
 base64 = "0.22"
 exif = { package = "kamadak-exif", version = "0.6.1" }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
 tauri = { version = "2" }
 tauri-plugin-dialog = "2.7.3"
+
+[dev-dependencies]
+tempfile = "3.27"
 
 [workspace]
