@@ -8,8 +8,15 @@ import os
 import struct
 import sys
 
-PROTOCOL = {"major": 1, "minor": 0}
 ROOT = os.environ.get("RAWWEAVE_EXTERNAL_DATA_ROOT", ".")
+NEGOTIATED = False
+
+
+def protocol():
+    return {
+        "major": int(os.environ.get("RAWWEAVE_FIXTURE_PROTOCOL_MAJOR", "1")),
+        "minor": 0,
+    }
 
 
 def capabilities():
@@ -23,7 +30,7 @@ def capabilities():
         "gpu": False,
         "custom_ui": False,
         "deterministic": True,
-        "data_plane": True,
+        "data_plane": os.environ.get("RAWWEAVE_FIXTURE_DATA_PLANE", "1") == "1",
     }
 
 
@@ -60,7 +67,7 @@ def descriptors():
 
 
 def response(request_id, payload):
-    return {"Response": {"id": request_id, "protocol": PROTOCOL, "payload": payload}}
+    return {"Response": {"id": request_id, "protocol": protocol(), "payload": payload}}
 
 
 def error(request_id, code, message):
@@ -84,10 +91,20 @@ def buffer_value(value):
 
 
 def handle(request):
+    global NEGOTIATED
     request_id = request["id"]
     payload = request["payload"]
     operation = payload["operation"]
     data = payload.get("data") or {}
+    log_path = os.environ.get("RAWWEAVE_FIXTURE_OPERATION_LOG")
+    if log_path:
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(f"{operation}\n")
+    if operation == "CapabilityQuery":
+        NEGOTIATED = True
+        return response(request_id, {"result": "Capabilities", "data": {"capabilities": capabilities()}})
+    if not NEGOTIATED:
+        return error(request_id, "negotiation_required", "capability query required")
     if operation == "Discover":
         return response(
             request_id,
@@ -106,8 +123,7 @@ def handle(request):
         if output is None:
             return error(request_id, "missing_input", "fixture requires a typed buffer")
         return response(request_id, {"result": "Evaluated", "data": {"outputs": {"image": output, "mask": output}}})
-    if operation == "CapabilityQuery":
-        return response(request_id, {"result": "Capabilities", "data": {"capabilities": capabilities()}})
+
     if operation in ("Status", "Result", "Cancel", "SerializeState", "Destroy"):
         return response(request_id, {"result": "Acknowledged"})
     return error(request_id, "unsupported", operation)

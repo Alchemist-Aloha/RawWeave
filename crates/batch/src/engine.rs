@@ -1,11 +1,17 @@
-use crate::model::{BatchItem, BatchJob, BatchState, ItemState, OutputRecipe, PinnedWorkflow};
+use crate::model::{
+    BatchItem, BatchJob, BatchState, ItemState, OutputRecipe, PinnedDependencies, PinnedWorkflow,
+};
 use crate::persistence::JobStore;
 use crate::preflight::{PreflightOptions, PreflightReport, preflight};
 use crate::recipe::{record_for_path, write_output};
 use crate::{BatchError, OutputRecord};
+use rawweave_color::{DisplayRGB, SceneLinearRGB};
+use rawweave_graph::{WorkflowDefinition, WorkflowPort};
 use rawweave_image::{ColorDomain, Image, PixelFormat};
+use rawweave_node_api::{EvaluationContext, NodeRegistry, ParameterValue, Value};
+use rawweave_project::{built_in_node_pack_manifests, default_registry};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +46,16 @@ impl CancellationToken {
 /// evaluate one item at a time; the engine drops the returned image before it
 /// advances to another item.
 pub trait BatchProcessor: Send + Sync {
+    fn validate(
+        &self,
+        workflow: &PinnedWorkflow,
+        dependencies: &PinnedDependencies,
+    ) -> Result<(), BatchError> {
+        workflow.verify()?;
+        let _ = dependencies;
+        Ok(())
+    }
+
     fn process(
         &self,
         workflow: &PinnedWorkflow,
@@ -64,40 +80,406 @@ where
     }
 }
 
-/// Processor for ordinary image files. Applications with RAW or plugin-backed
-/// workflows can provide their own `BatchProcessor` at the same seam.
+const RAW_EXTENSIONS: &[&str] = &[
+    "3fr", "arw", "cr2", "cr3", "dcr", "dng", "erf", "kdc", "mrw", "nef", "nrw", "orf", "pef",
+    "raf", "raw", "rw2", "rwl", "srw", "x3f",
+];
+
+fn is_raw_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            RAW_EXTENSIONS
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+/// Processor used by the desktop batch commands. It evaluates the pinned
+/// workflow graph, rather than treating the batch as a source-file copier.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImageFileProcessor;
 
+impl ImageFileProcessor {
+    fn runtime_definition(
+        &self,
+        workflow: &PinnedWorkflow,
+    ) -> Result<WorkflowDefinition, BatchError> {
+        workflow.verify()?;
+        let registry = default_registry();
+        let mut definition = workflow.definition.clone();
+        attach_registry(&mut definition, &registry);
+        Ok(definition)
+    }
+
+    fn validate_definition(
+        &self,
+        workflow: &PinnedWorkflow,
+        dependencies: &PinnedDependencies,
+    ) -> Result<WorkflowDefinition, BatchError> {
+        let definition = self.runtime_definition(workflow)?;
+        validate_dependencies(&definition, dependencies)?;
+        definition
+            .validate()
+            .map_err(|error| BatchError::Workflow(error.to_string()))?;
+        Ok(definition)
+    }
+}
+
 impl BatchProcessor for ImageFileProcessor {
+    fn validate(
+        &self,
+        workflow: &PinnedWorkflow,
+        dependencies: &PinnedDependencies,
+    ) -> Result<(), BatchError> {
+        self.validate_definition(workflow, dependencies).map(|_| ())
+    }
+
     fn process(
         &self,
-        _workflow: &PinnedWorkflow,
+        workflow: &PinnedWorkflow,
         item: &BatchItem,
         cancel: &CancellationToken,
     ) -> Result<Image, BatchError> {
         if cancel.is_cancelled() {
             return Err(BatchError::Cancelled);
         }
-        let decoded = image::ImageReader::open(&item.source_path)
-            .map_err(|error| BatchError::Processor(format!("could not open source: {error}")))?
-            .decode()
-            .map_err(|error| BatchError::Processor(format!("could not decode source: {error}")))?
-            .to_rgba32f();
+        let definition = self.validate_definition(workflow, &PinnedDependencies::default())?;
+        let mut context = match workflow_kind(&definition)? {
+            WorkflowKind::Ordinary => EvaluationContext::with_source_image(decode_ordinary(item)?),
+            WorkflowKind::Raw => EvaluationContext::default().with_source_path(&item.source_path),
+        };
+        for (id, value) in &item.overrides {
+            let parameter = definition.parameters().get(id).ok_or_else(|| {
+                BatchError::Processor(format!(
+                    "workflow parameter override '{id}' is not declared"
+                ))
+            })?;
+            validate_override(&definition, parameter, id, value)?;
+            context = context.with_parameter_override(
+                parameter.node_id.as_str(),
+                &parameter.parameter_id,
+                value.clone(),
+            );
+        }
         if cancel.is_cancelled() {
             return Err(BatchError::Cancelled);
         }
-        let (width, height) = decoded.dimensions();
-        let pixels = decoded.pixels().map(|pixel| pixel.0).collect::<Vec<_>>();
-        Image::from_pixels_with_metadata(
-            width,
-            height,
-            pixels,
-            PixelFormat::Rgba32Float,
-            ColorDomain::Srgb,
-        )
-        .map_err(|error| BatchError::Processor(format!("decoded image is invalid: {error}")))
+        let image = select_image_output(&definition, &context)?;
+        if cancel.is_cancelled() {
+            return Err(BatchError::Cancelled);
+        }
+        Ok(image)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowKind {
+    Ordinary,
+    Raw,
+}
+
+fn attach_registry(definition: &mut WorkflowDefinition, registry: &NodeRegistry) {
+    definition.graph = definition.graph.clone().with_registry(registry.clone());
+    for nested in definition.nested_subgraphs.values_mut() {
+        attach_registry(nested, registry);
+    }
+}
+
+fn validate_dependencies(
+    definition: &WorkflowDefinition,
+    dependencies: &PinnedDependencies,
+) -> Result<(), BatchError> {
+    if let Some((id, version)) = dependencies.plugins.iter().next() {
+        return Err(BatchError::Processor(format!(
+            "missing plugin '{id}' version '{version}'"
+        )));
+    }
+    if let Some((id, version)) = dependencies.external_providers.iter().next() {
+        return Err(BatchError::Processor(format!(
+            "missing external provider '{id}' version '{version}'"
+        )));
+    }
+
+    let available_packs = built_in_node_pack_manifests();
+    let mut required_packs = BTreeMap::new();
+    for dependency in definition
+        .node_pack_dependencies
+        .iter()
+        .chain(dependencies.node_packs.iter())
+    {
+        match required_packs.insert(dependency.id.clone(), dependency.version.clone()) {
+            Some(previous) if previous != dependency.version => {
+                return Err(BatchError::Processor(format!(
+                    "pinned node pack '{}' has conflicting versions '{}' and '{}'",
+                    dependency.id, previous, dependency.version
+                )));
+            }
+            _ => {}
+        }
+    }
+    for (id, required) in required_packs {
+        let available = available_packs.iter().find(|pack| pack.package_id == id);
+        match available {
+            None => {
+                return Err(BatchError::Processor(format!(
+                    "missing node pack '{id}' version '{required}'"
+                )));
+            }
+            Some(pack) if pack.version != required => {
+                return Err(BatchError::Processor(format!(
+                    "node pack '{id}' requires {required}, available {}",
+                    pack.version
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut available_subgraphs = BTreeMap::new();
+    for (id, nested) in &definition.nested_subgraphs {
+        available_subgraphs.insert(id.as_str(), nested.as_ref());
+    }
+    for dependency in definition
+        .subgraph_dependencies
+        .iter()
+        .chain(dependencies.subgraphs.iter())
+    {
+        let Some(nested) = available_subgraphs.get(dependency.id.as_str()) else {
+            return Err(BatchError::Processor(format!(
+                "missing subgraph '{}' version '{}'",
+                dependency.id, dependency.version
+            )));
+        };
+        if nested.version() != dependency.version
+            || (!dependency.hash.is_empty() && nested.hash() != dependency.hash)
+        {
+            return Err(BatchError::Processor(format!(
+                "pinned subgraph '{}' does not match its version or hash",
+                dependency.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_override(
+    definition: &WorkflowDefinition,
+    parameter: &rawweave_graph::WorkflowParameter,
+    id: &str,
+    value: &ParameterValue,
+) -> Result<(), BatchError> {
+    if parameter.parameter_type != value.parameter_type() {
+        return Err(BatchError::Processor(format!(
+            "workflow parameter override '{id}' has the wrong type"
+        )));
+    }
+    let node = definition.graph.node(&parameter.node_id).ok_or_else(|| {
+        BatchError::Processor(format!(
+            "workflow parameter override '{id}' targets a missing node"
+        ))
+    })?;
+    let descriptor = node
+        .descriptor
+        .parameter(&parameter.parameter_id)
+        .ok_or_else(|| {
+            BatchError::Processor(format!(
+                "workflow parameter override '{id}' targets a missing parameter"
+            ))
+        })?;
+    match value {
+        ParameterValue::Float(number)
+            if !number.is_finite()
+                || descriptor.min.is_some_and(|minimum| *number < minimum)
+                || descriptor.max.is_some_and(|maximum| *number > maximum) =>
+        {
+            return Err(BatchError::Processor(format!(
+                "workflow parameter override '{id}' is outside its allowed range"
+            )));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn decode_ordinary(item: &BatchItem) -> Result<Image, BatchError> {
+    if is_raw_path(&item.source_path) {
+        return Err(BatchError::Processor(
+            "RAW source requires a RAW workflow".to_owned(),
+        ));
+    }
+    let decoded = image::ImageReader::open(&item.source_path)
+        .map_err(|error| BatchError::Processor(format!("could not open source: {error}")))?
+        .decode()
+        .map_err(|error| BatchError::Processor(format!("could not decode source: {error}")))?
+        .to_rgba32f();
+    let (width, height) = decoded.dimensions();
+    let pixels = decoded.pixels().map(|pixel| pixel.0).collect::<Vec<_>>();
+    Image::from_pixels_with_metadata(
+        width,
+        height,
+        pixels,
+        PixelFormat::Rgba32Float,
+        ColorDomain::Srgb,
+    )
+    .map_err(|error| BatchError::Processor(format!("decoded image is invalid: {error}")))
+}
+
+fn workflow_kind(definition: &WorkflowDefinition) -> Result<WorkflowKind, BatchError> {
+    let mut has_raw = false;
+    let mut has_ordinary = false;
+    for node in definition.graph.nodes().values() {
+        has_raw |= node.type_id.starts_with("raw.");
+        for port in node
+            .descriptor
+            .inputs
+            .iter()
+            .chain(node.descriptor.outputs.iter())
+        {
+            has_raw |= port.data_type.starts_with("raw.");
+            has_ordinary |= port.data_type == "core.Image";
+        }
+    }
+    match (has_raw, has_ordinary) {
+        (true, false) => Ok(WorkflowKind::Raw),
+        (false, true) => Ok(WorkflowKind::Ordinary),
+        (true, true) => Err(BatchError::Processor(
+            "workflow mixes RAW and ordinary image requirements".to_owned(),
+        )),
+        (false, false) => Err(BatchError::Processor(
+            "workflow has no supported image source".to_owned(),
+        )),
+    }
+}
+
+fn is_image_output(data_type: &str) -> bool {
+    matches!(
+        data_type,
+        "core.Image" | "color.SceneLinearRGB" | "color.DisplayRGB"
+    )
+}
+
+fn select_image_output(
+    definition: &WorkflowDefinition,
+    context: &EvaluationContext,
+) -> Result<Image, BatchError> {
+    let declared = definition
+        .outputs()
+        .iter()
+        .filter(|port| is_image_output(&port.data_type))
+        .collect::<Vec<_>>();
+    if let Some(port) = declared.into_iter().next() {
+        return evaluate_image_output(definition, port, context);
+    }
+
+    let mut candidates = Vec::<WorkflowPort>::new();
+    for node in definition.graph.nodes().values() {
+        let preferred_port = match node.type_id.as_str() {
+            "core.output" => Some("image"),
+            "raw.display-transform" => Some("display"),
+            _ => None,
+        };
+        if let Some((port_id, port)) = preferred_port
+            .and_then(|port_id| node.descriptor.output(port_id).map(|port| (port_id, port)))
+        {
+            candidates.push(WorkflowPort {
+                id: format!("output:{}:{}", node.id, port_id),
+                name: port.name.clone(),
+                direction: rawweave_graph::WorkflowPortDirection::Output,
+                node_id: node.id.clone(),
+                port_id: port_id.to_owned(),
+                data_type: port.data_type.clone(),
+                required: false,
+            });
+        }
+    }
+    for node in definition.graph.nodes().values() {
+        if node.type_id == "core.image-input"
+            || definition
+                .graph
+                .edges()
+                .iter()
+                .any(|edge| edge.from_node == node.id)
+        {
+            continue;
+        }
+        for port in &node.descriptor.outputs {
+            if is_image_output(&port.data_type) {
+                candidates.push(WorkflowPort {
+                    id: format!("output:{}:{}", node.id, port.id),
+                    name: port.name.clone(),
+                    direction: rawweave_graph::WorkflowPortDirection::Output,
+                    node_id: node.id.clone(),
+                    port_id: port.id.clone(),
+                    data_type: port.data_type.clone(),
+                    required: false,
+                });
+            }
+        }
+    }
+    candidates
+        .first()
+        .map(|port| evaluate_image_output(definition, port, context))
+        .unwrap_or_else(|| {
+            Err(BatchError::UnsupportedWorkflowOutput(
+                "workflow has no declared or appropriate image output".to_owned(),
+            ))
+        })
+}
+
+fn evaluate_image_output(
+    definition: &WorkflowDefinition,
+    port: &WorkflowPort,
+    context: &EvaluationContext,
+) -> Result<Image, BatchError> {
+    let value = definition
+        .graph
+        .evaluate(&port.node_id, &port.port_id, context)
+        .map_err(|error| {
+            BatchError::Processor(format!("workflow output '{}': {error}", port.id))
+        })?;
+    match value {
+        Value::Image(image) => Ok(image),
+        Value::DisplayRGB(display) => display_to_image(&display),
+        Value::SceneLinearRGB(scene) => scene_to_image(&scene),
+        other => Err(BatchError::UnsupportedWorkflowOutput(format!(
+            "workflow output '{}' produced {} instead of an image",
+            port.id,
+            other.data_type()
+        ))),
+    }
+}
+
+fn display_to_image(display: &DisplayRGB) -> Result<Image, BatchError> {
+    let pixels = display
+        .pixels()
+        .iter()
+        .map(|[red, green, blue]| [*red, *green, *blue, 1.0])
+        .collect();
+    Image::from_pixels_with_metadata(
+        display.dimensions().width,
+        display.dimensions().height,
+        pixels,
+        PixelFormat::Rgba32Float,
+        ColorDomain::Srgb,
+    )
+    .map_err(|error| BatchError::Processor(format!("display output is invalid: {error}")))
+}
+
+fn scene_to_image(scene: &SceneLinearRGB) -> Result<Image, BatchError> {
+    let pixels = scene
+        .pixels()
+        .iter()
+        .map(|[red, green, blue]| [*red, *green, *blue, 1.0])
+        .collect();
+    Image::from_pixels_with_metadata(
+        scene.dimensions().width,
+        scene.dimensions().height,
+        pixels,
+        PixelFormat::Rgba32Float,
+        ColorDomain::LinearSrgb,
+    )
+    .map_err(|error| BatchError::Processor(format!("scene output is invalid: {error}")))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -494,7 +876,7 @@ fn worker_loop(inner: Arc<EngineInner>, queue: Arc<Mutex<VecDeque<String>>>) {
 }
 
 fn process_item(inner: &Arc<EngineInner>, id: &str) {
-    let (workflow, item, recipes) = {
+    let (workflow, dependencies, item, recipes) = {
         let mut job = match inner.job.lock() {
             Ok(job) => job,
             Err(_) => return,
@@ -511,10 +893,16 @@ fn process_item(inner: &Arc<EngineInner>, id: &str) {
         if inner.store.save(&job).is_err() {
             return;
         }
-        (job.workflow.clone(), item, job.recipes.clone())
+        (
+            job.workflow.clone(),
+            job.dependencies.clone(),
+            item,
+            job.recipes.clone(),
+        )
     };
 
-    let result = inner.processor.process(&workflow, &item, &inner.cancel);
+    let result = validate_dependencies(&workflow.definition, &dependencies)
+        .and_then(|()| inner.processor.process(&workflow, &item, &inner.cancel));
     let image = match result {
         Ok(image) if !inner.cancel.is_cancelled() => image,
         Ok(_) => {

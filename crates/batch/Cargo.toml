@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rawweave-color.workspace = true
+rawweave-core.workspace = true
 rawweave-image.workspace = true
 rawweave-project.workspace = true
 rawweave-graph.workspace = true

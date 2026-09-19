@@ -1,4 +1,5 @@
 use rawweave_batch::*;
+use rawweave_core::NodeId;
 use rawweave_graph::{WorkflowDefinition, WorkflowMetadata};
 use rawweave_image::Image;
 use rawweave_node_api::ParameterValue;
@@ -9,6 +10,69 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
+
+fn write_test_png(path: &std::path::Path) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = png::Encoder::new(file, 1, 1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&[64, 128, 192, 255]).unwrap();
+    writer.finish().unwrap();
+}
+
+fn exposure_invert_workflow() -> WorkflowDefinition {
+    let mut editor = EditorCore::default();
+    for (node_id, type_id) in [
+        ("input", "core.image-input"),
+        ("exposure", "core.exposure"),
+        ("invert", "core.invert"),
+        ("output", "core.output"),
+    ] {
+        editor.add_node(node_id, type_id).unwrap();
+    }
+    editor
+        .connect("input", "image", "exposure", "image")
+        .unwrap();
+    editor
+        .connect("exposure", "image", "invert", "image")
+        .unwrap();
+    editor
+        .connect("invert", "image", "output", "image")
+        .unwrap();
+    let mut definition = WorkflowDefinition::new(
+        "test.exposure-invert",
+        "1.0.0",
+        editor.graph().clone(),
+        WorkflowMetadata::new("Exposure and Invert"),
+    )
+    .unwrap();
+    definition
+        .expose_parameter(&NodeId::from("exposure"), "exposure")
+        .unwrap();
+    definition
+        .expose_output(&NodeId::from("output"), "image")
+        .unwrap();
+    definition
+}
+
+fn batch_job_for(
+    pinned: PinnedWorkflow,
+    dependencies: PinnedDependencies,
+    item: BatchItem,
+    output_dir: &std::path::Path,
+) -> BatchJob {
+    BatchJob::new(
+        "processor-job",
+        pinned,
+        dependencies,
+        BTreeMap::new(),
+        vec![recipe(OutputFormat::Png, output_dir)],
+        CheckpointPolicy::AfterEachItem,
+        vec![item],
+    )
+    .unwrap()
+}
 
 fn workflow() -> WorkflowDefinition {
     let mut editor = EditorCore::default();
@@ -284,5 +348,100 @@ fn cancellation_stops_waiting_items_without_affecting_persisted_job_integrity() 
             .items
             .iter()
             .any(|item| item.state == ItemState::Running)
+    );
+}
+
+#[test]
+fn image_processor_executes_pinned_exposure_invert_and_item_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.png");
+    write_test_png(&source);
+    let pinned = PinnedWorkflow::new(exposure_invert_workflow(), 3).unwrap();
+    let processor = ImageFileProcessor;
+    let cancel = CancellationToken::new();
+
+    let base_item = BatchItem::new("base", &source, "base.png");
+    let base = processor.process(&pinned, &base_item, &cancel).unwrap();
+
+    let mut override_item = BatchItem::new("override", &source, "override.png");
+    override_item
+        .overrides
+        .insert("exposure:exposure".into(), ParameterValue::Float(1.0));
+    let overridden = processor.process(&pinned, &override_item, &cancel).unwrap();
+
+    let base_pixel = base.pixels()[0];
+    let overridden_pixel = overridden.pixels()[0];
+    assert!((base_pixel[0] - (1.0 - 64.0 / 255.0)).abs() < 1e-6);
+    assert!((base_pixel[1] - (1.0 - 128.0 / 255.0)).abs() < 1e-6);
+    assert!((overridden_pixel[0] - (1.0 - 128.0 / 255.0)).abs() < 1e-6);
+    assert!((overridden_pixel[1] - (1.0 - 256.0 / 255.0)).abs() < 1e-6);
+    assert_ne!(base_pixel, overridden_pixel);
+}
+
+#[test]
+fn missing_workflow_output_and_plugin_fail_individual_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.png");
+    write_test_png(&source);
+
+    let mut input_only = EditorCore::default();
+    input_only.add_node("input", "core.image-input").unwrap();
+    let no_output = WorkflowDefinition::new(
+        "test.no-output",
+        "1.0.0",
+        input_only.graph().clone(),
+        WorkflowMetadata::new("No Output"),
+    )
+    .unwrap();
+    let no_output_job = batch_job_for(
+        PinnedWorkflow::new(no_output, 1).unwrap(),
+        PinnedDependencies::default(),
+        BatchItem::new("no-output", &source, "no-output.png"),
+        dir.path(),
+    );
+    let no_output_runner = BatchEngine::new(
+        no_output_job,
+        JobStore::memory(),
+        Arc::new(ImageFileProcessor),
+        1,
+    )
+    .unwrap();
+    no_output_runner.start().unwrap();
+    no_output_runner.wait().unwrap();
+    let no_output_item = &no_output_runner.snapshot().unwrap().items[0];
+    assert_eq!(no_output_item.state, ItemState::Failed);
+    assert!(
+        no_output_item
+            .failure
+            .as_deref()
+            .is_some_and(|message| message.contains("image output"))
+    );
+
+    let mut dependencies = PinnedDependencies::default();
+    dependencies
+        .plugins
+        .insert("missing.plugin".into(), "1.0.0".into());
+    let plugin_job = batch_job_for(
+        PinnedWorkflow::new(workflow(), 1).unwrap(),
+        dependencies,
+        BatchItem::new("missing-plugin", &source, "missing-plugin.png"),
+        dir.path(),
+    );
+    let plugin_runner = BatchEngine::new(
+        plugin_job,
+        JobStore::memory(),
+        Arc::new(ImageFileProcessor),
+        1,
+    )
+    .unwrap();
+    plugin_runner.start().unwrap();
+    plugin_runner.wait().unwrap();
+    let plugin_item = &plugin_runner.snapshot().unwrap().items[0];
+    assert_eq!(plugin_item.state, ItemState::Failed);
+    assert!(
+        plugin_item
+            .failure
+            .as_deref()
+            .is_some_and(|message| message.contains("missing.plugin"))
     );
 }

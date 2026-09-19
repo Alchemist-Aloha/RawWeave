@@ -5,13 +5,24 @@ use rawweave_external_host::{
     ArgumentSource, CliArgument, CliArgumentType, CliHost, CliHostConfig, CliRequest, CliValue,
     DataPlane, HostConfig, HostError, ResourceLimits, Supervisor,
 };
-use rawweave_external_protocol::{DataKind, RequestPayload};
+use rawweave_external_protocol::{DataKind, ProtocolError, RequestPayload, ResponsePayload};
 
 fn shell_config(script: &str) -> HostConfig {
     HostConfig::new("/bin/sh")
         .with_args(["-c", script])
         .with_limits(ResourceLimits {
             request_timeout: Duration::from_millis(100),
+            ..ResourceLimits::default()
+        })
+}
+
+fn fixture_config() -> HostConfig {
+    let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fixture_external_host.py");
+    HostConfig::new("python3")
+        .with_args([script.to_string_lossy().as_ref()])
+        .with_limits(ResourceLimits {
+            request_timeout: Duration::from_secs(2),
             ..ResourceLimits::default()
         })
 }
@@ -36,20 +47,59 @@ fn malicious_buffer_paths_are_rejected() {
 
 #[test]
 fn environment_is_cleared_except_for_allowlisted_names() {
-    // The child is deliberately a shell because the host still passes the
-    // configured command as argv; the host never constructs a shell command.
     unsafe {
         env::set_var("RAWWEAVE_EXTERNAL_SECRET", "must-not-leak");
     }
-    let config = HostConfig::new("/bin/sh")
-        .with_args(["-c", "test \"${RAWWEAVE_EXTERNAL_SECRET-unset}\" = unset"])
-        .with_environment_allowlist(Vec::<String>::new());
+    let config = fixture_config().with_environment_allowlist(Vec::<String>::new());
     let supervisor = Supervisor::new(config).unwrap();
     let result = supervisor.request(RequestPayload::Discover);
     unsafe {
         env::remove_var("RAWWEAVE_EXTERNAL_SECRET");
     }
-    assert!(result.is_ok(), "secret leaked or child failed: {result:?}");
+    assert!(
+        matches!(result, Ok(ResponsePayload::Discovered { .. })),
+        "secret leaked or child failed: {result:?}"
+    );
+}
+
+#[test]
+fn incompatible_peer_major_is_rejected_before_normal_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("operations.log");
+    let config = fixture_config()
+        .with_environment("RAWWEAVE_FIXTURE_PROTOCOL_MAJOR", "2")
+        .with_environment("RAWWEAVE_FIXTURE_OPERATION_LOG", &log);
+    let supervisor = Supervisor::new(config).unwrap();
+
+    let result = supervisor.request(RequestPayload::Evaluate {
+        instance_id: "instance".into(),
+        inputs: Default::default(),
+        parameters: Default::default(),
+    });
+
+    assert!(matches!(
+        result,
+        Err(HostError::Protocol(ProtocolError::VersionMismatch { .. }))
+    ));
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "CapabilityQuery\n");
+}
+
+#[test]
+fn incompatible_peer_capabilities_are_rejected_before_normal_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("operations.log");
+    let config = fixture_config()
+        .with_environment("RAWWEAVE_FIXTURE_DATA_PLANE", "0")
+        .with_environment("RAWWEAVE_FIXTURE_OPERATION_LOG", &log);
+    let supervisor = Supervisor::new(config).unwrap();
+
+    let result = supervisor.request(RequestPayload::Discover);
+
+    assert!(matches!(
+        result,
+        Err(HostError::CapabilityRejected(message)) if message == "data_plane"
+    ));
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "CapabilityQuery\n");
 }
 
 #[test]

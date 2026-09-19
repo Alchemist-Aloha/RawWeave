@@ -2913,6 +2913,7 @@ dependencies = [
  "image",
  "png 0.17.16",
  "rawweave-color",
+ "rawweave-core",
  "rawweave-graph",
  "rawweave-image",
  "rawweave-node-api",

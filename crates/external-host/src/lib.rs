@@ -11,8 +11,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rawweave_external_protocol::{
-    CURRENT_PROTOCOL_VERSION, Capabilities, DataBuffer, DataKind, FrameCodec, Message,
-    ProtocolError, ProtocolRange, Request, RequestId, RequestPayload, Response, ResponsePayload,
+    CURRENT_PROTOCOL_VERSION, Capabilities, CapabilityRequirement, DataBuffer, DataKind,
+    FrameCodec, Message, NegotiatedProtocol, ProtocolError, ProtocolRange, Request, RequestId,
+    RequestPayload, Response, ResponsePayload, negotiate,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
@@ -332,6 +333,7 @@ pub struct HostConfig {
     environment: BTreeMap<OsString, OsString>,
     limits: ResourceLimits,
     capabilities: Capabilities,
+    required_capabilities: CapabilityRequirement,
 }
 
 impl HostConfig {
@@ -343,6 +345,10 @@ impl HostConfig {
             environment: BTreeMap::new(),
             limits: ResourceLimits::default(),
             capabilities: Capabilities::default(),
+            required_capabilities: CapabilityRequirement {
+                data_plane: Some(true),
+                ..CapabilityRequirement::default()
+            },
         }
     }
 
@@ -383,6 +389,15 @@ impl HostConfig {
         self
     }
 
+    /// Set the capabilities that the peer must advertise during negotiation.
+    pub fn with_required_capabilities(
+        mut self,
+        required_capabilities: CapabilityRequirement,
+    ) -> Self {
+        self.required_capabilities = required_capabilities;
+        self
+    }
+
     pub fn executable(&self) -> &Path {
         &self.executable
     }
@@ -410,6 +425,13 @@ struct RunningChild {
 
 struct SupervisorState {
     child: Option<RunningChild>,
+    negotiated: Option<NegotiatedSession>,
+}
+
+#[derive(Clone, Debug)]
+struct NegotiatedSession {
+    protocol: NegotiatedProtocol,
+    capabilities: Capabilities,
 }
 
 pub struct Supervisor {
@@ -425,7 +447,10 @@ impl Supervisor {
         let config = Arc::new(config);
         let supervisor = Self {
             config: Arc::clone(&config),
-            state: Mutex::new(SupervisorState { child: None }),
+            state: Mutex::new(SupervisorState {
+                child: None,
+                negotiated: None,
+            }),
             start_count: AtomicUsize::new(0),
             next_request_id: AtomicU64::new(1),
         };
@@ -445,6 +470,19 @@ impl Supervisor {
     pub fn last_request_id(&self) -> Option<RequestId> {
         let next = self.next_request_id.load(Ordering::Relaxed);
         next.checked_sub(1).filter(|id| *id != 0)
+    }
+
+    pub fn negotiated_protocol(&self) -> Result<Option<NegotiatedProtocol>, HostError> {
+        let state = self.state.lock().map_err(|_| HostError::StatePoisoned)?;
+        Ok(state.negotiated.as_ref().map(|session| session.protocol))
+    }
+
+    pub fn negotiated_capabilities(&self) -> Result<Option<Capabilities>, HostError> {
+        let state = self.state.lock().map_err(|_| HostError::StatePoisoned)?;
+        Ok(state
+            .negotiated
+            .as_ref()
+            .map(|session| session.capabilities.clone()))
     }
 
     pub fn request(&self, payload: RequestPayload) -> Result<ResponsePayload, HostError> {
@@ -496,32 +534,68 @@ impl Supervisor {
                 "request IDs must be non-zero".into(),
             ));
         }
-        if let RequestPayload::CapabilityQuery { required } = &payload {
+        let mut state = self.state.lock().map_err(|_| HostError::StatePoisoned)?;
+        let explicit_required = match &payload {
+            RequestPayload::CapabilityQuery { required } => Some(required.clone()),
+            _ => None,
+        };
+        if let Some(required) = explicit_required {
             self.config
                 .capabilities
-                .check(required)
-                .map_err(|error| match error {
-                    ProtocolError::CapabilityRejected(message) => {
-                        HostError::CapabilityRejected(message)
-                    }
-                    other => HostError::Protocol(other),
-                })?;
+                .check(&required)
+                .map_err(capability_error)?;
+            let response = self.send_request(&mut state, request_id, payload)?;
+            let session = self.negotiate_response(&mut state, &response, &required)?;
+            state.negotiated = Some(session);
+            return Ok(response);
         }
 
+        if state.negotiated.is_none() {
+            let handshake_id = self.allocate_request_id();
+            let required = self.config.required_capabilities.clone();
+            let response = self.send_request(
+                &mut state,
+                handshake_id,
+                RequestPayload::CapabilityQuery {
+                    required: required.clone(),
+                },
+            )?;
+            let session = match self.negotiate_response(&mut state, &response, &required) {
+                Ok(session) => session,
+                Err(error) => {
+                    self.discard_child(&mut state);
+                    return Err(error);
+                }
+            };
+            state.negotiated = Some(session);
+        }
+
+        self.send_request(&mut state, request_id, payload)
+    }
+
+    fn send_request(
+        &self,
+        state: &mut SupervisorState,
+        request_id: RequestId,
+        payload: RequestPayload,
+    ) -> Result<Response, HostError> {
         let request = Request::with_id(request_id, payload);
         let frame = FrameCodec::encode(
-            &Message::Request(request.clone()),
+            &Message::Request(request),
             self.config.limits.max_frame_size,
         )?;
-        let mut state = self.state.lock().map_err(|_| HostError::StatePoisoned)?;
         let mut running = match state.child.take() {
             Some(running) => running,
-            None => self.spawn_child()?,
+            None => {
+                state.negotiated = None;
+                self.spawn_child()?
+            }
         };
 
         if let Some(status) = running.child.try_wait()? {
             let stderr = stderr_snapshot(&running.stderr);
             self.stop_child(running);
+            state.negotiated = None;
             state.child = Some(self.spawn_child()?);
             return Err(HostError::Crashed {
                 status: status.code(),
@@ -536,6 +610,7 @@ impl Supervisor {
         {
             let stderr = stderr_snapshot(&running.stderr);
             self.stop_child(running);
+            state.negotiated = None;
             state.child = Some(self.spawn_child()?);
             return Err(HostError::Io(error).into_with_context(stderr));
         }
@@ -553,6 +628,7 @@ impl Supervisor {
             Ok(received) => received,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 self.stop_child(running);
+                state.negotiated = None;
                 state.child = Some(self.spawn_child()?);
                 return Err(HostError::Timeout {
                     request_id: Some(request_id),
@@ -562,6 +638,7 @@ impl Supervisor {
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let stderr = stderr_snapshot(&running.stderr);
                 let status = terminate_and_status(&mut running.child);
+                state.negotiated = None;
                 state.child = Some(self.spawn_child()?);
                 return Err(HostError::Crashed {
                     status: status.and_then(|value| value.code()),
@@ -572,29 +649,48 @@ impl Supervisor {
         running.stdout = Some(received.0);
         match received.1 {
             Ok(Message::Response(response)) => {
-                state.child = Some(running);
                 if response.id != request_id {
+                    self.stop_child(running);
+                    state.negotiated = None;
                     return Err(HostError::RequestIdMismatch {
                         expected: request_id,
                         actual: response.id,
                     });
                 }
-                if response.protocol != CURRENT_PROTOCOL_VERSION {
-                    return Err(HostError::Protocol(ProtocolError::VersionMismatch {
-                        local: ProtocolRange::exact(CURRENT_PROTOCOL_VERSION),
-                        peer: ProtocolRange::exact(response.protocol),
-                    }));
+                let peer = ProtocolRange::exact(response.protocol);
+                let negotiated = match negotiate(ProtocolRange::current(), peer) {
+                    Ok(negotiated) => negotiated,
+                    Err(error) => {
+                        self.stop_child(running);
+                        state.negotiated = None;
+                        return Err(HostError::Protocol(error));
+                    }
+                };
+                let session_protocol = state.negotiated.as_ref().map(|session| session.protocol);
+                match session_protocol {
+                    Some(session_protocol) if session_protocol != negotiated => {
+                        self.stop_child(running);
+                        state.negotiated = None;
+                        return Err(HostError::Protocol(ProtocolError::VersionMismatch {
+                            local: ProtocolRange::exact(session_protocol.version),
+                            peer,
+                        }));
+                    }
+                    _ => {}
                 }
+                state.child = Some(running);
                 Ok(response)
             }
             Ok(Message::Request(_)) => {
                 self.stop_child(running);
+                state.negotiated = None;
                 state.child = Some(self.spawn_child()?);
                 Err(HostError::UnexpectedMessage)
             }
             Err(error) => {
                 let stderr = stderr_snapshot(&running.stderr);
                 let status = terminate_and_status(&mut running.child);
+                state.negotiated = None;
                 state.child = Some(self.spawn_child()?);
                 if matches!(error, ProtocolError::UnexpectedEof) {
                     if status.as_ref().and_then(ExitStatus::code) == Some(0) {
@@ -613,6 +709,39 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    fn negotiate_response(
+        &self,
+        _state: &mut SupervisorState,
+        response: &Response,
+        required: &CapabilityRequirement,
+    ) -> Result<NegotiatedSession, HostError> {
+        let ResponsePayload::Capabilities { capabilities } = &response.payload else {
+            return Err(match &response.payload {
+                ResponsePayload::Error(error) => HostError::Remote {
+                    code: error.code.clone(),
+                    message: error.message.clone(),
+                },
+                _ => HostError::UnexpectedMessage,
+            });
+        };
+        capabilities.check(required).map_err(capability_error)?;
+        Ok(NegotiatedSession {
+            protocol: negotiate(
+                ProtocolRange::current(),
+                ProtocolRange::exact(response.protocol),
+            )
+            .map_err(HostError::Protocol)?,
+            capabilities: capabilities.clone(),
+        })
+    }
+
+    fn discard_child(&self, state: &mut SupervisorState) {
+        if let Some(running) = state.child.take() {
+            self.stop_child(running);
+        }
+        state.negotiated = None;
     }
 
     fn allocate_request_id(&self) -> RequestId {
@@ -675,6 +804,13 @@ impl Supervisor {
 
     fn stop_child(&self, mut running: RunningChild) {
         let _ = terminate_and_status(&mut running.child);
+    }
+}
+
+fn capability_error(error: ProtocolError) -> HostError {
+    match error {
+        ProtocolError::CapabilityRejected(message) => HostError::CapabilityRejected(message),
+        other => HostError::Protocol(other),
     }
 }
 
