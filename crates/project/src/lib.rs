@@ -4,10 +4,14 @@ use rawweave_graph::{
     WorkflowMetadata,
 };
 use rawweave_node_api::{
-    EvaluationContext, NodeDescriptor, NodePack, NodeRegistry, ParameterValue, Value,
+    EvaluationContext, NodeDescriptor, NodePack, NodeRegistry, ParameterValue, RegistryError, Value,
 };
 use rawweave_raw::RawDecoder;
 use thiserror::Error;
+
+mod external;
+
+pub use external::{ExternalError, ExternalHost, ExternalHostDiagnostics, ExternalNodePack};
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -15,6 +19,10 @@ pub enum ProjectError {
     Graph(#[from] GraphError),
     #[error(transparent)]
     Workflow(#[from] WorkflowError),
+    #[error(transparent)]
+    External(#[from] ExternalError),
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
     #[error("blueprint parameter id '{0}' must contain exactly one ':'")]
     InvalidBlueprintParameterId(String),
 }
@@ -102,6 +110,17 @@ impl EditorCore {
 
     pub fn node_descriptors(&self) -> Vec<NodeDescriptor> {
         self.graph.registry().descriptors()
+    }
+
+    pub fn register_external_node_pack(
+        &mut self,
+        pack: ExternalNodePack,
+    ) -> Result<(), ProjectError> {
+        let mut registry = self.graph.registry();
+        pack.register_into(&mut registry)?;
+        let graph = std::mem::replace(&mut self.graph, Graph::new(registry.clone()));
+        self.graph = graph.with_registry(registry);
+        Ok(())
     }
 
     pub fn add_node(&mut self, node_id: &str, type_id: &str) -> Result<(), ProjectError> {

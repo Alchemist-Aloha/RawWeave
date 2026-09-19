@@ -1128,6 +1128,8 @@ dependencies = [
  "rawweave-core",
  "rawweave-core-image",
  "rawweave-core-values",
+ "rawweave-external-host",
+ "rawweave-external-protocol",
  "rawweave-graph",
  "rawweave-image",
  "rawweave-node-api",
