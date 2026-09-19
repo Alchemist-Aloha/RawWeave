@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use rawweave_image::{Image, Mask};
 use rawweave_node_api::Value;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -36,15 +36,56 @@ pub enum CheckpointAvailability {
     Incompatible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ArtifactId {
     Sha256(String),
 }
 
 impl ArtifactId {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, CheckpointError> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CheckpointError::InvalidArtifactId(value));
+        }
+        Ok(Self::Sha256(value))
+    }
+
+    fn validate(&self) -> Result<(), CheckpointError> {
+        Self::try_new(self.as_str()).map(|_| ())
+    }
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::Sha256(value) => value,
+        }
+    }
+}
+
+impl Serialize for ArtifactId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_newtype_variant("ArtifactId", 0, "Sha256", self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ArtifactId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum WireArtifactId {
+            Sha256(String),
+        }
+
+        match WireArtifactId::deserialize(deserializer)? {
+            WireArtifactId::Sha256(value) => Self::try_new(value).map_err(de::Error::custom),
         }
     }
 }
@@ -56,7 +97,7 @@ impl fmt::Display for ArtifactId {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CheckpointPayload {
     Image(Image),
     Mask(Mask),
@@ -79,9 +120,23 @@ impl CheckpointPayload {
     fn validate(&self, limits: &ArtifactImportLimits) -> Result<(), CheckpointError> {
         match self {
             Self::Image(image) => {
-                let pixels = image.dimensions().pixel_count().map_err(|_| {
+                let dimensions = image.dimensions();
+                let pixels = dimensions.pixel_count().map_err(|_| {
                     CheckpointError::InvalidPayload("image dimensions overflow".into())
                 })?;
+                if image.pixels().len() != pixels {
+                    return Err(CheckpointError::InvalidPayload(format!(
+                        "image dimensions require {pixels} pixels, got {}",
+                        image.pixels().len()
+                    )));
+                }
+                if dimensions.width.checked_add(image.origin().0).is_none()
+                    || dimensions.height.checked_add(image.origin().1).is_none()
+                {
+                    return Err(CheckpointError::InvalidPayload(
+                        "image origin overflows dimensions".into(),
+                    ));
+                }
                 if pixels > limits.max_pixels {
                     return Err(CheckpointError::ImportLimitExceeded {
                         resource: "pixels",
@@ -100,9 +155,76 @@ impl CheckpointPayload {
                 }
             }
             Self::Mask(mask) => {
-                let pixels = mask.dimensions().pixel_count().map_err(|_| {
+                let dimensions = mask.dimensions();
+                let pixels = dimensions.pixel_count().map_err(|_| {
                     CheckpointError::InvalidPayload("mask dimensions overflow".into())
                 })?;
+                if mask.tile_size() == 0 {
+                    return Err(CheckpointError::InvalidPayload(
+                        "mask tile size must be greater than zero".into(),
+                    ));
+                }
+                if dimensions.width.checked_add(mask.origin().0).is_none()
+                    || dimensions.height.checked_add(mask.origin().1).is_none()
+                {
+                    return Err(CheckpointError::InvalidPayload(
+                        "mask origin overflows dimensions".into(),
+                    ));
+                }
+                let tiles_per_row = dimensions.width.div_ceil(mask.tile_size());
+                let tiles_per_column = dimensions.height.div_ceil(mask.tile_size());
+                let expected_tiles = (tiles_per_row as usize)
+                    .checked_mul(tiles_per_column as usize)
+                    .ok_or_else(|| {
+                        CheckpointError::InvalidPayload("mask tile count overflow".into())
+                    })?;
+                if mask.tiles().len() != expected_tiles {
+                    return Err(CheckpointError::InvalidPayload(format!(
+                        "mask dimensions require {expected_tiles} tiles, got {}",
+                        mask.tiles().len()
+                    )));
+                }
+                for (index, tile) in mask.tiles().iter().enumerate() {
+                    let index = u32::try_from(index).map_err(|_| {
+                        CheckpointError::InvalidPayload("mask tile index overflow".into())
+                    })?;
+                    let tile_x = index % tiles_per_row;
+                    let tile_y = index / tiles_per_row;
+                    let x = tile_x.checked_mul(mask.tile_size()).ok_or_else(|| {
+                        CheckpointError::InvalidPayload("mask tile origin overflow".into())
+                    })?;
+                    let y = tile_y.checked_mul(mask.tile_size()).ok_or_else(|| {
+                        CheckpointError::InvalidPayload("mask tile origin overflow".into())
+                    })?;
+                    let width = mask.tile_size().min(dimensions.width.saturating_sub(x));
+                    let height = mask.tile_size().min(dimensions.height.saturating_sub(y));
+                    let expected_origin = (
+                        mask.origin().0.checked_add(x).ok_or_else(|| {
+                            CheckpointError::InvalidPayload("mask tile origin overflow".into())
+                        })?,
+                        mask.origin().1.checked_add(y).ok_or_else(|| {
+                            CheckpointError::InvalidPayload("mask tile origin overflow".into())
+                        })?,
+                    );
+                    if tile.origin != expected_origin
+                        || tile.dimensions != rawweave_image::Dimensions::new(width, height)
+                    {
+                        return Err(CheckpointError::InvalidPayload(
+                            "mask tile geometry does not match mask dimensions".into(),
+                        ));
+                    }
+                    let expected_values = (width as usize)
+                        .checked_mul(height as usize)
+                        .ok_or_else(|| {
+                            CheckpointError::InvalidPayload("mask tile value count overflow".into())
+                        })?;
+                    if tile.values.len() != expected_values {
+                        return Err(CheckpointError::InvalidPayload(format!(
+                            "mask tile requires {expected_values} values, got {}",
+                            tile.values.len()
+                        )));
+                    }
+                }
                 if pixels > limits.max_pixels {
                     return Err(CheckpointError::ImportLimitExceeded {
                         resource: "pixels",
@@ -274,6 +396,7 @@ impl CheckpointArtifact {
     }
 
     pub fn validate(&self) -> Result<(), CheckpointError> {
+        self.id.validate()?;
         if self.schema_version != CHECKPOINT_ARTIFACT_SCHEMA_VERSION {
             return Err(CheckpointError::UnsupportedSchema(self.schema_version));
         }
@@ -298,6 +421,7 @@ impl CheckpointArtifact {
     }
 
     fn validate_with_limits(&self, limits: &ArtifactImportLimits) -> Result<(), CheckpointError> {
+        self.id.validate()?;
         if self.schema_version != CHECKPOINT_ARTIFACT_SCHEMA_VERSION {
             return Err(CheckpointError::UnsupportedSchema(self.schema_version));
         }
@@ -348,7 +472,7 @@ struct ArtifactContent<'a> {
 enum CanonicalPayload<'a> {
     Image(CanonicalImage<'a>),
     Mask(CanonicalMask<'a>),
-    SpatialData(&'a [u8]),
+    SpatialData { bytes: &'a [u8] },
 }
 
 #[derive(Serialize)]
@@ -384,7 +508,7 @@ impl<'a> From<&'a CheckpointPayload> for CanonicalPayload<'a> {
                 tile_size: mask.tile_size(),
                 tiles: mask.tiles(),
             }),
-            CheckpointPayload::SpatialData(bytes) => Self::SpatialData(bytes),
+            CheckpointPayload::SpatialData(bytes) => Self::SpatialData { bytes },
         }
     }
 }
@@ -421,6 +545,8 @@ pub enum CheckpointError {
     },
     #[error("invalid checkpoint payload: {0}")]
     InvalidPayload(String),
+    #[error("invalid artifact id '{0}': expected exactly 64 lowercase sha256 hex characters")]
+    InvalidArtifactId(String),
     #[error("invalid checkpoint provenance: {0}")]
     InvalidProvenance(String),
     #[error("checkpoint import exceeds the {resource} limit of {limit}")]
@@ -436,6 +562,10 @@ pub enum CheckpointError {
     DependencyHashMismatch { expected: String, actual: String },
     #[error("checkpoint is already generating")]
     AlreadyGenerating,
+    #[error("checkpoint generation token is no longer active")]
+    GenerationNotActive,
+    #[error("checkpoint generation id is exhausted")]
+    GenerationIdExhausted,
     #[error("checkpoint has no committed artifact")]
     NoCommittedArtifact,
     #[error("checkpoint store is poisoned")]
@@ -451,17 +581,23 @@ pub enum CheckpointError {
     Serialization(#[from] serde_json::Error),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum ArtifactStoreBackend {
     Memory(Arc<Mutex<BTreeMap<ArtifactId, CheckpointArtifact>>>),
     File(Arc<PathBuf>),
 }
 
 /// Durable content-addressed storage for committed checkpoint artifacts.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ArtifactStore {
     backend: ArtifactStoreBackend,
     limits: ArtifactImportLimits,
+}
+
+impl Default for ArtifactStore {
+    fn default() -> Self {
+        Self::memory()
+    }
 }
 
 impl ArtifactStore {
@@ -485,6 +621,13 @@ impl ArtifactStore {
     }
 
     pub fn put(&self, artifact: &CheckpointArtifact) -> Result<ArtifactId, CheckpointError> {
+        let bytes = serde_json::to_vec_pretty(artifact)?;
+        if bytes.len() > self.limits.max_bytes {
+            return Err(CheckpointError::ImportLimitExceeded {
+                resource: "bytes",
+                limit: self.limits.max_bytes,
+            });
+        }
         artifact.validate_with_limits(&self.limits)?;
         match &self.backend {
             ArtifactStoreBackend::Memory(artifacts) => {
@@ -494,8 +637,7 @@ impl ArtifactStore {
                 artifacts.insert(artifact.id.clone(), artifact.clone());
             }
             ArtifactStoreBackend::File(root) => {
-                let path = artifact_path(root, &artifact.id);
-                let bytes = serde_json::to_vec_pretty(artifact)?;
+                let path = artifact_path(root, &artifact.id)?;
                 write_atomically(&path, &bytes)?;
             }
         }
@@ -503,6 +645,7 @@ impl ArtifactStore {
     }
 
     pub fn get(&self, id: &ArtifactId) -> Result<Option<CheckpointArtifact>, CheckpointError> {
+        id.validate()?;
         let artifact = match &self.backend {
             ArtifactStoreBackend::Memory(artifacts) => artifacts
                 .lock()
@@ -510,7 +653,7 @@ impl ArtifactStore {
                 .get(id)
                 .cloned(),
             ArtifactStoreBackend::File(root) => {
-                let path = artifact_path(root, id);
+                let path = artifact_path(root, id)?;
                 if !path.is_file() {
                     None
                 } else {
@@ -552,8 +695,9 @@ impl ArtifactStore {
     }
 }
 
-fn artifact_path(root: &Path, id: &ArtifactId) -> PathBuf {
-    root.join(format!("{}.json", id.as_str()))
+fn artifact_path(root: &Path, id: &ArtifactId) -> Result<PathBuf, CheckpointError> {
+    id.validate()?;
+    Ok(root.join(format!("{}.json", id.as_str())))
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CheckpointError> {
@@ -615,22 +759,44 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, CheckpointErro
             limit: max_bytes,
         });
     }
-    let mut file = File::open(path).map_err(|source| CheckpointError::Io {
+    let file = File::open(path).map_err(|source| CheckpointError::Io {
         operation: "open artifact",
         path: path.to_path_buf(),
         source,
     })?;
-    let mut bytes = Vec::with_capacity(metadata.len().try_into().unwrap_or(max_bytes));
-    file.read_to_end(&mut bytes)
+    let capacity = usize::try_from(metadata.len()).unwrap_or(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|source| CheckpointError::Io {
             operation: "read artifact",
             path: path.to_path_buf(),
             source,
         })?;
+    if bytes.len() > max_bytes {
+        return Err(CheckpointError::ImportLimitExceeded {
+            resource: "bytes",
+            limit: max_bytes,
+        });
+    }
     Ok(bytes)
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Opaque handle for one checkpoint generation attempt.
+///
+/// A token is intentionally not serialized with a checkpoint. It identifies
+/// an in-memory generation attempt and therefore cannot be reused after a
+/// workflow restart or after another attempt becomes active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GenerationToken(u64);
+
+impl GenerationToken {
+    pub fn generation_id(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub node_id: String,
     pub node_version: u32,
@@ -642,6 +808,23 @@ pub struct Checkpoint {
     pub generation: Option<GenerationMetadata>,
     #[serde(default)]
     pub failure: Option<String>,
+    #[serde(skip)]
+    next_generation_id: u64,
+    #[serde(skip)]
+    active_generation: Option<GenerationToken>,
+}
+
+impl PartialEq for Checkpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.node_id == other.node_id
+            && self.node_version == other.node_version
+            && self.current_dependency_hash == other.current_dependency_hash
+            && self.committed_dependency_hash == other.committed_dependency_hash
+            && self.committed_artifact_id == other.committed_artifact_id
+            && self.state == other.state
+            && self.generation == other.generation
+            && self.failure == other.failure
+    }
 }
 
 impl Checkpoint {
@@ -655,6 +838,8 @@ impl Checkpoint {
             state: CheckpointState::Ungenerated,
             generation: None,
             failure: None,
+            next_generation_id: 0,
+            active_generation: None,
         }
     }
 
@@ -720,13 +905,26 @@ impl Checkpoint {
         Ok(self.availability())
     }
 
-    pub fn begin_generation(&mut self) -> Result<(), CheckpointError> {
-        if self.state == CheckpointState::Generating {
+    pub fn begin_generation_token(&mut self) -> Result<GenerationToken, CheckpointError> {
+        if self.state == CheckpointState::Generating || self.active_generation.is_some() {
             return Err(CheckpointError::AlreadyGenerating);
         }
+        self.next_generation_id = self
+            .next_generation_id
+            .checked_add(1)
+            .ok_or(CheckpointError::GenerationIdExhausted)?;
+        let token = GenerationToken(self.next_generation_id);
+        self.active_generation = Some(token);
         self.state = CheckpointState::Generating;
         self.failure = None;
-        Ok(())
+        Ok(token)
+    }
+
+    /// Backwards-compatible start operation for callers that do not need to
+    /// retain a token. New asynchronous callers should use
+    /// [`Self::begin_generation_token`] and commit with that token.
+    pub fn begin_generation(&mut self) -> Result<(), CheckpointError> {
+        self.begin_generation_token().map(|_| ())
     }
 
     pub fn commit(
@@ -734,7 +932,40 @@ impl Checkpoint {
         artifact: CheckpointArtifact,
         store: &ArtifactStore,
     ) -> Result<(), CheckpointError> {
+        if let Some(token) = self.active_generation {
+            return self.commit_generation(token, artifact, store);
+        }
+        if matches!(
+            self.state,
+            CheckpointState::Generating | CheckpointState::Failed | CheckpointState::Cancelled
+        ) {
+            return Err(CheckpointError::GenerationNotActive);
+        }
+        self.commit_artifact(artifact, store, false)
+    }
+
+    pub fn commit_generation(
+        &mut self,
+        token: GenerationToken,
+        artifact: CheckpointArtifact,
+        store: &ArtifactStore,
+    ) -> Result<(), CheckpointError> {
+        self.require_active_generation(token)?;
+        self.commit_artifact(artifact, store, true)
+    }
+
+    fn commit_artifact(
+        &mut self,
+        artifact: CheckpointArtifact,
+        store: &ArtifactStore,
+        tokenized: bool,
+    ) -> Result<(), CheckpointError> {
         if artifact.provenance.node_version != self.node_version {
+            if tokenized {
+                self.finish_failed_generation(
+                    "generated artifact has an incompatible node version",
+                );
+            }
             return Err(CheckpointError::NodeVersionMismatch {
                 expected: self.node_version,
                 actual: artifact.provenance.node_version,
@@ -742,12 +973,13 @@ impl Checkpoint {
         }
         let expected = self
             .current_dependency_hash
-            .as_ref()
+            .clone()
             .ok_or(CheckpointError::NoCommittedArtifact)?;
-        if &artifact.dependency_hash != expected {
+        if artifact.dependency_hash.as_str() != expected.as_str() {
             // The upstream graph changed while this generation was running.
             // Keep the committed artifact available, but expose that it no
             // longer represents the current inputs.
+            self.finish_generation();
             self.state = if self.committed_artifact_id.is_some() {
                 CheckpointState::Stale
             } else {
@@ -762,18 +994,57 @@ impl Checkpoint {
         self.committed_dependency_hash = Some(artifact.dependency_hash.clone());
         self.committed_artifact_id = Some(artifact.id.clone());
         self.generation = Some(artifact.generation.clone());
+        self.finish_generation();
         self.state = CheckpointState::Current;
         self.failure = None;
         Ok(())
     }
 
+    pub fn cancel_generation(&mut self, token: &GenerationToken) -> Result<(), CheckpointError> {
+        self.require_active_generation(*token)?;
+        self.finish_generation();
+        self.state = CheckpointState::Cancelled;
+        Ok(())
+    }
+
+    pub fn fail_generation(
+        &mut self,
+        token: &GenerationToken,
+        message: impl Into<String>,
+    ) -> Result<(), CheckpointError> {
+        self.require_active_generation(*token)?;
+        self.finish_generation();
+        self.failure = Some(message.into());
+        self.state = CheckpointState::Failed;
+        Ok(())
+    }
+
     pub fn fail(&mut self, message: impl Into<String>) {
+        self.finish_generation();
         self.failure = Some(message.into());
         self.state = CheckpointState::Failed;
     }
 
     pub fn cancel(&mut self) {
+        self.finish_generation();
         self.state = CheckpointState::Cancelled;
+    }
+
+    fn require_active_generation(&self, token: GenerationToken) -> Result<(), CheckpointError> {
+        if self.state != CheckpointState::Generating || self.active_generation != Some(token) {
+            return Err(CheckpointError::GenerationNotActive);
+        }
+        Ok(())
+    }
+
+    fn finish_generation(&mut self) {
+        self.active_generation = None;
+    }
+
+    fn finish_failed_generation(&mut self, message: &str) {
+        self.finish_generation();
+        self.failure = Some(message.to_owned());
+        self.state = CheckpointState::Failed;
     }
 
     pub fn committed_artifact(
