@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rawweave_color::{DisplayRGB, SceneLinearRGB};
-use rawweave_image::{Image, Region};
+use rawweave_image::{ConfidenceMap, DepthMap, Image, LabelMap, Mask, MaskSet, Region, RegionSet};
 use rawweave_raw::{CameraMetadata, EmbeddedPreview, ExifMetadata, Mosaic, RawFrame};
 use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -434,6 +434,12 @@ impl NodeDescriptor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Image(Image),
+    Mask(Mask),
+    MaskSet(MaskSet),
+    LabelMap(LabelMap),
+    ConfidenceMap(ConfidenceMap),
+    DepthMap(DepthMap),
+    RegionSet(RegionSet),
     Float(f32),
     Integer(i64),
     Boolean(bool),
@@ -458,6 +464,12 @@ impl Value {
     pub fn data_type(&self) -> &'static str {
         match self {
             Self::Image(_) => "core.Image",
+            Self::Mask(_) => "core.Mask",
+            Self::MaskSet(_) => "core.MaskSet",
+            Self::LabelMap(_) => "core.LabelMap",
+            Self::ConfidenceMap(_) => "core.ConfidenceMap",
+            Self::DepthMap(_) => "core.DepthMap",
+            Self::RegionSet(_) => "core.RegionSet",
             Self::Float(_) => "value.Float",
             Self::Integer(_) => "value.Integer",
             Self::Boolean(_) => "value.Boolean",

@@ -8,7 +8,9 @@ use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, LazyCondition, LazyInputGate, NodeDescriptor,
     NodeError, NodeRegistry, NodeResult, ParameterType, ParameterValue, Value,
 };
-use rawweave_rendering::{CacheKey, GraphRevision, MemoryRenderCache, RenderResult, TileCoord};
+use rawweave_rendering::{
+    CacheKey, GraphRevision, MaskRenderResult, MemoryRenderCache, RenderResult, TileCoord,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -734,12 +736,15 @@ impl Graph {
             backend_identity_hash(&execution_context),
         );
         let current_revision = self.graph_revision();
-        let cached = self
-            .render_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.get_current(&cache_key, current_revision));
-        if let Some(result) = cached.and_then(|cached| cached_node_result(node, cached)) {
+        let cached = self.render_cache.lock().ok().map(|cache| {
+            (
+                cache.get_current(&cache_key, current_revision),
+                cache.get_mask_current(&cache_key, current_revision),
+            )
+        });
+        if let Some((cached_image, cached_mask)) = cached
+            && let Some(result) = cached_node_result(node, cached_image, cached_mask)
+        {
             let evaluated = EvaluatedNode {
                 output_hash: hash_node_result(&result),
                 result,
@@ -767,6 +772,11 @@ impl Graph {
             let render = RenderResult::new(image.clone(), current_revision);
             if let Ok(mut cache) = self.render_cache.lock() {
                 cache.insert_if_current(cache_key, render, current_revision);
+            }
+        } else if let Some(mask) = single_mask(&evaluated.result) {
+            let render = MaskRenderResult::new(mask.clone(), current_revision);
+            if let Ok(mut cache) = self.render_cache.lock() {
+                cache.insert_mask_if_current(cache_key, render, current_revision);
             }
         }
         visiting.remove(node_id);
@@ -952,14 +962,27 @@ fn lazy_condition_matches(condition: &LazyCondition, selector: &Value) -> bool {
     }
 }
 
-fn cached_node_result(node: &GraphNode, cached: RenderResult) -> Option<NodeResult> {
+fn cached_node_result(
+    node: &GraphNode,
+    cached_image: Option<RenderResult>,
+    cached_mask: Option<MaskRenderResult>,
+) -> Option<NodeResult> {
     let output = node.descriptor.outputs.first()?;
-    (node.descriptor.outputs.len() == 1 && output.data_type == "core.Image").then(|| {
-        NodeResult::single(
-            output.id.clone(),
-            Value::Image(cached.image.as_ref().clone()),
-        )
-    })
+    if node.descriptor.outputs.len() != 1 {
+        return None;
+    }
+    match output.data_type.as_str() {
+        "core.Image" => cached_image.map(|cached| {
+            NodeResult::single(
+                output.id.clone(),
+                Value::Image(cached.image.as_ref().clone()),
+            )
+        }),
+        "core.Mask" => cached_mask.map(|cached| {
+            NodeResult::single(output.id.clone(), Value::Mask(cached.mask.as_ref().clone()))
+        }),
+        _ => None,
+    }
 }
 
 fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
@@ -968,6 +991,16 @@ fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {
         .flatten()
         .and_then(|value| match value {
             Value::Image(image) => Some(image),
+            _ => None,
+        })
+}
+
+fn single_mask(result: &NodeResult) -> Option<&rawweave_image::Mask> {
+    (result.outputs.len() == 1)
+        .then(|| result.outputs.values().next())
+        .flatten()
+        .and_then(|value| match value {
+            Value::Mask(mask) => Some(mask),
             _ => None,
         })
 }
@@ -1022,6 +1055,32 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
         Value::Image(image) => {
             0_u8.hash(hasher);
             hash_image(image, hasher);
+        }
+        Value::Mask(mask) => {
+            19_u8.hash(hasher);
+            mask.cache_identity().hash(hasher);
+        }
+        Value::MaskSet(set) => {
+            20_u8.hash(hasher);
+            for mask in set.masks() {
+                mask.cache_identity().hash(hasher);
+            }
+        }
+        Value::LabelMap(map) => {
+            21_u8.hash(hasher);
+            map.cache_identity().hash(hasher);
+        }
+        Value::ConfidenceMap(map) => {
+            22_u8.hash(hasher);
+            map.mask().cache_identity().hash(hasher);
+        }
+        Value::DepthMap(map) => {
+            23_u8.hash(hasher);
+            map.cache_identity().hash(hasher);
+        }
+        Value::RegionSet(set) => {
+            24_u8.hash(hasher);
+            set.regions().hash(hasher);
         }
         Value::Float(number) => {
             1_u8.hash(hasher);

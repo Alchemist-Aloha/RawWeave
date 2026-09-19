@@ -1,4 +1,6 @@
-use rawweave_image::{Dimensions, Image, Region};
+use rawweave_image::{
+    Dimensions, Image, Mask, PaintMode, PaintPoint, PaintStroke, PaintedMask, Region,
+};
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
     NodePack, NodeRegistry, NodeResult, ParameterDescriptor, ParameterValue, Parameters,
@@ -7,6 +9,7 @@ use rawweave_node_api::{
 
 const MAX_IMAGE_PIXELS: u64 = 16_777_216;
 const MAX_BLUR_RADIUS: u32 = 64;
+const MAX_MASK_RADIUS: u32 = 64;
 
 fn set_cpu_region_capabilities(descriptor: &mut NodeDescriptor) {
     descriptor.capabilities = vec![ExecutionCapability::Cpu, ExecutionCapability::RegionAware];
@@ -222,6 +225,200 @@ fn color_matrix_descriptor() -> NodeDescriptor {
     descriptor
 }
 
+fn mask_output_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = NodeDescriptor::new(type_id, name);
+    descriptor
+        .outputs
+        .push(PortDescriptor::output("mask", "Mask", "core.Mask"));
+    set_cpu_tile_capabilities(&mut descriptor);
+    descriptor
+}
+
+fn mask_image_source_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor(type_id, name);
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("image", "Image", "core.Image", true));
+    descriptor
+}
+
+fn mask_unary_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor(type_id, name);
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("mask", "Mask", "core.Mask", true));
+    descriptor
+}
+
+fn mask_binary_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor(type_id, name);
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("a", "A", "core.Mask", true));
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("b", "B", "core.Mask", true));
+    descriptor
+}
+
+fn linear_gradient_descriptor() -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor("core.mask-linear-gradient", "Linear Gradient");
+    descriptor.inputs.push(PortDescriptor::input(
+        "image",
+        "Image (bounds)",
+        "core.Image",
+        false,
+    ));
+    for (id, name, default) in [
+        ("start_x", "Start X", 0.0),
+        ("start_y", "Start Y", 0.0),
+        ("end_x", "End X", 1.0),
+        ("end_y", "End Y", 0.0),
+    ] {
+        descriptor
+            .parameters
+            .push(ParameterDescriptor::float(id, name, default, None, None));
+    }
+    descriptor
+}
+
+fn radial_gradient_descriptor() -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor("core.mask-radial-gradient", "Radial Gradient");
+    descriptor.inputs.push(PortDescriptor::input(
+        "image",
+        "Image (bounds)",
+        "core.Image",
+        false,
+    ));
+    for (id, name, default, min) in [
+        ("center_x", "Center X", 0.0, None),
+        ("center_y", "Center Y", 0.0, None),
+        ("radius", "Radius", 1.0, Some(0.0)),
+        ("inner_radius", "Inner Radius", 0.0, Some(0.0)),
+    ] {
+        descriptor
+            .parameters
+            .push(ParameterDescriptor::float(id, name, default, min, None));
+    }
+    descriptor
+}
+
+fn painted_mask_descriptor() -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor("core.mask-painted", "Painted Mask");
+    descriptor.inputs.push(PortDescriptor::input(
+        "image",
+        "Image (bounds)",
+        "core.Image",
+        false,
+    ));
+    for (id, name, default, min) in [
+        ("width", "Width", 1.0, Some(0.0)),
+        ("height", "Height", 1.0, Some(0.0)),
+        ("origin_x", "Origin X", 0.0, Some(0.0)),
+        ("origin_y", "Origin Y", 0.0, Some(0.0)),
+        ("x", "Brush X", 0.0, Some(0.0)),
+        ("y", "Brush Y", 0.0, Some(0.0)),
+        ("size", "Brush Size", 1.0, Some(0.0)),
+        ("hardness", "Hardness", 1.0, Some(0.0)),
+        ("opacity", "Opacity", 1.0, Some(0.0)),
+    ] {
+        descriptor.parameters.push(ParameterDescriptor::float(
+            id,
+            name,
+            default,
+            min,
+            if matches!(id, "hardness" | "opacity") {
+                Some(1.0)
+            } else {
+                None
+            },
+        ));
+    }
+    descriptor
+        .parameters
+        .push(ParameterDescriptor::string("mode", "Mode", "add"));
+    descriptor
+        .parameters
+        .push(ParameterDescriptor::string("points", "Points", ""));
+    descriptor
+}
+
+fn color_qualifier_descriptor() -> NodeDescriptor {
+    let mut descriptor =
+        mask_image_source_descriptor("core.mask-color-qualifier", "Color Qualifier");
+    for (id, name, default, min, max) in [
+        ("target_r", "Target Red", 1.0, 0.0, 1.0),
+        ("target_g", "Target Green", 1.0, 0.0, 1.0),
+        ("target_b", "Target Blue", 1.0, 0.0, 1.0),
+        ("tolerance", "Tolerance", 0.1, 0.0, 2.0),
+        ("softness", "Softness", 0.0, 0.0, 2.0),
+    ] {
+        descriptor.parameters.push(ParameterDescriptor::float(
+            id,
+            name,
+            default,
+            Some(min),
+            Some(max),
+        ));
+    }
+    descriptor
+}
+
+fn threshold_descriptor() -> NodeDescriptor {
+    let mut descriptor = mask_unary_descriptor("core.mask-threshold", "Threshold");
+    descriptor.parameters.push(ParameterDescriptor::float(
+        "threshold",
+        "Threshold",
+        0.5,
+        Some(0.0),
+        Some(1.0),
+    ));
+    descriptor.parameters.push(ParameterDescriptor::float(
+        "softness",
+        "Softness",
+        0.0,
+        Some(0.0),
+        Some(1.0),
+    ));
+    descriptor
+}
+
+fn radius_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = mask_unary_descriptor(type_id, name);
+    descriptor.parameters.push(ParameterDescriptor::float(
+        "radius",
+        "Radius",
+        1.0,
+        Some(0.0),
+        Some(MAX_MASK_RADIUS as f32),
+    ));
+    descriptor
+}
+
+fn local_exposure_descriptor() -> NodeDescriptor {
+    let mut descriptor = NodeDescriptor::new("core.local-exposure", "Local Exposure");
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("image", "Image", "core.Image", true));
+    descriptor
+        .inputs
+        .push(PortDescriptor::input("mask", "Mask", "core.Mask", false));
+    descriptor.inputs.push(PortDescriptor::input(
+        "exposure",
+        "Exposure",
+        "value.Float",
+        false,
+    ));
+    descriptor
+        .outputs
+        .push(PortDescriptor::output("image", "Image", "core.Image"));
+    descriptor.parameters.push(ParameterDescriptor::float(
+        "exposure", "Exposure", 0.0, None, None,
+    ));
+    set_cpu_tile_capabilities(&mut descriptor);
+    descriptor
+}
+
 struct ImageInput;
 
 impl NodeInstance for ImageInput {
@@ -291,6 +488,331 @@ impl NodeInstance for Invert {
             [1.0 - red, 1.0 - green, 1.0 - blue, alpha]
         })?;
         Ok(NodeResult::single("image", Value::Image(output)))
+    }
+}
+
+struct PaintedMaskNode;
+
+impl NodeInstance for PaintedMaskNode {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let bounds = spatial_bounds(inputs, context, parameters)?;
+        let points = paint_points(parameters)?;
+        let stroke = PaintStroke::new(
+            points,
+            float_parameter_alias(parameters, &["size", "brush_size"], 1.0)?,
+            float_parameter_alias(parameters, &["hardness"], 1.0)?,
+            float_parameter_alias(parameters, &["opacity"], 1.0)?,
+            paint_mode(parameters),
+        )
+        .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        let mut painted = PaintedMask::new(bounds.dimensions(), (bounds.x, bounds.y))
+            .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        painted
+            .apply(stroke)
+            .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        let rendered = painted
+            .render()
+            .map_err(|error| NodeError::Message(error.to_string()))?;
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_requested_region(&rendered, context)?),
+        ))
+    }
+}
+
+struct LinearGradient;
+
+impl NodeInstance for LinearGradient {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let bounds = spatial_bounds(inputs, context, parameters)?;
+        let region = requested_region(bounds, context);
+        let start_x = float_parameter_alias(parameters, &["start_x", "x0"], 0.0)?;
+        let start_y = float_parameter_alias(parameters, &["start_y", "y0"], 0.0)?;
+        let end_x = float_parameter_alias(parameters, &["end_x", "x1"], 1.0)?;
+        let end_y = float_parameter_alias(parameters, &["end_y", "y1"], 0.0)?;
+        let dx = end_x - start_x;
+        let dy = end_y - start_y;
+        let length_squared = dx * dx + dy * dy;
+        let values = region_values(region, |x, y| {
+            if length_squared == 0.0 {
+                1.0
+            } else {
+                (((x as f32 - start_x) * dx + (y as f32 - start_y) * dy) / length_squared)
+                    .clamp(0.0, 1.0)
+            }
+        });
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_from_region(region, values)?),
+        ))
+    }
+}
+
+struct RadialGradient;
+
+impl NodeInstance for RadialGradient {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let bounds = spatial_bounds(inputs, context, parameters)?;
+        let region = requested_region(bounds, context);
+        let center_x = float_parameter_alias(parameters, &["center_x", "x"], 0.0)?;
+        let center_y = float_parameter_alias(parameters, &["center_y", "y"], 0.0)?;
+        let radius = float_parameter_alias(parameters, &["radius", "outer_radius"], 1.0)?;
+        let inner_radius = float_parameter_alias(parameters, &["inner_radius"], 0.0)?;
+        if radius < 0.0 || inner_radius < 0.0 || inner_radius > radius {
+            return Err(NodeError::InvalidParameter("radius".to_owned()));
+        }
+        let values = region_values(region, |x, y| {
+            let distance = ((x as f32 - center_x).powi(2) + (y as f32 - center_y).powi(2)).sqrt();
+            if radius == inner_radius {
+                if distance <= radius { 1.0 } else { 0.0 }
+            } else {
+                ((radius - distance) / (radius - inner_radius)).clamp(0.0, 1.0)
+            }
+        });
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_from_region(region, values)?),
+        ))
+    }
+}
+
+struct LuminanceMask;
+
+impl NodeInstance for LuminanceMask {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        _parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let image = image_input(inputs, "image")?;
+        let region = requested_region(image.global_region(), context);
+        let values = region_values(region, |x, y| {
+            image
+                .pixel_global(x, y)
+                .map(|[red, green, blue, _]| {
+                    (0.2126 * red + 0.7152 * green + 0.0722 * blue).clamp(0.0, 1.0)
+                })
+                .unwrap_or(0.0)
+        });
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_from_region(region, values)?),
+        ))
+    }
+}
+
+struct ColorQualifier;
+
+impl NodeInstance for ColorQualifier {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let image = image_input(inputs, "image")?;
+        let region = requested_region(image.global_region(), context);
+        let target = qualifier_color(parameters)?;
+        let tolerance = float_parameter_alias(parameters, &["tolerance", "radius"], 0.1)?;
+        let softness = float_parameter_alias(parameters, &["softness", "feather"], 0.0)?;
+        if tolerance < 0.0 || softness < 0.0 {
+            return Err(NodeError::InvalidParameter("tolerance".to_owned()));
+        }
+        let values = region_values(region, |x, y| {
+            let Some([red, green, blue, _]) = image.pixel_global(x, y) else {
+                return 0.0;
+            };
+            let distance = ((red - target[0]).powi(2)
+                + (green - target[1]).powi(2)
+                + (blue - target[2]).powi(2))
+            .sqrt();
+            if softness == 0.0 {
+                if distance <= tolerance { 1.0 } else { 0.0 }
+            } else {
+                ((tolerance + softness - distance) / softness).clamp(0.0, 1.0)
+            }
+        });
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_from_region(region, values)?),
+        ))
+    }
+}
+
+struct MaskInvert;
+
+impl NodeInstance for MaskInvert {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        _parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let mask = mask_input(inputs, "mask")?;
+        let output = map_mask_region(&mask, context, |value| 1.0 - value)?;
+        Ok(NodeResult::single("mask", Value::Mask(output)))
+    }
+}
+
+struct MaskAdd;
+struct MaskSubtract;
+struct MaskIntersect;
+struct MaskMultiply;
+
+macro_rules! impl_binary_mask_node {
+    ($type:ty, $operation:expr, $intersection:expr) => {
+        impl NodeInstance for $type {
+            fn evaluate(
+                &self,
+                inputs: &Inputs,
+                _parameters: &Parameters,
+                context: &EvaluationContext,
+            ) -> Result<NodeResult, NodeError> {
+                let first = mask_input_any(inputs, &["a", "mask_a"])?;
+                let second = mask_input_any(inputs, &["b", "mask_b"])?;
+                let output = combine_masks(&first, &second, context, $operation, $intersection)?;
+                Ok(NodeResult::single("mask", Value::Mask(output)))
+            }
+        }
+    };
+}
+
+impl_binary_mask_node!(MaskAdd, |a: f32, b: f32| (a + b).min(1.0), false);
+impl_binary_mask_node!(MaskSubtract, |a: f32, b: f32| (a - b).max(0.0), false);
+impl_binary_mask_node!(MaskIntersect, |a: f32, b: f32| a.min(b), true);
+impl_binary_mask_node!(MaskMultiply, |a: f32, b: f32| a * b, false);
+
+struct MaskThreshold;
+
+impl NodeInstance for MaskThreshold {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let mask = mask_input(inputs, "mask")?;
+        let threshold = float_parameter_alias(parameters, &["threshold", "level"], 0.5)?;
+        let softness = float_parameter_alias(parameters, &["softness", "feather"], 0.0)?;
+        if !(0.0..=1.0).contains(&threshold) || softness < 0.0 {
+            return Err(NodeError::InvalidParameter("threshold".to_owned()));
+        }
+        let output = map_mask_region(&mask, context, |value| {
+            if softness == 0.0 {
+                if value >= threshold { 1.0 } else { 0.0 }
+            } else {
+                ((value - (threshold - softness)) / (2.0 * softness)).clamp(0.0, 1.0)
+            }
+        })?;
+        Ok(NodeResult::single("mask", Value::Mask(output)))
+    }
+}
+
+struct MaskFeather;
+struct MaskBlur;
+struct MaskExpand;
+struct MaskContract;
+
+macro_rules! impl_filter_mask_node {
+    ($type:ty, $operation:expr) => {
+        impl NodeInstance for $type {
+            fn evaluate(
+                &self,
+                inputs: &Inputs,
+                parameters: &Parameters,
+                context: &EvaluationContext,
+            ) -> Result<NodeResult, NodeError> {
+                let mask = mask_input(inputs, "mask")?;
+                let radius = integer_parameter_alias(parameters, &["radius", "amount"], 1)?;
+                if radius > MAX_MASK_RADIUS {
+                    return Err(NodeError::InvalidParameter("radius".to_owned()));
+                }
+                let output = $operation(&mask, context, radius)?;
+                Ok(NodeResult::single("mask", Value::Mask(output)))
+            }
+        }
+    };
+}
+
+impl_filter_mask_node!(MaskFeather, blur_mask);
+impl_filter_mask_node!(MaskBlur, blur_mask);
+impl_filter_mask_node!(MaskExpand, expand_mask);
+impl_filter_mask_node!(MaskContract, contract_mask);
+
+struct LocalExposure;
+
+impl NodeInstance for LocalExposure {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let image = image_input(inputs, "image")?;
+        let exposure = inputs
+            .get("exposure")
+            .and_then(|value| match value {
+                Value::Float(value) => Some(*value),
+                Value::Integer(value) => Some(*value as f32),
+                _ => None,
+            })
+            .or_else(|| {
+                parameters
+                    .get("exposure")
+                    .and_then(ParameterValue::as_float)
+            })
+            .ok_or_else(|| NodeError::InvalidParameter("exposure".to_owned()))?;
+        if !exposure.is_finite() {
+            return Err(NodeError::InvalidParameter("exposure".to_owned()));
+        }
+        let mask = match inputs.get("mask") {
+            Some(Value::Mask(mask)) => Some(mask),
+            Some(_) => return Err(NodeError::InvalidParameter("mask".to_owned())),
+            None => None,
+        };
+        let multiplier = 2.0_f32.powf(exposure);
+        let region = requested_region(image.global_region(), context);
+        let mut pixels = Vec::with_capacity(pixel_capacity(region));
+        for y in 0..region.height {
+            for x in 0..region.width {
+                let global_x = region.x + x;
+                let global_y = region.y + y;
+                let [red, green, blue, alpha] =
+                    image.pixel_global(global_x, global_y).ok_or_else(|| {
+                        NodeError::Message("requested region was outside the image".to_owned())
+                    })?;
+                let weight = mask.map_or(1.0, |mask| {
+                    mask.pixel_global(global_x, global_y).unwrap_or(0.0)
+                });
+                let multiplier = 1.0 + (multiplier - 1.0) * weight;
+                pixels.push([
+                    red * multiplier,
+                    green * multiplier,
+                    blue * multiplier,
+                    alpha,
+                ]);
+            }
+        }
+        Ok(NodeResult::single(
+            "image",
+            Value::Image(image_from_region(&image, region, pixels)?),
+        ))
     }
 }
 
@@ -527,6 +1049,304 @@ impl NodeInstance for Output {
     }
 }
 
+fn spatial_bounds(
+    inputs: &Inputs,
+    context: &EvaluationContext,
+    parameters: &Parameters,
+) -> Result<Region, NodeError> {
+    if let Some(value) = inputs.get("image") {
+        return match value {
+            Value::Image(image) => Ok(image.global_region()),
+            _ => Err(NodeError::InvalidParameter("image".to_owned())),
+        };
+    }
+    if let Some(image) = context.source_image.as_ref() {
+        return Ok(image.global_region());
+    }
+    let width = integer_parameter_alias(parameters, &["width"], 1)?;
+    let height = integer_parameter_alias(parameters, &["height"], 1)?;
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+    if pixels > MAX_IMAGE_PIXELS {
+        return Err(NodeError::InvalidParameter("dimensions".to_owned()));
+    }
+    let origin_x = integer_parameter_alias(parameters, &["origin_x"], 0)?;
+    let origin_y = integer_parameter_alias(parameters, &["origin_y"], 0)?;
+    Ok(Region::new(origin_x, origin_y, width, height))
+}
+
+fn region_values(region: Region, mut value_at: impl FnMut(u32, u32) -> f32) -> Vec<f32> {
+    let mut values = Vec::with_capacity(pixel_capacity(region));
+    for y in 0..region.height {
+        for x in 0..region.width {
+            values.push(value_at(region.x + x, region.y + y));
+        }
+    }
+    values
+}
+
+fn mask_from_region(region: Region, values: Vec<f32>) -> Result<Mask, NodeError> {
+    Mask::from_values_with_origin(region.dimensions(), (region.x, region.y), values)
+        .map_err(|error| NodeError::Message(error.to_string()))
+}
+
+fn mask_requested_region(mask: &Mask, context: &EvaluationContext) -> Result<Mask, NodeError> {
+    let region = requested_region(mask.global_region(), context);
+    let values = region_values(region, |x, y| mask.pixel_global(x, y).unwrap_or(0.0));
+    mask_from_region(region, values)
+}
+
+fn map_mask_region(
+    mask: &Mask,
+    context: &EvaluationContext,
+    mut map: impl FnMut(f32) -> f32,
+) -> Result<Mask, NodeError> {
+    let region = requested_region(mask.global_region(), context);
+    let values = region_values(region, |x, y| map(mask.pixel_global(x, y).unwrap_or(0.0)));
+    mask_from_region(region, values)
+}
+
+fn mask_input(inputs: &Inputs, port: &str) -> Result<Mask, NodeError> {
+    match inputs.get(port) {
+        Some(Value::Mask(mask)) => Ok(mask.clone()),
+        Some(_) => Err(NodeError::InvalidParameter(port.to_owned())),
+        None => Err(NodeError::MissingInput(port.to_owned())),
+    }
+}
+
+fn mask_input_any(inputs: &Inputs, ports: &[&str]) -> Result<Mask, NodeError> {
+    ports.iter().find_map(|port| inputs.get(*port)).map_or_else(
+        || Err(NodeError::MissingInput(ports[0].to_owned())),
+        |value| match value {
+            Value::Mask(mask) => Ok(mask.clone()),
+            _ => Err(NodeError::InvalidParameter(ports[0].to_owned())),
+        },
+    )
+}
+
+fn combine_masks(
+    first: &Mask,
+    second: &Mask,
+    context: &EvaluationContext,
+    operation: impl Fn(f32, f32) -> f32,
+    intersection: bool,
+) -> Result<Mask, NodeError> {
+    let bounds = if intersection {
+        first
+            .global_region()
+            .intersection(second.global_region())
+            .unwrap_or_else(|| Region::new(first.origin().0, first.origin().1, 0, 0))
+    } else {
+        union_region(first.global_region(), second.global_region())?
+    };
+    let region = requested_region(bounds, context);
+    let values = region_values(region, |x, y| {
+        operation(
+            first.pixel_global(x, y).unwrap_or(0.0),
+            second.pixel_global(x, y).unwrap_or(0.0),
+        )
+    });
+    mask_from_region(region, values)
+}
+
+fn union_region(first: Region, second: Region) -> Result<Region, NodeError> {
+    let end_x = first
+        .end_x()
+        .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?
+        .max(
+            second
+                .end_x()
+                .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?,
+        );
+    let end_y = first
+        .end_y()
+        .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?
+        .max(
+            second
+                .end_y()
+                .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?,
+        );
+    let x = first.x.min(second.x);
+    let y = first.y.min(second.y);
+    Ok(Region::new(
+        x,
+        y,
+        end_x
+            .checked_sub(x)
+            .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?,
+        end_y
+            .checked_sub(y)
+            .ok_or_else(|| NodeError::Message("mask region overflowed".to_owned()))?,
+    ))
+}
+
+fn blur_mask(mask: &Mask, context: &EvaluationContext, radius: u32) -> Result<Mask, NodeError> {
+    let region = requested_region(mask.global_region(), context);
+    if radius == 0 {
+        return mask_requested_region(mask, context);
+    }
+    let radius = i64::from(radius);
+    let values = region_values(region, |x, y| {
+        let mut total = 0.0;
+        let mut count = 0.0;
+        for offset_y in -radius..=radius {
+            for offset_x in -radius..=radius {
+                total += mask_pixel_clamped(mask, i64::from(x) + offset_x, i64::from(y) + offset_y);
+                count += 1.0;
+            }
+        }
+        total / count
+    });
+    mask_from_region(region, values)
+}
+
+fn expand_mask(mask: &Mask, context: &EvaluationContext, radius: u32) -> Result<Mask, NodeError> {
+    morphology_mask(mask, context, radius, f32::max, 0.0)
+}
+
+fn contract_mask(mask: &Mask, context: &EvaluationContext, radius: u32) -> Result<Mask, NodeError> {
+    morphology_mask(mask, context, radius, f32::min, 0.0)
+}
+
+fn morphology_mask(
+    mask: &Mask,
+    context: &EvaluationContext,
+    radius: u32,
+    operation: impl Fn(f32, f32) -> f32,
+    outside: f32,
+) -> Result<Mask, NodeError> {
+    let region = requested_region(mask.global_region(), context);
+    let radius = i64::from(radius);
+    let values = region_values(region, |x, y| {
+        let mut value = outside;
+        for offset_y in -radius..=radius {
+            for offset_x in -radius..=radius {
+                let sample = mask_pixel(mask, i64::from(x) + offset_x, i64::from(y) + offset_y)
+                    .unwrap_or(outside);
+                value = operation(value, sample);
+            }
+        }
+        value
+    });
+    mask_from_region(region, values)
+}
+
+fn mask_pixel(mask: &Mask, x: i64, y: i64) -> Option<f32> {
+    (x >= 0 && y >= 0)
+        .then_some((x as u32, y as u32))
+        .and_then(|(x, y)| mask.pixel_global(x, y))
+}
+
+fn mask_pixel_clamped(mask: &Mask, x: i64, y: i64) -> f32 {
+    let region = mask.global_region();
+    if region.width == 0 || region.height == 0 {
+        return 0.0;
+    }
+    let max_x = i64::from(region.end_x().unwrap_or(u32::MAX)) - 1;
+    let max_y = i64::from(region.end_y().unwrap_or(u32::MAX)) - 1;
+    let x = x.clamp(i64::from(region.x), max_x) as u32;
+    let y = y.clamp(i64::from(region.y), max_y) as u32;
+    mask.pixel_global(x, y).unwrap_or(0.0)
+}
+
+fn paint_points(parameters: &Parameters) -> Result<Vec<PaintPoint>, NodeError> {
+    if let Some(ParameterValue::String(serialized)) = parameters.get("points") {
+        let mut points = Vec::new();
+        for pair in serialized.split(';').filter(|pair| !pair.trim().is_empty()) {
+            let mut values = pair.split(',').map(str::trim);
+            let x = values
+                .next()
+                .and_then(|value| value.parse::<f32>().ok())
+                .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
+            let y = values
+                .next()
+                .and_then(|value| value.parse::<f32>().ok())
+                .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
+            points.push(PaintPoint::new(x, y));
+        }
+        if !points.is_empty() {
+            return Ok(points);
+        }
+    }
+    Ok(vec![PaintPoint::new(
+        float_parameter_alias(parameters, &["x", "center_x"], 0.0)?,
+        float_parameter_alias(parameters, &["y", "center_y"], 0.0)?,
+    )])
+}
+
+fn paint_mode(parameters: &Parameters) -> PaintMode {
+    match parameters.get("mode") {
+        Some(ParameterValue::String(value)) if value.eq_ignore_ascii_case("subtract") => {
+            PaintMode::Subtract
+        }
+        _ => PaintMode::Add,
+    }
+}
+
+fn qualifier_color(parameters: &Parameters) -> Result<[f32; 3], NodeError> {
+    if let Some(ParameterValue::String(value)) = parameters.get("color") {
+        let value = value.trim().trim_start_matches('#');
+        let channels = if value.len() == 6 {
+            [
+                u8::from_str_radix(&value[0..2], 16).ok().map(f32::from),
+                u8::from_str_radix(&value[2..4], 16).ok().map(f32::from),
+                u8::from_str_radix(&value[4..6], 16).ok().map(f32::from),
+            ]
+            .map(|channel| channel.map(|channel| channel / 255.0))
+        } else {
+            let mut parsed = [None; 3];
+            for (index, channel) in value.split(',').enumerate().take(3) {
+                parsed[index] = channel.trim().parse::<f32>().ok();
+            }
+            parsed
+        };
+        if let [Some(red), Some(green), Some(blue)] = channels {
+            return Ok([red, green, blue]);
+        }
+        return Err(NodeError::InvalidParameter("color".to_owned()));
+    }
+    Ok([
+        float_parameter_alias(parameters, &["target_r", "red", "r", "color_r"], 1.0)?,
+        float_parameter_alias(parameters, &["target_g", "green", "g", "color_g"], 1.0)?,
+        float_parameter_alias(parameters, &["target_b", "blue", "b", "color_b"], 1.0)?,
+    ])
+}
+
+fn float_parameter_alias(
+    parameters: &Parameters,
+    aliases: &[&str],
+    default: f32,
+) -> Result<f32, NodeError> {
+    for alias in aliases {
+        if parameters.contains_key(*alias) {
+            return float_parameter(parameters, alias, default);
+        }
+    }
+    Ok(default)
+}
+
+fn integer_parameter_alias(
+    parameters: &Parameters,
+    aliases: &[&str],
+    default: u32,
+) -> Result<u32, NodeError> {
+    for alias in aliases {
+        if let Some(value) = parameters.get(*alias) {
+            let value = match value {
+                ParameterValue::Integer(value) if *value >= 0 => *value as f64,
+                ParameterValue::Float(value) if value.is_finite() => f64::from(*value),
+                _ => return Err(NodeError::InvalidParameter((*alias).to_owned())),
+            };
+            if value.fract() != 0.0 || value > f64::from(u32::MAX) {
+                return Err(NodeError::InvalidParameter((*alias).to_owned()));
+            }
+            return Ok(value as u32);
+        }
+    }
+    Ok(default)
+}
+
 fn image_value(inputs: &Inputs, port: &str) -> Result<Value, NodeError> {
     match inputs.get(port) {
         Some(Value::Image(image)) => Ok(Value::Image(image.clone())),
@@ -609,7 +1429,7 @@ fn requested_region(full: Region, context: &EvaluationContext) -> Region {
     match context.requested_region() {
         Some(region) => region
             .intersection(full)
-            .unwrap_or_else(|| Region::new(0, 0, 0, 0)),
+            .unwrap_or_else(|| Region::new(region.x, region.y, 0, 0)),
         None => full,
     }
 }
@@ -726,6 +1546,70 @@ fn invert_factory() -> Box<dyn NodeInstance> {
     Box::new(Invert)
 }
 
+fn painted_mask_factory() -> Box<dyn NodeInstance> {
+    Box::new(PaintedMaskNode)
+}
+
+fn linear_gradient_factory() -> Box<dyn NodeInstance> {
+    Box::new(LinearGradient)
+}
+
+fn radial_gradient_factory() -> Box<dyn NodeInstance> {
+    Box::new(RadialGradient)
+}
+
+fn luminance_mask_factory() -> Box<dyn NodeInstance> {
+    Box::new(LuminanceMask)
+}
+
+fn color_qualifier_factory() -> Box<dyn NodeInstance> {
+    Box::new(ColorQualifier)
+}
+
+fn mask_invert_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskInvert)
+}
+
+fn mask_add_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskAdd)
+}
+
+fn mask_subtract_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskSubtract)
+}
+
+fn mask_intersect_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskIntersect)
+}
+
+fn mask_multiply_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskMultiply)
+}
+
+fn mask_threshold_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskThreshold)
+}
+
+fn mask_feather_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskFeather)
+}
+
+fn mask_blur_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskBlur)
+}
+
+fn mask_expand_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskExpand)
+}
+
+fn mask_contract_factory() -> Box<dyn NodeInstance> {
+    Box::new(MaskContract)
+}
+
+fn local_exposure_factory() -> Box<dyn NodeInstance> {
+    Box::new(LocalExposure)
+}
+
 fn resize_factory() -> Box<dyn NodeInstance> {
     Box::new(Resize)
 }
@@ -758,6 +1642,52 @@ pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_a
     registry.register(image_input_descriptor(), image_input_factory)?;
     registry.register(exposure_descriptor(), exposure_factory)?;
     registry.register(invert_descriptor(), invert_factory)?;
+    registry.register(painted_mask_descriptor(), painted_mask_factory)?;
+    registry.register(linear_gradient_descriptor(), linear_gradient_factory)?;
+    registry.register(radial_gradient_descriptor(), radial_gradient_factory)?;
+    registry.register(
+        mask_image_source_descriptor("core.mask-luminance", "Luminance Mask"),
+        luminance_mask_factory,
+    )?;
+    registry.register(color_qualifier_descriptor(), color_qualifier_factory)?;
+    registry.register(
+        mask_unary_descriptor("core.mask-invert", "Mask Invert"),
+        mask_invert_factory,
+    )?;
+    registry.register(
+        mask_binary_descriptor("core.mask-add", "Mask Add"),
+        mask_add_factory,
+    )?;
+    registry.register(
+        mask_binary_descriptor("core.mask-subtract", "Mask Subtract"),
+        mask_subtract_factory,
+    )?;
+    registry.register(
+        mask_binary_descriptor("core.mask-intersect", "Mask Intersect"),
+        mask_intersect_factory,
+    )?;
+    registry.register(
+        mask_binary_descriptor("core.mask-multiply", "Mask Multiply"),
+        mask_multiply_factory,
+    )?;
+    registry.register(threshold_descriptor(), mask_threshold_factory)?;
+    registry.register(
+        radius_descriptor("core.mask-feather", "Mask Feather"),
+        mask_feather_factory,
+    )?;
+    registry.register(
+        radius_descriptor("core.mask-blur", "Mask Blur"),
+        mask_blur_factory,
+    )?;
+    registry.register(
+        radius_descriptor("core.mask-expand", "Mask Expand"),
+        mask_expand_factory,
+    )?;
+    registry.register(
+        radius_descriptor("core.mask-contract", "Mask Contract"),
+        mask_contract_factory,
+    )?;
+    registry.register(local_exposure_descriptor(), local_exposure_factory)?;
     registry.register(resize_descriptor(), resize_factory)?;
     registry.register(crop_descriptor(), crop_factory)?;
     registry.register(blur_descriptor(), blur_factory)?;

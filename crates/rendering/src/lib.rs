@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rawweave_image::{Dimensions, GpuImage, GpuImageResource, Image, Pixel, PixelFormat, Region};
+use rawweave_image::{
+    Dimensions, GpuImage, GpuImageResource, Image, Mask, Pixel, PixelFormat, Region,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -137,11 +139,32 @@ impl RenderResult {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskRenderResult {
+    pub mask: Arc<Mask>,
+    pub revision: GraphRevision,
+}
+
+impl MaskRenderResult {
+    pub fn new(mask: Mask, revision: GraphRevision) -> Self {
+        Self {
+            mask: Arc::new(mask),
+            revision,
+        }
+    }
+
+    pub fn is_current(&self, revision: GraphRevision) -> bool {
+        self.revision == revision
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryRenderCache {
     capacity: usize,
     entries: HashMap<CacheKey, RenderResult>,
     order: VecDeque<CacheKey>,
+    mask_entries: HashMap<CacheKey, MaskRenderResult>,
+    mask_order: VecDeque<CacheKey>,
 }
 
 impl MemoryRenderCache {
@@ -150,15 +173,17 @@ impl MemoryRenderCache {
             capacity,
             entries: HashMap::new(),
             order: VecDeque::new(),
+            mask_entries: HashMap::new(),
+            mask_order: VecDeque::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.mask_entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.mask_entries.is_empty()
     }
 
     pub fn get(&self, key: &CacheKey) -> Option<RenderResult> {
@@ -173,11 +198,7 @@ impl MemoryRenderCache {
             self.order.push_back(key.clone());
         }
         self.entries.insert(key, result);
-        while self.entries.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
-        }
+        self.trim_to_capacity();
     }
 
     pub fn insert_if_current(
@@ -193,6 +214,43 @@ impl MemoryRenderCache {
         true
     }
 
+    pub fn get_mask(&self, key: &CacheKey) -> Option<MaskRenderResult> {
+        self.mask_entries.get(key).cloned()
+    }
+
+    pub fn get_mask_current(
+        &self,
+        key: &CacheKey,
+        revision: GraphRevision,
+    ) -> Option<MaskRenderResult> {
+        self.get_mask(key)
+            .filter(|result| result.is_current(revision))
+    }
+
+    pub fn insert_mask(&mut self, key: CacheKey, result: MaskRenderResult) {
+        if self.capacity == 0 {
+            return;
+        }
+        if !self.mask_entries.contains_key(&key) {
+            self.mask_order.push_back(key.clone());
+        }
+        self.mask_entries.insert(key, result);
+        self.trim_to_capacity();
+    }
+
+    pub fn insert_mask_if_current(
+        &mut self,
+        key: CacheKey,
+        result: MaskRenderResult,
+        current_revision: GraphRevision,
+    ) -> bool {
+        if !result.is_current(current_revision) {
+            return false;
+        }
+        self.insert_mask(key, result);
+        true
+    }
+
     pub fn accepts_revision(&self, key: &CacheKey, revision: GraphRevision) -> bool {
         self.get_current(key, revision).is_some()
     }
@@ -203,6 +261,9 @@ impl MemoryRenderCache {
 
     pub fn restamp_revision(&mut self, revision: GraphRevision) {
         for result in self.entries.values_mut() {
+            result.revision = revision;
+        }
+        for result in self.mask_entries.values_mut() {
             result.revision = revision;
         }
     }
@@ -225,17 +286,30 @@ impl MemoryRenderCache {
             .filter(|(_, result)| result.revision == revision)
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        let count = keys.len();
+        let mask_keys = self
+            .mask_entries
+            .iter()
+            .filter(|(_, result)| result.revision == revision)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let count = keys.len() + mask_keys.len();
         for key in keys {
             self.entries.remove(&key);
         }
+        for key in mask_keys {
+            self.mask_entries.remove(&key);
+        }
         self.order.retain(|key| self.entries.contains_key(key));
+        self.mask_order
+            .retain(|key| self.mask_entries.contains_key(key));
         count
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
+        self.mask_entries.clear();
+        self.mask_order.clear();
     }
 
     fn invalidate_where(&mut self, predicate: impl Fn(&CacheKey) -> bool) -> usize {
@@ -245,12 +319,35 @@ impl MemoryRenderCache {
             .filter(|key| predicate(key))
             .cloned()
             .collect::<Vec<_>>();
-        let count = keys.len();
+        let mask_keys = self
+            .mask_entries
+            .keys()
+            .filter(|key| predicate(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = keys.len() + mask_keys.len();
         for key in keys {
             self.entries.remove(&key);
         }
+        for key in mask_keys {
+            self.mask_entries.remove(&key);
+        }
         self.order.retain(|key| self.entries.contains_key(key));
+        self.mask_order
+            .retain(|key| self.mask_entries.contains_key(key));
         count
+    }
+
+    fn trim_to_capacity(&mut self) {
+        while self.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else if let Some(oldest) = self.mask_order.pop_front() {
+                self.mask_entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 }
 

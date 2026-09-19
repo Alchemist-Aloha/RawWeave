@@ -14,7 +14,7 @@ fn editor_core_registers_the_backbone_node_packs() {
         .into_iter()
         .map(|descriptor| descriptor.type_id)
         .collect::<Vec<_>>();
-    assert_eq!(types.len(), 38);
+    assert_eq!(types.len(), 54);
     for type_id in [
         "core.image-input",
         "core.constant-float",
@@ -39,6 +39,22 @@ fn editor_core_registers_the_backbone_node_packs() {
         "core.string-match",
         "core.exposure",
         "core.invert",
+        "core.mask-painted",
+        "core.mask-linear-gradient",
+        "core.mask-radial-gradient",
+        "core.mask-luminance",
+        "core.mask-color-qualifier",
+        "core.mask-invert",
+        "core.mask-add",
+        "core.mask-subtract",
+        "core.mask-intersect",
+        "core.mask-multiply",
+        "core.mask-threshold",
+        "core.mask-feather",
+        "core.mask-blur",
+        "core.mask-expand",
+        "core.mask-contract",
+        "core.local-exposure",
         "core.resize",
         "core.crop",
         "core.blur",
