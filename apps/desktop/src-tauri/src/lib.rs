@@ -1868,6 +1868,7 @@ mod tests {
             },
             tile: preview::PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: preview::MaskDisplayRequest::Grayscale,
         };
 
         let rendered =
@@ -1956,6 +1957,7 @@ mod tests {
             },
             tile: preview::PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: preview::MaskDisplayRequest::Grayscale,
         };
         let rendered =
             preview::render_preview(&manager, &editor, &current_editor, Some(source), request)
@@ -2039,6 +2041,7 @@ mod tests {
             },
             tile: preview::PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: preview::MaskDisplayRequest::Grayscale,
         };
         let source = state.source_image.lock().unwrap().clone();
         let rendered =
@@ -2147,6 +2150,7 @@ mod tests {
             },
             tile: preview::PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: preview::MaskDisplayRequest::Grayscale,
         };
         let error =
             preview::render_preview(&preview, &editor, &current_editor, None, request).unwrap_err();

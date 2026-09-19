@@ -30,6 +30,9 @@ function paneState(): ViewerPaneState {
     displayScale: 1,
     zoomMode: 'fit',
     pan: { x: 0, y: 0 },
+    maskDisplay: 'grayscale',
+    imageRegion: null,
+    imageOrigin: { x: 0, y: 0 },
   };
 }
 
@@ -227,6 +230,9 @@ export class ViewerController {
       progress: 0,
       error: null,
       requestId: null,
+      maskDisplay: target?.dataType === 'core.Mask' ? this.state.panes[viewer].maskDisplay : 'grayscale',
+      imageRegion: null,
+      imageOrigin: { x: 0, y: 0 },
     });
     if (target) this.startRequest(viewer, target);
   }
@@ -246,11 +252,13 @@ export class ViewerController {
       region: plan.region,
       tile: { x: Math.floor(plan.region.x / TILE_SIZE), y: Math.floor(plan.region.y / TILE_SIZE) },
       mip: plan.mip,
+      maskDisplay: this.state.panes[viewer].maskDisplay,
     };
     this.active.set(viewer, { request });
     this.setPane(viewer, {
       zoom: plan.zoom,
       displayScale: plan.zoom * 2 ** plan.mip,
+      imageRegion: request.region,
       status: 'loading',
       requestId: request.requestId,
       progress: 0,
@@ -295,6 +303,7 @@ export class ViewerController {
           progress: 1,
           error: null,
           requestId: null,
+          imageOrigin: { x: result.originX ?? 0, y: result.originY ?? 0 },
         });
       })
       .catch((error: unknown) => {
@@ -355,5 +364,12 @@ export class ViewerController {
   public panBy(viewer: ViewerId, delta: { x: number; y: number }): void {
     const current = this.state.panes[viewer].pan;
     this.setPan(viewer, { x: current.x + delta.x, y: current.y + delta.y });
+  }
+
+  public setMaskDisplay(viewer: ViewerId, display: ViewerPaneState['maskDisplay']): void {
+    if (this.state.panes[viewer].target?.dataType !== 'core.Mask') return;
+    if (this.state.panes[viewer].maskDisplay === display) return;
+    this.setPane(viewer, { maskDisplay: display });
+    this.restartRequest(viewer);
   }
 }

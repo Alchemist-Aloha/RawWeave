@@ -2,12 +2,14 @@ export type ViewerId = 'A' | 'B';
 export type ViewerLayout = 'split' | 'side-by-side';
 export type ViewerZoomMode = 'fit' | '100%' | 'custom';
 export type PreviewQuality = 'draft' | 'preview' | 'final';
+export type MaskDisplay = 'grayscale' | 'overlay';
 
 export interface PreviewTarget {
   nodeId: string;
   nodeName: string;
   outputPort: string;
   outputName: string;
+  dataType?: string;
 }
 
 export interface PreviewRegion {
@@ -36,6 +38,7 @@ export interface PreviewRequest {
   region: PreviewRegion;
   tile: PreviewTile;
   mip: number;
+  maskDisplay?: MaskDisplay;
 }
 
 export interface PreviewResult {
@@ -47,6 +50,8 @@ export interface PreviewResult {
   fullWidth: number;
   fullHeight: number;
   mimeType: string;
+  originX?: number;
+  originY?: number;
 }
 
 export interface ViewerPaneState {
@@ -62,6 +67,9 @@ export interface ViewerPaneState {
   displayScale: number;
   zoomMode: ViewerZoomMode;
   pan: { x: number; y: number };
+  maskDisplay: MaskDisplay;
+  imageRegion: PreviewRegion | null;
+  imageOrigin: { x: number; y: number };
 }
 
 export interface ViewerState {

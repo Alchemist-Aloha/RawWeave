@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { EditorNode, OpenImageResult } from '../editor/types';
+import type { EditorNode, OpenImageResult, ParameterValue } from '../editor/types';
+import { MaskPainter } from '../mask/MaskPainter';
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerId, ViewerPaneState } from '../viewer/types';
 
@@ -8,9 +9,11 @@ interface ViewerProps {
   nodes: EditorNode[];
   revision: number;
   source: OpenImageResult | null;
+  paintedNode?: EditorNode;
+  onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
 }
 
-const PREVIEWABLE_DATA_TYPES = new Set(['core.Image', 'color.DisplayRGB', 'color.SceneLinearRGB']);
+const PREVIEWABLE_DATA_TYPES = new Set(['core.Image', 'core.Mask', 'color.DisplayRGB', 'color.SceneLinearRGB']);
 
 export function targetsFor(nodes: EditorNode[]): PreviewTarget[] {
   return nodes.flatMap((node) =>
@@ -21,6 +24,7 @@ export function targetsFor(nodes: EditorNode[]): PreviewTarget[] {
         nodeName: node.descriptor.name,
         outputPort: output.id,
         outputName: output.name,
+        dataType: output.dataType,
       })),
   );
 }
@@ -29,14 +33,17 @@ function targetKey(target: PreviewTarget): string {
   return `${target.nodeId}:${target.outputPort}`;
 }
 
-function Pane({ viewer, pane, options, controller }: {
+function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange }: {
   viewer: ViewerId;
   pane: ViewerPaneState;
   options: PreviewTarget[];
   controller: ViewerController;
+  paintedNode?: EditorNode;
+  onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
 }) {
   const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
   const selectedKey = pane.target ? targetKey(pane.target) : '';
 
   useEffect(() => {
@@ -118,6 +125,7 @@ function Pane({ viewer, pane, options, controller }: {
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
             className={`viewer-pane__image${pane.zoomMode === 'fit' ? ' viewer-pane__image--fit' : ''}`}
             height={pane.height ?? undefined}
+            ref={imageRef}
             src={pane.imageUrl}
             style={{
               transform: `translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
@@ -136,6 +144,15 @@ function Pane({ viewer, pane, options, controller }: {
           </div>
         )}
         {pane.status === 'error' && <div className="viewer-pane__error">{pane.error}</div>}
+        {pane.target?.dataType === 'core.Mask' && paintedNode && (
+          <MaskPainter
+            imageOrigin={pane.imageOrigin}
+            imageRef={imageRef}
+            imageRegion={pane.imageRegion}
+            node={paintedNode}
+            onChange={(parameterId, value) => onPaintedMaskChange?.(paintedNode.id, parameterId, value)}
+          />
+        )}
       </div>
       <div className="viewer-pane__controls">
         <button onClick={() => controller.fitToWindow(viewer)} type="button">Fit</button>
@@ -143,13 +160,33 @@ function Pane({ viewer, pane, options, controller }: {
         <button aria-label={`Zoom out Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, -1)} type="button">−</button>
         <span className="viewer-pane__zoom">{pane.zoomMode === 'fit' ? 'Fit' : `${Math.round(pane.zoom * 100)}%`}</span>
         <button aria-label={`Zoom in Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, 1)} type="button">+</button>
+        {pane.target?.dataType === 'core.Mask' && (
+          <div className="viewer-pane__mask-display" role="group" aria-label={`Viewer ${viewer} mask display`}>
+            <button
+              aria-pressed={pane.maskDisplay === 'grayscale'}
+              className={pane.maskDisplay === 'grayscale' ? 'is-active' : ''}
+              onClick={() => controller.setMaskDisplay(viewer, 'grayscale')}
+              type="button"
+            >
+              Mask
+            </button>
+            <button
+              aria-pressed={pane.maskDisplay === 'overlay'}
+              className={pane.maskDisplay === 'overlay' ? 'is-active' : ''}
+              onClick={() => controller.setMaskDisplay(viewer, 'overlay')}
+              type="button"
+            >
+              Overlay
+            </button>
+          </div>
+        )}
         {pane.status === 'loading' && <button onClick={() => void controller.cancel(viewer)} type="button">Cancel</button>}
       </div>
     </article>
   );
 }
 
-export function Viewer({ controller, nodes, revision, source }: ViewerProps) {
+export function Viewer({ controller, nodes, revision, source, paintedNode, onPaintedMaskChange }: ViewerProps) {
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
 
@@ -184,8 +221,22 @@ export function Viewer({ controller, nodes, revision, source }: ViewerProps) {
         </div>
       </div>
       <div className={`viewer-grid viewer-grid--${controller.state.layout}`}>
-        <Pane controller={controller} options={options} pane={controller.state.panes.A} viewer="A" />
-        <Pane controller={controller} options={options} pane={controller.state.panes.B} viewer="B" />
+        <Pane
+          controller={controller}
+          onPaintedMaskChange={onPaintedMaskChange}
+          options={options}
+          paintedNode={paintedNode}
+          pane={controller.state.panes.A}
+          viewer="A"
+        />
+        <Pane
+          controller={controller}
+          onPaintedMaskChange={onPaintedMaskChange}
+          options={options}
+          paintedNode={paintedNode}
+          pane={controller.state.panes.B}
+          viewer="B"
+        />
       </div>
     </section>
   );

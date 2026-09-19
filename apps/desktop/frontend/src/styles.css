@@ -214,7 +214,17 @@ button { cursor: pointer; }
 .viewer-pane__target:focus { border-color: #58c6aa; }
 .viewer-pane__stage { position: relative; display: grid; min-height: 0; place-items: center; overflow: hidden; cursor: grab; background: repeating-conic-gradient(#141a22 0% 25%, #11161d 0% 50%) 50% / 16px 16px; touch-action: none; }
 .viewer-pane__stage:active { cursor: grabbing; }
-.viewer-pane__image { display: block; flex: none; max-width: none; max-height: none; user-select: none; transform-origin: center center; }
+.mask-painter__surface { position: absolute; inset: 0; z-index: 2; cursor: crosshair; }
+.mask-painter__controls { position: absolute; right: 8px; bottom: 8px; left: 8px; z-index: 3; display: flex; flex-wrap: wrap; align-items: end; gap: 6px; border: 1px solid rgba(68, 84, 100, .9); border-radius: 7px; padding: 6px; color: #b9c8d6; background: rgba(10, 14, 20, .88); backdrop-filter: blur(5px); font-size: 9px; }
+.mask-painter__controls label { display: grid; min-width: 82px; gap: 3px; }
+.mask-painter__controls label span { color: #8f9eae; font-family: 'DM Mono', monospace; font-size: 8px; }
+.mask-painter__controls input[type='range'] { width: 82px; accent-color: #6ee7c7; }
+.mask-painter__controls output { color: #d8e5ec; font-family: 'DM Mono', monospace; font-size: 8px; }
+.mask-painter__modes, .mask-painter__history, .viewer-pane__mask-display { display: flex; gap: 3px; }
+.mask-painter__controls button, .viewer-pane__mask-display button { border: 1px solid #344454; border-radius: 5px; padding: 5px 7px; color: #a9b6c6; background: #151b24; font-size: 9px; font-weight: 700; }
+.mask-painter__controls button:hover, .viewer-pane__mask-display button:hover, .mask-painter__controls button.is-active, .viewer-pane__mask-display button.is-active { border-color: #58c6aa; color: #8cebd3; background: #13251f; }
+.mask-painter__controls button:disabled { cursor: not-allowed; opacity: .4; }
+
 .viewer-pane__image--fit { width: auto; height: auto; object-fit: contain; }
 .viewer-pane__empty { max-width: 260px; padding: 18px; color: #718093; font-family: 'DM Mono', monospace; font-size: 9px; line-height: 1.6; text-align: center; }
 .viewer-pane__progress { position: absolute; right: 10px; bottom: 10px; left: 10px; display: grid; gap: 5px; border: 1px solid #344454; border-radius: 6px; padding: 7px 8px; color: #b7c8d9; background: rgba(10, 14, 20, .9); font-family: 'DM Mono', monospace; font-size: 9px; }

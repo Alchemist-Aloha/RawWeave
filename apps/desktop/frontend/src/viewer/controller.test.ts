@@ -3,8 +3,8 @@ import { ViewerController } from './controller';
 import type { PreviewRequest, PreviewResult, PreviewTarget, ViewerId } from './types';
 import type { PreviewTransport } from './transport';
 
-function target(nodeId: string, name = nodeId): PreviewTarget {
-  return { nodeId, nodeName: name, outputPort: 'image', outputName: 'Image' };
+function target(nodeId: string, name = nodeId, dataType = 'core.Image'): PreviewTarget {
+  return { nodeId, nodeName: name, outputPort: 'image', outputName: 'Image', dataType };
 }
 
 function deferred<T>() {
@@ -242,5 +242,19 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.target).toBeNull();
     expect(viewer.state.panes.B.target).toBeNull();
     expect(transport.cancellations).toHaveLength(2);
+  });
+
+  it('requests a mask target in grayscale and can toggle its colored overlay', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+
+    viewer.setTarget('A', target('mask', 'Painted Mask', 'core.Mask'));
+    expect(transport.requests[0].maskDisplay).toBe('grayscale');
+    expect(viewer.state.panes.A.maskDisplay).toBe('grayscale');
+
+    viewer.setMaskDisplay('A', 'overlay');
+
+    expect(transport.requests.at(-1)?.maskDisplay).toBe('overlay');
+    expect(viewer.state.panes.A.maskDisplay).toBe('overlay');
   });
 });

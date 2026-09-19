@@ -268,6 +268,13 @@ export default function App() {
     [controller, selectedNode],
   );
 
+  const onPaintedMaskChange = useCallback(
+    (nodeId: string, parameterId: string, value: ParameterValue) => {
+      void controller.setParameter(nodeId, parameterId, value).catch(() => undefined);
+    },
+    [controller],
+  );
+
   const onToggleExposed = useCallback(
     (parameterId: string, exposed: boolean) => {
       if (!selectedNode) return;
@@ -634,6 +641,8 @@ export default function App() {
       <Viewer
         controller={viewerController}
         nodes={controller.state.nodes}
+        onPaintedMaskChange={onPaintedMaskChange}
+        paintedNode={selectedNode?.typeId === 'core.mask-painted' ? selectedNode : undefined}
         revision={controller.state.revision}
         source={controller.state.source}
       />

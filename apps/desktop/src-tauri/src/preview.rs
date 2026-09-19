@@ -35,6 +35,14 @@ impl From<PreviewQualityRequest> for PreviewQuality {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaskDisplayRequest {
+    #[default]
+    Grayscale,
+    Overlay,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRegionRequest {
@@ -74,6 +82,7 @@ pub struct PreviewRequest {
     pub region: PreviewRegionRequest,
     pub tile: PreviewTileRequest,
     pub mip: u8,
+    pub mask_display: MaskDisplayRequest,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -87,6 +96,8 @@ pub struct PreviewMetadata {
     pub full_width: u32,
     pub full_height: u32,
     pub mime_type: &'static str,
+    pub origin_x: u32,
+    pub origin_y: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -448,10 +459,36 @@ fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
     }
 }
 
-fn color_value_to_image(value: Value) -> Result<Image, String> {
-    let (dimensions, pixels) = match value {
+fn color_value_to_image(value: Value, mask_display: MaskDisplayRequest) -> Result<Image, String> {
+    let (dimensions, origin, pixels) = match value {
         Value::Image(image) => return Ok(image),
-        Value::DisplayRGB(display) => (display.dimensions(), display.pixels().to_vec()),
+        Value::Mask(mask) => {
+            let dimensions = mask.dimensions();
+            let origin = mask.origin();
+            let mut pixels = Vec::with_capacity(
+                (dimensions.width as usize).saturating_mul(dimensions.height as usize),
+            );
+            for y in 0..dimensions.height {
+                for x in 0..dimensions.width {
+                    let value = mask.pixel_global(origin.0 + x, origin.1 + y).unwrap_or(0.0);
+                    pixels.push(match mask_display {
+                        MaskDisplayRequest::Grayscale => [value, value, value, 1.0],
+                        MaskDisplayRequest::Overlay => [1.0, 0.25, 0.1, value],
+                    });
+                }
+            }
+            (dimensions, origin, pixels)
+        }
+        Value::DisplayRGB(display) => (
+            (display.dimensions()),
+            (0, 0),
+            display
+                .pixels()
+                .to_vec()
+                .into_iter()
+                .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+                .collect(),
+        ),
         Value::SceneLinearRGB(scene) => {
             let display = SrgbDisplayTransform
                 .transform(&scene)
@@ -461,7 +498,16 @@ fn color_value_to_image(value: Value) -> Result<Image, String> {
                 .map_err(|error| {
                     format!("could not convert scene preview to display RGB: {error}")
                 })?;
-            (display.dimensions(), display.pixels().to_vec())
+            (
+                display.dimensions(),
+                (0, 0),
+                display
+                    .pixels()
+                    .to_vec()
+                    .into_iter()
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+                    .collect(),
+            )
         }
         other => {
             return Err(format!(
@@ -470,13 +516,12 @@ fn color_value_to_image(value: Value) -> Result<Image, String> {
             ));
         }
     };
-    Image::from_pixels(
-        dimensions.width,
-        dimensions.height,
-        pixels
-            .into_iter()
-            .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
-            .collect(),
+    Image::from_pixels_with_origin(
+        dimensions,
+        origin,
+        pixels,
+        Default::default(),
+        Default::default(),
     )
     .map_err(|error| format!("could not create display preview image: {error}"))
 }
@@ -514,12 +559,13 @@ pub fn render_preview(
                 evaluation_context(&source),
             )
             .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
-        let full_frame = color_value_to_image(full_frame).map_err(|error| {
-            format!(
-                "preview output '{}:{}' is not displayable: {error}",
-                request.node_id, request.output_port
-            )
-        })?;
+        let full_frame =
+            color_value_to_image(full_frame, request.mask_display).map_err(|error| {
+                format!(
+                    "preview output '{}:{}' is not displayable: {error}",
+                    request.node_id, request.output_port
+                )
+            })?;
         let full_width = full_frame.width();
         let full_height = full_frame.height();
         let full_origin = full_frame.origin();
@@ -550,7 +596,7 @@ pub fn render_preview(
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
         }
-        let image = color_value_to_image(value).map_err(|error| {
+        let image = color_value_to_image(value, request.mask_display).map_err(|error| {
             format!(
                 "preview output '{}:{}' is not displayable: {error}",
                 request.node_id, request.output_port
@@ -588,6 +634,8 @@ pub fn render_preview(
             full_width,
             full_height,
             mime_type: PREVIEW_MIME_TYPE,
+            origin_x: image.origin().0,
+            origin_y: image.origin().1,
         })
     })();
     match result {
@@ -743,6 +791,7 @@ mod tests {
             },
             tile: PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: MaskDisplayRequest::Grayscale,
         };
 
         let metadata = render_preview(
@@ -782,6 +831,7 @@ mod tests {
             },
             tile: PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: MaskDisplayRequest::Grayscale,
         };
 
         let metadata = render_preview(
@@ -853,6 +903,7 @@ mod tests {
                 },
                 tile: PreviewTileRequest { x: 0, y: 0 },
                 mip: 0,
+                mask_display: MaskDisplayRequest::Grayscale,
             };
             let current_editor = Arc::new(Mutex::new(editor.clone()));
             let metadata = render_preview(
@@ -929,6 +980,7 @@ mod tests {
             },
             tile: PreviewTileRequest { x: 0, y: 0 },
             mip: 0,
+            mask_display: MaskDisplayRequest::Grayscale,
         };
 
         manager.begin(request_id);
@@ -993,5 +1045,59 @@ mod tests {
             PREVIEW_MIME_TYPE
         );
         assert_eq!(response.body(), &bytes);
+    }
+
+    #[test]
+    fn renders_mask_values_as_grayscale_or_colored_overlay_pngs() {
+        let source = Image::new(3, 1).unwrap();
+        let mut editor = EditorCore::default();
+        editor
+            .add_node("mask", "core.mask-linear-gradient")
+            .unwrap();
+        let revision = editor.graph().revision();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let request = |request_id: &str, mask_display| PreviewRequest {
+            request_id: request_id.to_owned(),
+            revision,
+            node_id: "mask".to_owned(),
+            output_port: "mask".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 1,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+            mask_display,
+        };
+
+        let grayscale = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(source.clone())),
+            request("mask-gray", MaskDisplayRequest::Grayscale),
+        )
+        .unwrap();
+        let overlay = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(source)),
+            request("mask-overlay", MaskDisplayRequest::Overlay),
+        )
+        .unwrap();
+
+        assert_eq!((grayscale.full_width, grayscale.full_height), (3, 1));
+        assert_eq!((overlay.full_width, overlay.full_height), (3, 1));
+        assert_eq!(overlay.mime_type, PREVIEW_MIME_TYPE);
+        let gray_bytes = manager.store.get(&preview_path("mask-gray")).unwrap();
+        let overlay_bytes = manager.store.get(&preview_path("mask-overlay")).unwrap();
+        assert_ne!(gray_bytes, overlay_bytes);
+        assert_eq!(&gray_bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&overlay_bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }
