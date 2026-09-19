@@ -12,6 +12,7 @@ use rawweave_rendering::{
     CacheKey, GraphRevision, MaskRenderResult, MemoryRenderCache, RenderResult, TileCoord,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod checkpoint;
@@ -91,6 +92,10 @@ pub struct Graph {
     registry: NodeRegistry,
     #[serde(skip, default)]
     render_cache: Arc<Mutex<MemoryRenderCache>>,
+    #[serde(skip, default)]
+    checkpoints: Arc<Mutex<BTreeMap<NodeId, Checkpoint>>>,
+    #[serde(skip, default)]
+    artifact_store: ArtifactStore,
 }
 
 #[derive(Clone)]
@@ -109,6 +114,7 @@ enum BackendIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MemoKey {
     node_id: NodeId,
+    requested_output: Option<String>,
     requested_region: Option<rawweave_image::Region>,
     tile: TileCoord,
     mip_level: u8,
@@ -124,12 +130,88 @@ impl Graph {
             revision: 0,
             registry,
             render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            checkpoints: Arc::new(Mutex::new(BTreeMap::new())),
+            artifact_store: ArtifactStore::memory(),
         }
     }
 
     pub fn with_render_cache(mut self, cache: MemoryRenderCache) -> Self {
         self.render_cache = Arc::new(Mutex::new(cache));
         self
+    }
+
+    /// Attach the durable store used by checkpoints during normal graph
+    /// evaluation. The store is shared by graph clones.
+    pub fn with_artifact_store(mut self, store: ArtifactStore) -> Self {
+        self.artifact_store = store;
+        self
+    }
+
+    pub fn artifact_store(&self) -> ArtifactStore {
+        self.artifact_store.clone()
+    }
+
+    /// Register the committed state for a manual checkpoint node. Normal
+    /// demand-driven evaluation uses this state instead of instantiating a
+    /// `ManualCheckpoint` node.
+    pub fn register_checkpoint(&mut self, checkpoint: Checkpoint) -> Result<(), GraphError> {
+        let node_id =
+            NodeId::try_new(checkpoint.node_id.as_str()).map_err(GraphError::InvalidNodeId)?;
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        if node.descriptor.evaluation_policy != EvaluationPolicy::ManualCheckpoint {
+            return Err(GraphError::Evaluation {
+                node: node_id,
+                source: NodeError::Message("node is not a manual checkpoint".to_owned()),
+            });
+        }
+        if checkpoint.node_version != node.descriptor.version {
+            return Err(GraphError::Checkpoint(
+                CheckpointError::NodeVersionMismatch {
+                    expected: node.descriptor.version,
+                    actual: checkpoint.node_version,
+                },
+            ));
+        }
+        let affected = self.downstream_nodes(&node.id);
+        self.checkpoints
+            .lock()
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?
+            .insert(node_id, checkpoint);
+        self.invalidate_nodes(&affected);
+        self.bump_revision();
+        Ok(())
+    }
+
+    pub fn set_checkpoint(&mut self, checkpoint: Checkpoint) -> Result<(), GraphError> {
+        self.register_checkpoint(checkpoint)
+    }
+
+    pub fn checkpoint(&self, node_id: &NodeId) -> Result<Option<Checkpoint>, GraphError> {
+        Ok(self
+            .checkpoints
+            .lock()
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?
+            .get(node_id)
+            .cloned())
+    }
+
+    pub fn commit_checkpoint(
+        &self,
+        node_id: &NodeId,
+        artifact: CheckpointArtifact,
+    ) -> Result<(), GraphError> {
+        let mut checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?;
+        let checkpoint = checkpoints
+            .get_mut(node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        checkpoint.commit(artifact, &self.artifact_store)?;
+        Ok(())
     }
 
     pub fn render_cache(&self) -> Arc<Mutex<MemoryRenderCache>> {
@@ -189,6 +271,8 @@ impl Graph {
             revision: 0,
             registry: self.registry.clone(),
             render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            checkpoints: Arc::new(Mutex::new(BTreeMap::new())),
+            artifact_store: self.artifact_store.clone(),
         })
     }
 
@@ -550,7 +634,13 @@ impl Graph {
         }
         let mut memo = HashMap::new();
         let mut visiting = BTreeSet::new();
-        let result = self.evaluate_node(node_id, context, &mut memo, &mut visiting)?;
+        let result = self.evaluate_node(
+            node_id,
+            Some(output_port),
+            context,
+            &mut memo,
+            &mut visiting,
+        )?;
         result
             .result
             .outputs
@@ -606,19 +696,28 @@ impl Graph {
             ));
         }
 
-        let mut upstream_hashes = BTreeMap::new();
+        let mut upstream_values = BTreeMap::new();
         for edge in self.edges.iter().filter(|edge| edge.to_node == *node_id) {
             let value = self.evaluate(&edge.from_node, &edge.from_port, context)?;
-            let mut hasher = DefaultHasher::new();
-            hash_value(&value, &mut hasher);
-            upstream_hashes.insert(
+            upstream_values.insert(
                 format!("{}:{}->{}", edge.from_node, edge.from_port, edge.to_port),
-                format!("{:016x}", hasher.finish()),
+                value,
             );
         }
-        checkpoint.set_dependency_hash(hash_upstream_inputs(
-            &upstream_hashes,
-            node.descriptor.version,
+        let mut parameters = node.parameters.clone();
+        for parameter in &node.descriptor.parameters {
+            if let Some(over) = context.parameter_override(node_id.as_str(), &parameter.id)
+                && over.parameter_type() == parameter.parameter_type
+            {
+                parameters.insert(parameter.id.clone(), over.clone());
+            }
+        }
+        checkpoint.set_dependency_hash(manual_dependency_hash(
+            node,
+            output_port,
+            &parameters,
+            &upstream_values,
+            context,
         ));
         let artifact = checkpoint
             .committed_artifact(store)?
@@ -658,7 +757,13 @@ impl Graph {
         else {
             return Ok(None);
         };
-        let upstream = self.evaluate_node(&edge.from_node, context, memo, visiting)?;
+        let upstream = self.evaluate_node(
+            &edge.from_node,
+            Some(&edge.from_port),
+            context,
+            memo,
+            visiting,
+        )?;
         upstream
             .result
             .outputs
@@ -674,6 +779,7 @@ impl Graph {
     fn evaluate_node(
         &self,
         node_id: &NodeId,
+        requested_output: Option<&str>,
         context: &EvaluationContext,
         memo: &mut HashMap<MemoKey, EvaluatedNode>,
         visiting: &mut BTreeSet<NodeId>,
@@ -693,6 +799,7 @@ impl Graph {
         };
         let memo_key = MemoKey {
             node_id: node_id.clone(),
+            requested_output: requested_output.map(str::to_owned),
             requested_region: execution_context.requested_region(),
             tile: execution_context.tile(),
             mip_level: execution_context.mip_level(),
@@ -730,6 +837,7 @@ impl Graph {
             included = Some(selected);
         }
         let mut inputs = Inputs::new();
+        let mut upstream_values = BTreeMap::new();
         let mut upstream_hasher = DefaultHasher::new();
         backend_identity(&execution_context).hash(&mut upstream_hasher);
         hash_evaluation_context(&execution_context, &mut upstream_hasher);
@@ -740,8 +848,13 @@ impl Graph {
             {
                 continue;
             }
-            let upstream =
-                self.evaluate_node(&edge.from_node, &execution_context, memo, visiting)?;
+            let upstream = self.evaluate_node(
+                &edge.from_node,
+                Some(&edge.from_port),
+                &execution_context,
+                memo,
+                visiting,
+            )?;
             let value = upstream
                 .result
                 .outputs
@@ -751,6 +864,10 @@ impl Graph {
                     node: edge.from_node.clone(),
                     port: edge.from_port.clone(),
                 })?;
+            upstream_values.insert(
+                format!("{}:{}->{}", edge.from_node, edge.from_port, edge.to_port),
+                value.clone(),
+            );
             edge.from_node.as_str().hash(&mut upstream_hasher);
             edge.from_port.hash(&mut upstream_hasher);
             edge.to_port.hash(&mut upstream_hasher);
@@ -798,6 +915,39 @@ impl Graph {
                     source: NodeError::MissingInput(port.id.clone()),
                 });
             }
+        }
+        if node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint {
+            let requested_output = requested_output.ok_or_else(|| GraphError::MissingPort {
+                node: node_id.clone(),
+                port: "<requested output>".to_owned(),
+            })?;
+            let dependency_hash = manual_dependency_hash(
+                node,
+                requested_output,
+                &effective_parameters,
+                &upstream_values,
+                &execution_context,
+            );
+            let value = self.resolve_registered_checkpoint(node_id, dependency_hash)?;
+            let output = node.descriptor.output(requested_output).ok_or_else(|| {
+                GraphError::MissingPort {
+                    node: node_id.clone(),
+                    port: requested_output.to_owned(),
+                }
+            })?;
+            if !types_compatible(&output.data_type, value.data_type()) {
+                return Err(GraphError::TypeMismatch {
+                    expected: output.data_type.clone(),
+                    actual: value.data_type().to_owned(),
+                });
+            }
+            let evaluated = EvaluatedNode {
+                output_hash: hash_node_result(&NodeResult::single(requested_output, value.clone())),
+                result: NodeResult::single(requested_output, value),
+            };
+            visiting.remove(node_id);
+            memo.insert(memo_key, evaluated.clone());
+            return Ok(evaluated);
         }
         let cache_key = CacheKey::new(
             node.id.as_str(),
@@ -860,6 +1010,25 @@ impl Graph {
         Ok(evaluated)
     }
 
+    fn resolve_registered_checkpoint(
+        &self,
+        node_id: &NodeId,
+        dependency_hash: String,
+    ) -> Result<Value, GraphError> {
+        let mut checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?;
+        let checkpoint = checkpoints
+            .get_mut(node_id)
+            .ok_or(GraphError::Checkpoint(CheckpointError::NoCommittedArtifact))?;
+        checkpoint.set_dependency_hash(dependency_hash);
+        let artifact = checkpoint
+            .committed_artifact(&self.artifact_store)?
+            .ok_or(CheckpointError::NoCommittedArtifact)?;
+        Ok(artifact.payload.to_value())
+    }
+
     fn invalidate_nodes(&self, node_ids: &BTreeSet<NodeId>) {
         if let Ok(mut cache) = self.render_cache.lock() {
             cache.invalidate_nodes(node_ids.iter().map(NodeId::as_str));
@@ -886,6 +1055,151 @@ impl Graph {
         if let Ok(mut cache) = self.render_cache.lock() {
             cache.restamp_revision(revision);
         }
+    }
+}
+
+fn manual_dependency_hash(
+    node: &GraphNode,
+    requested_output: &str,
+    parameters: &rawweave_node_api::Parameters,
+    upstream_values: &BTreeMap<String, Value>,
+    context: &EvaluationContext,
+) -> String {
+    let mut hasher = StableHasher::default();
+    hash_field(&mut hasher, b"rawweave-manual-checkpoint-v1");
+    hash_field(&mut hasher, node.id.as_str().as_bytes());
+    hash_field(&mut hasher, node.type_id.as_bytes());
+    node.descriptor.version.hash(&mut hasher);
+    hash_field(&mut hasher, requested_output.as_bytes());
+    hash_stable_parameters(parameters, &mut hasher);
+    for (edge, value) in upstream_values {
+        hash_field(&mut hasher, edge.as_bytes());
+        hash_stable_value(value, &mut hasher);
+    }
+    hash_stable_context(context, &mut hasher);
+    hasher.finish_hex()
+}
+
+#[derive(Default)]
+struct StableHasher(Sha256);
+
+impl Hasher for StableHasher {
+    fn finish(&self) -> u64 {
+        let digest = self.0.clone().finalize();
+        u64::from_be_bytes(digest[..8].try_into().expect("sha256 has eight bytes"))
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+}
+
+impl StableHasher {
+    fn finish_hex(self) -> String {
+        self.0
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+fn hash_field(hasher: &mut impl Hasher, bytes: &[u8]) {
+    (bytes.len() as u64).to_be_bytes().hash(hasher);
+    hasher.write(bytes);
+}
+
+fn hash_stable_parameters(parameters: &rawweave_node_api::Parameters, hasher: &mut impl Hasher) {
+    for (id, value) in parameters {
+        hash_field(hasher, id.as_bytes());
+        match value {
+            ParameterValue::Float(number) => {
+                0_u8.hash(hasher);
+                number.to_bits().hash(hasher);
+            }
+            ParameterValue::Integer(number) => {
+                1_u8.hash(hasher);
+                number.hash(hasher);
+            }
+            ParameterValue::Boolean(value) => {
+                2_u8.hash(hasher);
+                value.hash(hasher);
+            }
+            ParameterValue::String(value) => {
+                3_u8.hash(hasher);
+                hash_field(hasher, value.as_bytes());
+            }
+        }
+    }
+}
+
+fn hash_stable_context(context: &EvaluationContext, hasher: &mut impl Hasher) {
+    match context.source_image.as_ref() {
+        Some(image) => {
+            0_u8.hash(hasher);
+            hash_stable_value(&Value::Image(image.clone()), hasher);
+        }
+        None => 1_u8.hash(hasher),
+    }
+    match context.source_bytes.as_ref() {
+        Some(bytes) => {
+            2_u8.hash(hasher);
+            hash_field(hasher, bytes);
+        }
+        None => 3_u8.hash(hasher),
+    }
+    match context.source_path.as_ref() {
+        Some(path) => {
+            4_u8.hash(hasher);
+            hash_field(hasher, path.as_os_str().to_string_lossy().as_bytes());
+        }
+        None => 5_u8.hash(hasher),
+    }
+    for (id, value) in &context.external_inputs {
+        hash_field(hasher, id.as_bytes());
+        hash_stable_value(value, hasher);
+    }
+    for (id, bytes) in &context.assets {
+        hash_field(hasher, id.as_bytes());
+        hash_field(hasher, bytes);
+    }
+    for ((node_id, parameter_id), value) in &context.parameter_overrides {
+        hash_field(hasher, node_id.as_bytes());
+        hash_field(hasher, parameter_id.as_bytes());
+        hash_stable_parameter(value, hasher);
+    }
+    context.requested_region().hash(hasher);
+    context.tile().hash(hasher);
+    context.mip_level().hash(hasher);
+    context.quality().hash(hasher);
+    context
+        .render_context()
+        .map(|render_context| render_context.gpu_available())
+        .hash(hasher);
+}
+
+fn hash_stable_parameter(value: &ParameterValue, hasher: &mut impl Hasher) {
+    hash_stable_parameters(
+        &[("value".to_owned(), value.clone())].into_iter().collect(),
+        hasher,
+    );
+}
+
+fn hash_stable_value(value: &Value, hasher: &mut impl Hasher) {
+    match value {
+        Value::Image(image) => {
+            0_u8.hash(hasher);
+            image.dimensions().hash(hasher);
+            image.origin().hash(hasher);
+            image.pixel_format().hash(hasher);
+            image.color_metadata().hash(hasher);
+            for pixel in image.pixels() {
+                for channel in pixel {
+                    channel.to_bits().hash(hasher);
+                }
+            }
+        }
+        _ => hash_value(value, hasher),
     }
 }
 
