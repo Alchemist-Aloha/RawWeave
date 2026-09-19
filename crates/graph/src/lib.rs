@@ -83,19 +83,62 @@ pub enum GraphError {
     Checkpoint(#[from] CheckpointError),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Graph {
     nodes: BTreeMap<NodeId, GraphNode>,
     edges: Vec<GraphEdge>,
     revision: u64,
-    #[serde(skip, default)]
     registry: NodeRegistry,
-    #[serde(skip, default)]
     render_cache: Arc<Mutex<MemoryRenderCache>>,
-    #[serde(skip, default)]
     checkpoints: Arc<Mutex<BTreeMap<NodeId, Checkpoint>>>,
-    #[serde(skip, default)]
     artifact_store: ArtifactStore,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GraphDocument {
+    nodes: BTreeMap<NodeId, GraphNode>,
+    edges: Vec<GraphEdge>,
+    revision: u64,
+    #[serde(default)]
+    checkpoints: BTreeMap<NodeId, Checkpoint>,
+}
+
+impl Serialize for Graph {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| serde::ser::Error::custom("checkpoint store is poisoned"))?
+            .clone();
+        GraphDocument {
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+            revision: self.revision,
+            checkpoints,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Graph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let document = GraphDocument::deserialize(deserializer)?;
+        Ok(Self {
+            nodes: document.nodes,
+            edges: document.edges,
+            revision: document.revision,
+            registry: NodeRegistry::default(),
+            render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            checkpoints: Arc::new(Mutex::new(document.checkpoints)),
+            artifact_store: ArtifactStore::memory(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -740,6 +783,38 @@ impl Graph {
         let graph = serde_json::from_str::<Graph>(json)?.with_registry(registry);
         graph.validate()?;
         Ok(graph)
+    }
+
+    pub fn from_json_with_artifact_store(
+        json: &str,
+        registry: NodeRegistry,
+        artifact_store: ArtifactStore,
+    ) -> Result<Self, GraphError> {
+        let graph = serde_json::from_str::<Graph>(json)?
+            .with_registry(registry)
+            .with_artifact_store(artifact_store.clone());
+        graph.validate()?;
+        graph.validate_checkpoint_artifacts(&artifact_store)?;
+        Ok(graph)
+    }
+
+    pub(crate) fn validate_checkpoint_artifacts(
+        &self,
+        store: &ArtifactStore,
+    ) -> Result<(), GraphError> {
+        let checkpoints = self
+            .checkpoints
+            .lock()
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?
+            .clone();
+        for checkpoint in checkpoints.values() {
+            if checkpoint.committed_artifact_id().is_some()
+                && checkpoint.committed_artifact(store)?.is_none()
+            {
+                return Err(GraphError::Checkpoint(CheckpointError::NoCommittedArtifact));
+            }
+        }
+        Ok(())
     }
 
     fn evaluate_port_value(

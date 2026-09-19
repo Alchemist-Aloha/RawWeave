@@ -901,8 +901,29 @@ impl WorkflowDefinition {
         Self::import(json.as_bytes(), registry)
     }
 
+    pub fn from_json_with_artifact_store(
+        json: &str,
+        registry: NodeRegistry,
+        artifact_store: crate::ArtifactStore,
+    ) -> Result<Self, WorkflowError> {
+        Self::import_with_artifact_store(json.as_bytes(), registry, artifact_store)
+    }
+
     pub fn import(bytes: &[u8], registry: NodeRegistry) -> Result<Self, WorkflowError> {
         Self::import_with_limits(bytes, registry, WorkflowImportLimits::default())
+    }
+
+    pub fn import_with_artifact_store(
+        bytes: &[u8],
+        registry: NodeRegistry,
+        artifact_store: crate::ArtifactStore,
+    ) -> Result<Self, WorkflowError> {
+        Self::import_with_limits_and_artifact_store(
+            bytes,
+            registry,
+            WorkflowImportLimits::default(),
+            artifact_store,
+        )
     }
 
     pub fn preflight(bytes: &[u8], registry: NodeRegistry) -> Result<Self, WorkflowError> {
@@ -914,6 +935,20 @@ impl WorkflowDefinition {
         registry: NodeRegistry,
         limits: WorkflowImportLimits,
     ) -> Result<Self, WorkflowError> {
+        Self::import_with_limits_and_artifact_store(
+            bytes,
+            registry,
+            limits,
+            crate::ArtifactStore::memory(),
+        )
+    }
+
+    pub fn import_with_limits_and_artifact_store(
+        bytes: &[u8],
+        registry: NodeRegistry,
+        limits: WorkflowImportLimits,
+        artifact_store: crate::ArtifactStore,
+    ) -> Result<Self, WorkflowError> {
         if bytes.len() > limits.max_bytes {
             return Err(WorkflowError::ImportLimitExceeded {
                 resource: "bytes",
@@ -924,8 +959,10 @@ impl WorkflowDefinition {
         let json = std::str::from_utf8(bytes)?;
         let mut definition = serde_json::from_str::<Self>(json)?;
         definition.attach_registry(&registry);
+        definition.attach_artifact_store(&artifact_store);
         definition.check_import_limits(&limits)?;
         definition.validate_for_import()?;
+        definition.validate_checkpoint_artifacts(&artifact_store)?;
         Ok(definition)
     }
 
@@ -1349,6 +1386,24 @@ impl WorkflowDefinition {
         for nested in self.nested_subgraphs.values_mut() {
             nested.attach_registry(registry);
         }
+    }
+
+    fn attach_artifact_store(&mut self, store: &crate::ArtifactStore) {
+        self.graph = self.graph.clone().with_artifact_store(store.clone());
+        for nested in self.nested_subgraphs.values_mut() {
+            nested.attach_artifact_store(store);
+        }
+    }
+
+    fn validate_checkpoint_artifacts(
+        &self,
+        store: &crate::ArtifactStore,
+    ) -> Result<(), WorkflowError> {
+        self.graph.validate_checkpoint_artifacts(store)?;
+        for nested in self.nested_subgraphs.values() {
+            nested.validate_checkpoint_artifacts(store)?;
+        }
+        Ok(())
     }
 
     fn contains_nested(&self, id: &str) -> bool {
