@@ -9,6 +9,16 @@ import type {
   PortDescriptor,
   PlatformNode,
   PlatformSnapshot,
+  WorkflowDefinition,
+  WorkflowDependency,
+  WorkflowMetadata,
+  WorkflowParameter,
+  WorkflowPort,
+  WorkflowSummary,
+  ScopeBreadcrumb,
+  DependencyDiagnostic,
+  DependencyReport,
+  CreateSubgraphOptions,
 } from '../editor/types';
 import { createTauriPlatform } from './tauri';
 
@@ -481,17 +491,199 @@ function hasCycle(edges: PlatformEdge[]): boolean {
   return [...new Set(edges.flatMap((edge) => [edge.fromNode, edge.toNode]))].some(visit);
 }
 
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`;
+}
+
+async function stableHash(value: unknown): Promise<string> {
+  const serialized = stableStringify(value);
+  const bytes = new TextEncoder().encode(serialized);
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+function emptyDependencyReport(): DependencyReport {
+  return { available: [], missing: [], mismatched: [], disabledNodes: [], statuses: {} };
+}
+
+function summary(definition: WorkflowDefinition): WorkflowSummary {
+  return {
+    id: definition.identity.id,
+    name: definition.metadata.name,
+    version: definition.identity.version,
+    hash: definition.hash,
+  };
+}
+
+function portFromBoundary(
+  direction: 'Input' | 'Output',
+  node: PlatformNode,
+  portId: string,
+  descriptor: NodeDescriptor,
+): WorkflowPort {
+  const portDescriptor = direction === 'Input'
+    ? descriptor.inputs.find((candidate) => candidate.id === portId)
+    : descriptor.outputs.find((candidate) => candidate.id === portId);
+  if (!portDescriptor) throw new Error(`port '${portId}' does not exist on node '${node.id}'`);
+  return {
+    id: `${direction === 'Input' ? 'input' : 'output'}:${node.id}:${portId}`,
+    name: portDescriptor.name,
+    direction,
+    nodeId: node.id,
+    portId,
+    dataType: portDescriptor.dataType,
+    required: portDescriptor.required,
+  };
+}
+
+function workflowDocument(definition: WorkflowDefinition): Omit<WorkflowDefinition, 'hash'> {
+  const { hash: _hash, ...document } = definition;
+  document.graph = { nodes: document.graph.nodes, edges: document.graph.edges };
+  return document;
+}
+
+async function definitionHash(definition: WorkflowDefinition): Promise<string> {
+  return stableHash(workflowDocument(definition));
+}
+
+function newDefinition(
+  identity: { id: string; version: string },
+  metadata: WorkflowMetadata,
+  graph: PlatformSnapshot,
+  dependencies: Partial<Pick<WorkflowDefinition, 'nodePackDependencies' | 'subgraphDependencies'>> = {},
+): WorkflowDefinition {
+  return {
+    identity,
+    graph,
+    parameters: [],
+    inputs: [],
+    outputs: [],
+    subgraphDependencies: clone(dependencies.subgraphDependencies ?? []),
+    nodePackDependencies: clone(dependencies.nodePackDependencies ?? []),
+    metadata,
+    nestedSubgraphs: {},
+    hash: '',
+  };
+}
+
+function validateGraph(descriptors: NodeDescriptor[], parsed: PlatformSnapshot): void {
+  if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) throw new Error('invalid workflow document');
+  const nodes = new Map(parsed.nodes.map((node) => [node.id, node]));
+  for (const node of parsed.nodes) descriptorFor(descriptors, node.typeId);
+  for (const edge of parsed.edges) {
+    const source = nodes.get(edge.fromNode);
+    const target = nodes.get(edge.toNode);
+    if (!source || !target) throw new Error('workflow contains an unknown node');
+    const sourcePort = port(descriptorFor(descriptors, source.typeId), 'output', edge.fromPort);
+    const targetType = inputType(target, descriptorFor(descriptors, target.typeId), edge.toPort);
+    if (!typesCompatible(targetType, sourcePort.dataType)) throw new Error('workflow contains an invalid connection');
+  }
+  if (hasCycle(parsed.edges)) throw new Error('workflow contains a cycle');
+}
+
 export function createMemoryPlatform(): EditorPlatform {
   const descriptors = clone(builtInDescriptors);
   const nodes = new Map<string, PlatformNode>();
   let edges: PlatformEdge[] = [];
   let revision = 0;
+  const rootDefinition = newDefinition(
+    { id: 'workflow', version: '1.0.0' },
+    { name: 'Workflow' },
+    { nodes: [], edges: [], revision: 0 },
+  );
+  const scopeStack: WorkflowDefinition[] = [rootDefinition];
 
-  const snapshot = (): PlatformSnapshot => ({
-    nodes: clone([...nodes.values()]),
-    edges: clone(edges),
-    revision,
-  });
+  const currentDefinition = (): WorkflowDefinition => scopeStack.at(-1)!;
+  const syncDefinition = (): void => {
+    const definition = currentDefinition();
+    definition.graph = { nodes: clone([...nodes.values()]), edges: clone(edges), revision };
+    definition.parameters = [...nodes.values()].flatMap((node) => {
+      const descriptor = descriptorFor(descriptors, node.typeId);
+      return (node.exposedParameters ?? []).flatMap((parameterId): WorkflowParameter[] => {
+        const parameter = descriptor.parameters.find((candidate) => candidate.id === parameterId);
+        if (!parameter) return [];
+        return [{
+          id: `${node.id}:${parameterId}`,
+          name: parameter.name,
+          nodeId: node.id,
+          parameterId,
+          parameterType: parameter.parameterType,
+          default: node.parameters[parameterId] ?? parameter.default,
+        }];
+      });
+    });
+    definition.hash = '';
+  };
+  const scopePath = (): ScopeBreadcrumb[] =>
+    scopeStack.map((definition, index) => ({
+      id: index === 0 ? 'root' : definition.identity.id,
+      name: definition.metadata.name,
+      version: definition.identity.version,
+      hash: definition.hash,
+    }));
+  const workflowPorts = (): { inputs: WorkflowPort[]; outputs: WorkflowPort[] } => {
+    const definition = currentDefinition();
+    return { inputs: clone(definition.inputs), outputs: clone(definition.outputs) };
+  };
+  const dependencyReport = (): DependencyReport => {
+    const definition = currentDefinition();
+    const report = emptyDependencyReport();
+    for (const dependency of definition.nodePackDependencies) {
+      const diagnostic: DependencyDiagnostic = {
+        id: dependency.id,
+        requiredVersion: dependency.version,
+        availableVersion: null,
+      };
+      report.missing.push(diagnostic);
+      report.statuses![dependency.id] = { kind: 'missing' };
+    }
+    for (const dependency of definition.subgraphDependencies) {
+      const diagnostic: DependencyDiagnostic = {
+        id: dependency.id,
+        requiredVersion: dependency.version,
+        availableVersion: null,
+      };
+      report.missing.push(diagnostic);
+      report.statuses![dependency.id] = { kind: 'missing' };
+    }
+    return report;
+  };
+  const snapshot = (): PlatformSnapshot => {
+    syncDefinition();
+    const ports = workflowPorts();
+    return {
+      nodes: clone([...nodes.values()]),
+      edges: clone(edges),
+      revision,
+      scopePath: scopePath(),
+      workflowInputs: ports.inputs,
+      workflowOutputs: ports.outputs,
+      workflowParameters: clone(currentDefinition().parameters),
+      nestedSubgraphs: Object.values(currentDefinition().nestedSubgraphs).map(summary),
+      dependencyReport: dependencyReport(),
+    };
+  };
+
+  const loadDefinitionGraph = (definition: WorkflowDefinition): void => {
+    validateGraph(descriptors, definition.graph);
+    nodes.clear();
+    for (const node of definition.graph.nodes) nodes.set(node.id, clone(node));
+    edges = clone(definition.graph.edges);
+    revision = definition.graph.revision ?? revision + 1;
+  };
 
   return {
     async nodeDescriptors() {
@@ -504,8 +696,16 @@ export function createMemoryPlatform(): EditorPlatform {
       return null;
     },
     async openImage(_path): Promise<OpenImageResult> {
-      const existing = [...nodes.keys()];
-      for (const nodeId of existing) await this.removeNode(nodeId);
+      scopeStack.splice(1);
+      rootDefinition.nestedSubgraphs = {};
+      rootDefinition.inputs = [];
+      rootDefinition.outputs = [];
+      rootDefinition.parameters = [];
+      rootDefinition.nodePackDependencies = [];
+      rootDefinition.subgraphDependencies = [];
+      nodes.clear();
+      edges = [];
+      revision = 0;
       const inputDescriptor = descriptorFor(descriptors, 'core.image-input');
       const outputDescriptor = descriptorFor(descriptors, 'core.output');
       nodes.set('input', {
@@ -624,32 +824,180 @@ export function createMemoryPlatform(): EditorPlatform {
       if (!parameter) throw new Error(`parameter '${parameterId}' does not exist on node '${nodeId}'`);
       node.exposedParameters = (node.exposedParameters ?? []).filter((id) => id !== parameterId);
       edges = edges.filter((edge) => !(edge.toNode === nodeId && edge.toPort === parameterId));
+      currentDefinition().parameters = currentDefinition().parameters.filter((item) => item.id !== `${nodeId}:${parameterId}`);
       revision += 1;
+    },
+    async exposeInput(nodeId, portId) {
+      const node = nodes.get(nodeId);
+      if (!node) throw new Error(`node '${nodeId}' does not exist`);
+      const definition = currentDefinition();
+      const exposed = portFromBoundary('Input', node, portId, descriptorFor(descriptors, node.typeId));
+      if (definition.inputs.some((port) => port.id === exposed.id)) throw new Error(`workflow port '${exposed.id}' already exists`);
+      definition.inputs.push(exposed);
+      revision += 1;
+    },
+    async exposeOutput(nodeId, portId) {
+      const node = nodes.get(nodeId);
+      if (!node) throw new Error(`node '${nodeId}' does not exist`);
+      const definition = currentDefinition();
+      const exposed = portFromBoundary('Output', node, portId, descriptorFor(descriptors, node.typeId));
+      if (definition.outputs.some((port) => port.id === exposed.id)) throw new Error(`workflow port '${exposed.id}' already exists`);
+      definition.outputs.push(exposed);
+      revision += 1;
+    },
+    async hidePort(portId) {
+      const definition = currentDefinition();
+      const before = definition.inputs.length + definition.outputs.length;
+      definition.inputs = definition.inputs.filter((port) => port.id !== portId);
+      definition.outputs = definition.outputs.filter((port) => port.id !== portId);
+      if (before === definition.inputs.length + definition.outputs.length) throw new Error(`workflow port '${portId}' does not exist`);
+      revision += 1;
+    },
+    async createSubgraph(selection: string[], options: CreateSubgraphOptions) {
+      if (selection.length === 0) throw new Error('workflow selection cannot be empty');
+      if (!options.id.trim() || !options.version.trim() || !options.metadata.name.trim()) {
+        throw new Error('subgraph identity and name cannot be empty');
+      }
+      syncDefinition();
+      const selected = new Set(selection);
+      const selectedNodes = selection.map((nodeId) => {
+        const node = nodes.get(nodeId);
+        if (!node) throw new Error(`node '${nodeId}' does not exist`);
+        return clone(node);
+      });
+      const selectedEdges = edges.filter((edge) => selected.has(edge.fromNode) && selected.has(edge.toNode));
+      const child = newDefinition(
+        { id: options.id, version: options.version },
+        clone(options.metadata),
+        { nodes: selectedNodes, edges: selectedEdges, revision: 0 },
+        {
+          nodePackDependencies: options.nodePackDependencies,
+          subgraphDependencies: options.subgraphDependencies,
+        },
+      );
+      for (const edge of edges) {
+        if (selected.has(edge.toNode) && !selected.has(edge.fromNode)) {
+          const node = nodes.get(edge.toNode)!;
+          const exposed = portFromBoundary('Input', node, edge.toPort, descriptorFor(descriptors, node.typeId));
+          if (!child.inputs.some((port) => port.id === exposed.id)) child.inputs.push(exposed);
+        }
+        if (selected.has(edge.fromNode) && !selected.has(edge.toNode)) {
+          const node = nodes.get(edge.fromNode)!;
+          const exposed = portFromBoundary('Output', node, edge.fromPort, descriptorFor(descriptors, node.typeId));
+          if (!child.outputs.some((port) => port.id === exposed.id)) child.outputs.push(exposed);
+        }
+      }
+      child.parameters = selectedNodes.flatMap((node) => {
+        const descriptor = descriptorFor(descriptors, node.typeId);
+        return (node.exposedParameters ?? []).flatMap((parameterId): WorkflowParameter[] => {
+          const parameter = descriptor.parameters.find((candidate) => candidate.id === parameterId);
+          return parameter
+            ? [{
+                id: `${node.id}:${parameterId}`,
+                name: parameter.name,
+                nodeId: node.id,
+                parameterId,
+                parameterType: parameter.parameterType,
+                default: node.parameters[parameterId] ?? parameter.default,
+              }]
+            : [];
+        });
+      });
+      child.hash = await definitionHash(child);
+      if (currentDefinition().nestedSubgraphs[child.identity.id]) {
+        throw new Error(`workflow dependency '${child.identity.id}' already exists`);
+      }
+      currentDefinition().nestedSubgraphs[child.identity.id] = child;
+      currentDefinition().subgraphDependencies.push({
+        id: child.identity.id,
+        version: child.identity.version,
+        hash: child.hash,
+      });
+      revision += 1;
+      return clone(child);
+    },
+    async openSubgraph(id: string) {
+      syncDefinition();
+      const definition = currentDefinition().nestedSubgraphs[id];
+      if (!definition) throw new Error(`subgraph '${id}' does not exist`);
+      scopeStack.push(definition);
+      loadDefinitionGraph(definition);
+    },
+    async returnToParent() {
+      if (scopeStack.length <= 1) throw new Error('already at the root workflow scope');
+      syncDefinition();
+      currentDefinition().hash = await definitionHash(currentDefinition());
+      scopeStack.pop();
+      loadDefinitionGraph(currentDefinition());
+    },
+    async saveBlueprint() {
+      syncDefinition();
+      currentDefinition().hash = await definitionHash(currentDefinition());
+      return JSON.stringify(workflowDocument(currentDefinition()), null, 2);
+    },
+    async exportBlueprint() {
+      return this.saveBlueprint();
+    },
+    async loadBlueprint(serialized) {
+      const parsed = JSON.parse(serialized) as WorkflowDefinition;
+      if (!parsed?.identity?.id || !parsed.identity.version || !parsed.metadata?.name) {
+        throw new Error('invalid blueprint document');
+      }
+      validateGraph(descriptors, parsed.graph);
+      const definition = clone(parsed);
+      definition.parameters ??= [];
+      definition.inputs ??= [];
+      definition.outputs ??= [];
+      definition.subgraphDependencies ??= [];
+      definition.nodePackDependencies ??= [];
+      definition.nestedSubgraphs ??= {};
+      definition.hash = await definitionHash(definition);
+      return definition;
+    },
+    async importBlueprint(serialized) {
+      return this.loadBlueprint(serialized);
+    },
+    async instantiateBlueprint(serialized) {
+      const definition = await this.loadBlueprint(serialized);
+      currentDefinition().graph = clone(definition.graph);
+      currentDefinition().parameters = clone(definition.parameters);
+      currentDefinition().inputs = clone(definition.inputs);
+      currentDefinition().outputs = clone(definition.outputs);
+      currentDefinition().subgraphDependencies = clone(definition.subgraphDependencies);
+      currentDefinition().nodePackDependencies = clone(definition.nodePackDependencies);
+      currentDefinition().metadata = clone(definition.metadata);
+      currentDefinition().nestedSubgraphs = clone(definition.nestedSubgraphs);
+      loadDefinitionGraph(currentDefinition());
+      revision += 1;
+    },
+    async dependencyStatus() {
+      syncDefinition();
+      return dependencyReport();
+    },
+    async workflowHash() {
+      syncDefinition();
+      currentDefinition().hash = await definitionHash(currentDefinition());
+      return currentDefinition().hash;
     },
     async saveWorkflow() {
       return JSON.stringify(snapshot());
     },
     async loadWorkflow(serialized) {
       const parsed = JSON.parse(serialized) as PlatformSnapshot;
-      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-        throw new Error('invalid workflow document');
-      }
+      validateGraph(descriptors, parsed);
+      scopeStack.splice(1);
+      rootDefinition.nestedSubgraphs = {};
+      rootDefinition.inputs = [];
+      rootDefinition.outputs = [];
+      rootDefinition.parameters = [];
+      rootDefinition.nodePackDependencies = [];
+      rootDefinition.subgraphDependencies = [];
+      rootDefinition.graph = clone(parsed);
       nodes.clear();
-      for (const node of parsed.nodes) {
-        descriptorFor(descriptors, node.typeId);
-        nodes.set(node.id, { ...clone(node), exposedParameters: clone(node.exposedParameters ?? []) });
-      }
+      for (const node of parsed.nodes) nodes.set(node.id, { ...clone(node), exposedParameters: clone(node.exposedParameters ?? []) });
       edges = clone(parsed.edges);
-      for (const edge of edges) {
-        const source = nodes.get(edge.fromNode);
-        const target = nodes.get(edge.toNode);
-        if (!source || !target) throw new Error('workflow contains an unknown node');
-        const sourcePort = port(descriptorFor(descriptors, source.typeId), 'output', edge.fromPort);
-        const targetType = inputType(target, descriptorFor(descriptors, target.typeId), edge.toPort);
-        if (!typesCompatible(targetType, sourcePort.dataType)) throw new Error('workflow contains an invalid connection');
-      }
-      if (hasCycle(edges)) throw new Error('workflow contains a cycle');
       revision += 1;
+      syncDefinition();
     },
   };
 }

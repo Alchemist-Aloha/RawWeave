@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
-import type { OpenImageResult, ParameterValue } from './editor/types';
+import type { OpenImageResult, ParameterValue, WorkflowMetadata } from './editor/types';
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
@@ -21,12 +21,12 @@ import { createPreviewTransport } from './platform/preview';
 
 const nodeTypes = { rawweave: GraphNode };
 
-function downloadWorkflow(contents: string): void {
+function downloadWorkflow(contents: string, filename = 'rawweave-workflow.json'): void {
   const blob = new Blob([contents], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'rawweave-workflow.json';
+  link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -104,13 +104,70 @@ function SourceMetadata({ source }: { source: OpenImageResult | null }) {
   );
 }
 
+function SubgraphForm({
+  onCancel,
+  onCreate,
+}: {
+  onCancel: () => void;
+  onCreate: (options: { id: string; version: string; metadata: WorkflowMetadata }) => void;
+}) {
+  const [id, setId] = useState('my-subgraph');
+  const [version, setVersion] = useState('1.0.0');
+  const [name, setName] = useState('My Subgraph');
+  const [description, setDescription] = useState('');
+  return (
+    <form className="subgraph-form" onSubmit={(event) => {
+      event.preventDefault();
+      onCreate({ id: id.trim(), version: version.trim(), metadata: { name: name.trim(), description } });
+    }}>
+      <div className="subgraph-form__heading">
+        <div>
+          <span className="eyebrow">Reusable component</span>
+          <strong>Create subgraph from selection</strong>
+        </div>
+        <button className="icon-button" onClick={onCancel} type="button">×</button>
+      </div>
+      <div className="subgraph-form__fields">
+        <label>Identity<input required value={id} onChange={(event) => setId(event.target.value)} /></label>
+        <label>Version<input required value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+        <label>Name<input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label>Description<input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+      </div>
+      <div className="subgraph-form__actions">
+        <button className="button button--quiet" onClick={onCancel} type="button">Cancel</button>
+        <button className="button button--primary" type="submit">Create and open</button>
+      </div>
+    </form>
+  );
+}
+
+function DependencySummary({
+  report,
+  hash,
+}: {
+  report: EditorController['state']['dependencyReport'];
+  hash: string | null;
+}) {
+  if (!report) return <span className="canvas-panel__meta">Checking dependencies…</span>;
+  const problemCount = report.missing.length + report.mismatched.length + report.disabledNodes.length;
+  return (
+    <div className={`workflow-health${problemCount ? ' workflow-health--warning' : ''}`} title={hash ?? 'Hash unavailable'}>
+      <span className="workflow-health__dot" />
+      <span>{problemCount ? `${problemCount} dependency issue${problemCount === 1 ? '' : 's'}` : 'Dependencies ready'}</span>
+      {hash && <code>#{hash.slice(0, 12)}</code>}
+    </div>
+  );
+}
+
 export default function App() {
   const [platform] = useState(() => createPlatform());
   const [controller] = useState(() => new EditorController(platform));
   const [viewerController] = useState(() => new ViewerController(createPreviewTransport()));
   const [, setRevision] = useState(0);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -127,9 +184,9 @@ export default function App() {
         type: 'rawweave',
         position: node.position,
         data: { node },
-        selected: node.id === controller.state.selectedNodeId,
+        selected: controller.state.selectedNodeIds.includes(node.id),
       })),
-    [controller, controller.state.nodes, controller.state.selectedNodeId],
+    [controller, controller.state.nodes, controller.state.selectedNodeIds],
   );
   const flowEdges = useMemo<Edge[]>(
     () =>
@@ -211,6 +268,85 @@ export default function App() {
     [controller, selectedNode],
   );
 
+  const onToggleInput = useCallback(
+    (nodeId: string, portId: string, direction: 'Input' | 'Output', exposed: boolean) => {
+      const action = exposed
+        ? direction === 'Input'
+          ? controller.exposeInput(nodeId, portId)
+          : controller.exposeOutput(nodeId, portId)
+        : controller.hidePort(`${direction === 'Input' ? 'input' : 'output'}:${nodeId}:${portId}`);
+      void action.catch(() => undefined);
+    },
+    [controller],
+  );
+
+  const createSubgraph = useCallback(
+    (options: { id: string; version: string; metadata: WorkflowMetadata }) => {
+      void controller
+        .createSubgraphFromSelection(controller.state.selectedNodeIds, options)
+        .then(() => setShowSubgraphForm(false))
+        .catch(() => undefined);
+    },
+    [controller],
+  );
+
+  const loadBlueprint = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = '';
+      if (!file) return;
+      await controller.importBlueprint(await file.text()).catch(() => undefined);
+    },
+    [controller],
+  );
+
+  const navigateToScope = useCallback(
+    async (index: number) => {
+      while (controller.state.scopePath.length - 1 > index) {
+        await controller.returnToParent().catch(() => undefined);
+      }
+    },
+    [controller],
+  );
+
+  const openNestedSubgraph = useCallback(
+    (id: string) => {
+      void controller.openSubgraph(id).catch(() => undefined);
+    },
+    [controller],
+  );
+
+  const onSelectionChange = useCallback(
+    ({ nodes }: { nodes: Node[] }) => controller.selectNodes(nodes.map((node) => node.id)),
+    [controller],
+  );
+
+  const toggleNodeSelection = useCallback(
+    (event: React.MouseEvent, nodeId: string) => {
+      if (!event.metaKey && !event.ctrlKey && !event.shiftKey) {
+        controller.selectNode(nodeId);
+        return;
+      }
+      const selected = new Set(controller.state.selectedNodeIds);
+      if (selected.has(nodeId)) selected.delete(nodeId);
+      else selected.add(nodeId);
+      controller.selectNodes([...selected]);
+    },
+    [controller],
+  );
+
+  const blueprintAction = useCallback(
+    async (action: 'save' | 'export') => {
+      const serialized = action === 'save' ? await controller.saveBlueprint() : await controller.exportBlueprint();
+      downloadWorkflow(serialized, `rawweave-blueprint-${action}.json`);
+    },
+    [controller],
+  );
+
+  const instantiateBlueprint = useCallback(() => {
+    void controller.instantiateBlueprint().catch(() => undefined);
+  }, [controller]);
+
   const loadFile = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -281,6 +417,42 @@ export default function App() {
           >
             Save workflow
           </button>
+          <button
+            className="button button--quiet"
+            onClick={() => blueprintInput.current?.click()}
+            type="button"
+          >
+            Import blueprint
+          </button>
+          <button
+            className="button button--quiet"
+            onClick={() => void blueprintAction('save').catch(() => undefined)}
+            type="button"
+          >
+            Save blueprint
+          </button>
+          <button
+            className="button button--quiet"
+            onClick={() => void blueprintAction('export').catch(() => undefined)}
+            type="button"
+          >
+            Export blueprint
+          </button>
+          <button
+            className="button button--quiet"
+            disabled={!controller.state.blueprint}
+            onClick={instantiateBlueprint}
+            type="button"
+          >
+            Instantiate
+          </button>
+          <input
+            accept="application/json,.json"
+            className="sr-only"
+            onChange={loadBlueprint}
+            ref={blueprintInput}
+            type="file"
+          />
           <input
             accept={IMAGE_ACCEPT}
             className="sr-only"
@@ -304,15 +476,34 @@ export default function App() {
         <NodeLibrary
           descriptors={controller.state.descriptors}
           onAdd={(typeId) => void controller.createNode(typeId).catch(() => undefined)}
+          onCreateSubgraph={() => setShowSubgraphForm(true)}
+          selectedCount={controller.state.selectedNodeIds.length}
         />
         <section className="canvas-panel">
           <div className="canvas-panel__toolbar">
-            <div>
-              <span className="eyebrow">Untitled workflow</span>
-              <strong>Composition canvas</strong>
+            <div className="scope-header">
+              <span className="eyebrow">Workflow scope</span>
+              <nav className="breadcrumbs" aria-label="Workflow breadcrumbs">
+                {controller.state.scopePath.map((scope, index) => (
+                  <span className="breadcrumb" key={`${scope.id}-${index}`}>
+                    <button
+                      className={index === controller.state.scopePath.length - 1 ? 'is-current' : ''}
+                      disabled={index === controller.state.scopePath.length - 1}
+                      onClick={() => void navigateToScope(index)}
+                      type="button"
+                    >
+                      {scope.name}
+                    </button>
+                    {index < controller.state.scopePath.length - 1 && <span aria-hidden="true">/</span>}
+                  </span>
+                ))}
+              </nav>
             </div>
-            <div className="canvas-panel__meta">
-              {controller.state.nodes.length} nodes&nbsp; · &nbsp;{controller.state.edges.length} links
+            <div className="canvas-panel__status">
+              <span className="canvas-panel__meta">
+                {controller.state.nodes.length} nodes&nbsp; · &nbsp;{controller.state.edges.length} links
+              </span>
+              <DependencySummary report={controller.state.dependencyReport} hash={controller.state.workflowHash} />
             </div>
           </div>
           <div className="flow-canvas">

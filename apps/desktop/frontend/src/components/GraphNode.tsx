@@ -22,8 +22,13 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
     ...exposedPorts,
   ];
   return (
-    <div className={`graph-node${selected ? ' graph-node--selected' : ''}`}>
-      <div className="graph-node__title">{node.descriptor.name}</div>
+    <div aria-label={`${node.descriptor.name} node`} className={`graph-node${selected ? ' graph-node--selected' : ''}`}>
+      <div className="graph-node__title-row">
+        <div className="graph-node__title">{node.descriptor.name}</div>
+        {node.descriptor.capabilities?.[0] && (
+          <span className="graph-node__badge">{node.descriptor.capabilities[0]}</span>
+        )}
+      </div>
       <div className="graph-node__type">{node.typeId}</div>
       <div className="graph-node__ports">
         <div className="graph-node__port-column">

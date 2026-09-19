@@ -255,4 +255,79 @@ describe('editor controller', () => {
     expect(editor.state.nodes.every((node) => !node.typeId.startsWith('raw.'))).toBe(true);
     expect(editor.state.edges).toHaveLength(1);
   });
+
+  it('creates a reusable subgraph from a multi-selection and navigates its nested scope', async () => {
+    const editor = await controller();
+    await editor.createNode('core.image-input', 'input');
+    await editor.createNode('core.exposure', 'exposure');
+    await editor.createNode('core.output', 'output');
+    await editor.connect('input', 'image', 'exposure', 'image');
+    await editor.connect('exposure', 'image', 'output', 'image');
+
+    const definition = await editor.createSubgraphFromSelection(['input', 'exposure'], {
+      id: 'raw-development',
+      version: '1.0.0',
+      metadata: { name: 'RAW Development' },
+      nodePackDependencies: [{ id: 'missing-pack', version: '2.0.0' }],
+    });
+
+    expect(definition.identity).toEqual({ id: 'raw-development', version: '1.0.0' });
+    expect(definition.inputs.map((port) => port.id)).toEqual([]);
+    expect(definition.outputs.map((port) => port.id)).toEqual(['output:exposure:image']);
+    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['root', 'raw-development']);
+    expect(editor.state.nodes.map((node) => node.id)).toEqual(['input', 'exposure']);
+    expect(editor.state.workflowHash).toMatch(/^[a-f0-9]{16,64}$/);
+    expect(editor.state.dependencyReport?.missing).toEqual([
+      expect.objectContaining({ id: 'missing-pack', requiredVersion: '2.0.0' }),
+    ]);
+
+    await editor.returnToParent();
+    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['root']);
+    expect(editor.state.nodes.map((node) => node.id)).toEqual(['input', 'exposure', 'output']);
+  });
+
+  it('exposes ports and parameters inside a nested scope without losing literal values', async () => {
+    const editor = await controller();
+    await editor.createNode('core.exposure', 'exposure');
+    const definition = await editor.createSubgraphFromSelection(['exposure'], {
+      id: 'exposure-block',
+      version: '1.0.0',
+      metadata: { name: 'Exposure block' },
+    });
+
+    await editor.exposeInput('exposure', 'image');
+    await editor.exposeOutput('exposure', 'image');
+    await editor.exposeParameter('exposure', 'exposure');
+    await editor.setParameter('exposure', 'exposure', 1.5);
+
+    expect(editor.state.workflowInputs.map((port) => port.id)).toEqual(['input:exposure:image']);
+    expect(editor.state.workflowOutputs.map((port) => port.id)).toEqual(['output:exposure:image']);
+    expect(editor.state.workflowParameters.map((parameter) => parameter.id)).toEqual(['exposure:exposure']);
+    expect(editor.state.nodes[0].parameters.exposure).toBe(1.5);
+
+    await editor.hidePort('input:exposure:image');
+    expect(editor.state.workflowInputs).toHaveLength(0);
+    expect(definition.identity.id).toBe('exposure-block');
+  });
+
+  it('round-trips a blueprint, instantiates it, and keeps a stable hash until graph changes', async () => {
+    const editor = await controller();
+    await editor.createNode('core.image-input', 'input');
+    await editor.createNode('core.output', 'output');
+    await editor.connect('input', 'image', 'output', 'image');
+
+    const firstHash = editor.state.workflowHash;
+    const exported = await editor.exportBlueprint();
+    expect(await editor.saveBlueprint()).toBe(exported);
+
+    const reopened = await controller();
+    await reopened.importBlueprint(exported);
+    expect(reopened.state.blueprint?.identity.id).toBe('workflow');
+    await reopened.instantiateBlueprint();
+    expect(reopened.state.nodes.map((node) => node.id)).toEqual(['input', 'output']);
+    expect(reopened.state.workflowHash).toBe(firstHash);
+
+    await reopened.setParameter('output', 'missing', 'value').catch(() => undefined);
+    expect(reopened.state.workflowHash).toBe(firstHash);
+  });
 });

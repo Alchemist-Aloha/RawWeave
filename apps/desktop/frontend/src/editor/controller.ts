@@ -7,6 +7,8 @@ import type {
   OpenImageResult,
   ParameterValue,
   Position,
+  CreateSubgraphOptions,
+  WorkflowDefinition,
 } from './types';
 
 interface WorkflowDocument {
@@ -33,12 +35,22 @@ export class EditorController {
     revision: 0,
     source: null,
     selectedNodeId: null,
+    selectedNodeIds: [],
+    scopePath: [{ id: 'root', name: 'Workflow', version: '1.0.0' }],
+    workflowInputs: [],
+    workflowOutputs: [],
+    workflowParameters: [],
+    nestedSubgraphs: [],
+    workflowHash: null,
+    dependencyReport: null,
+    blueprint: null,
     error: null,
     notification: null,
   };
 
   private readonly listeners = new Set<Listener>();
   private readonly positions = new Map<string, Position>();
+  private blueprintSerialized: string | null = null;
 
   public constructor(private readonly platform: EditorPlatform) {}
 
@@ -96,14 +108,25 @@ export class EditorController {
       target: edge.toNode,
       targetHandle: edge.toPort,
     }));
-    const selectedNodeId = nodes.some((node) => node.id === this.state.selectedNodeId)
+    const selectedNodeIds = this.state.selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+    const selectedNodeId = selectedNodeIds.includes(this.state.selectedNodeId ?? '')
       ? this.state.selectedNodeId
-      : null;
+      : selectedNodeIds.at(-1) ?? null;
+    const dependencyReport = snapshot.dependencyReport ?? (await this.platform.dependencyStatus());
+    const workflowHash = snapshot.workflowHash ?? (await this.platform.workflowHash());
     this.setState({
       nodes,
       edges,
       revision: snapshot.revision ?? this.state.revision,
       selectedNodeId,
+      selectedNodeIds,
+      scopePath: snapshot.scopePath ?? this.state.scopePath,
+      workflowInputs: snapshot.workflowInputs ?? [],
+      workflowOutputs: snapshot.workflowOutputs ?? [],
+      workflowParameters: snapshot.workflowParameters ?? [],
+      nestedSubgraphs: snapshot.nestedSubgraphs ?? [],
+      workflowHash,
+      dependencyReport,
     });
   }
 
@@ -187,8 +210,57 @@ export class EditorController {
     await this.command(() => this.platform.unexposeParameter(nodeId, parameterId));
   }
 
+  public async exposeInput(nodeId: string, portId: string): Promise<void> {
+    await this.command(() => this.platform.exposeInput(nodeId, portId));
+  }
+
+  public async exposeOutput(nodeId: string, portId: string): Promise<void> {
+    await this.command(() => this.platform.exposeOutput(nodeId, portId));
+  }
+
+  public async hidePort(portId: string): Promise<void> {
+    await this.command(() => this.platform.hidePort(portId));
+  }
+
+  public async createSubgraphFromSelection(
+    selection: string[],
+    options: CreateSubgraphOptions,
+  ): Promise<WorkflowDefinition> {
+    try {
+      const definition = await this.platform.createSubgraph(selection, options);
+      await this.platform.openSubgraph(definition.identity.id);
+      await this.refresh();
+      this.setState({
+        selectedNodeId: null,
+        selectedNodeIds: [],
+        blueprint: null,
+        notification: `Subgraph '${definition.metadata.name}' created`,
+        error: null,
+      });
+      return definition;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  public async openSubgraph(id: string): Promise<void> {
+    await this.command(() => this.platform.openSubgraph(id));
+    this.setState({ selectedNodeId: null, selectedNodeIds: [], notification: `Opened subgraph '${id}'` });
+  }
+
+  public async returnToParent(): Promise<void> {
+    await this.command(() => this.platform.returnToParent());
+    this.setState({ selectedNodeId: null, selectedNodeIds: [], notification: 'Returned to parent scope' });
+  }
+
+  public selectNodes(nodeIds: string[]): void {
+    const valid = [...new Set(nodeIds)].filter((id) => this.state.nodes.some((node) => node.id === id));
+    this.setState({ selectedNodeIds: valid, selectedNodeId: valid.at(-1) ?? null, error: null });
+  }
+
   public selectNode(nodeId: string | null): void {
-    this.setState({ selectedNodeId: nodeId, error: null });
+    this.setState({ selectedNodeId: nodeId, selectedNodeIds: nodeId ? [nodeId] : [], error: null });
   }
 
   public updateNodePosition(nodeId: string, position: Position): void {
@@ -215,6 +287,55 @@ export class EditorController {
     }
   }
 
+  public async saveBlueprint(): Promise<string> {
+    try {
+      const serialized = await this.platform.saveBlueprint();
+      this.blueprintSerialized = serialized;
+      this.setState({ error: null, notification: 'Blueprint saved' });
+      return serialized;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  public async exportBlueprint(): Promise<string> {
+    try {
+      const serialized = await this.platform.exportBlueprint();
+      this.blueprintSerialized = serialized;
+      this.setState({ error: null, notification: 'Blueprint exported' });
+      return serialized;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  public async importBlueprint(serialized: string): Promise<WorkflowDefinition> {
+    try {
+      const blueprint = await this.platform.importBlueprint(serialized);
+      this.blueprintSerialized = serialized;
+      this.setState({ blueprint, error: null, notification: `Blueprint '${blueprint.metadata.name}' imported` });
+      return blueprint;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  public async instantiateBlueprint(serialized?: string): Promise<void> {
+    try {
+      const source = serialized ?? this.blueprintSerialized;
+      if (!source) throw new Error('import a blueprint before instantiating it');
+      await this.platform.instantiateBlueprint(source);
+      await this.refresh();
+      this.setState({ error: null, notification: 'Blueprint instantiated' });
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
   public async loadWorkflow(serialized: string): Promise<void> {
     try {
       const parsed = JSON.parse(serialized) as Partial<WorkflowDocument> & { nodes?: unknown[]; edges?: unknown[] };
@@ -222,9 +343,13 @@ export class EditorController {
       const positions = parsed.positions ?? {};
       await this.platform.loadWorkflow(graph);
       await this.refresh(positions);
+      this.blueprintSerialized = null;
       const rawWorkflow = this.state.nodes.some((node) => node.typeId.startsWith('raw.'));
       this.setState({
         source: null,
+        blueprint: null,
+        selectedNodeId: null,
+        selectedNodeIds: [],
         error: null,
         notification: rawWorkflow
           ? 'RAW workflow loaded; select the source RAW file again to render previews'

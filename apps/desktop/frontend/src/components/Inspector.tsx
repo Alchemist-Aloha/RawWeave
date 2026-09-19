@@ -1,13 +1,42 @@
-import type { EditorNode, ParameterValue } from '../editor/types';
+import type { EditorNode, ParameterValue, WorkflowPort } from '../editor/types';
 
 interface InspectorProps {
   node: EditorNode | undefined;
+  selectedNodeIds?: string[];
+  workflowInputs?: WorkflowPort[];
+  workflowOutputs?: WorkflowPort[];
   onChange: (parameterId: string, value: ParameterValue) => void;
   onToggleExposed: (parameterId: string, exposed: boolean) => void;
+  onToggleInput?: (nodeId: string, portId: string, direction: 'Input' | 'Output', exposed: boolean) => void;
   onDelete: (nodeId: string) => void;
 }
 
-export function Inspector({ node, onChange, onToggleExposed, onDelete }: InspectorProps) {
+export function Inspector({
+  node,
+  selectedNodeIds = node ? [node.id] : [],
+  workflowInputs = [],
+  workflowOutputs = [],
+  onChange,
+  onToggleExposed,
+  onToggleInput,
+  onDelete,
+}: InspectorProps) {
+  if (selectedNodeIds.length > 1) {
+    return (
+      <aside className="panel panel--inspector">
+        <div className="panel__heading">
+          <div>
+            <span className="eyebrow">Inspector</span>
+            <h2>{selectedNodeIds.length} nodes selected</h2>
+          </div>
+        </div>
+        <p className="empty-state">Create a reusable subgraph from this selection, or select one node to edit its parameters.</p>
+        <ul className="selection-list">
+          {selectedNodeIds.map((id) => <li key={id}><code>{id}</code></li>)}
+        </ul>
+      </aside>
+    );
+  }
   if (!node) {
     return (
       <aside className="panel panel--inspector inspector-empty">
@@ -16,6 +45,27 @@ export function Inspector({ node, onChange, onToggleExposed, onDelete }: Inspect
       </aside>
     );
   }
+
+  const renderPortToggle = (direction: 'Input' | 'Output', portId: string, name: string) => {
+    const exposed = (direction === 'Input' ? workflowInputs : workflowOutputs).some(
+      (port) => port.id === `${direction === 'Input' ? 'input' : 'output'}:${node.id}:${portId}`,
+    );
+    return (
+      <div className="port-row" key={`${direction}:${portId}`}>
+        <span><b>{direction === 'Input' ? 'In' : 'Out'}</b> {name}</span>
+        {onToggleInput && (
+          <button
+            aria-pressed={exposed}
+            className={`port-toggle${exposed ? ' port-toggle--active' : ''}`}
+            onClick={() => onToggleInput(node.id, portId, direction, !exposed)}
+            type="button"
+          >
+            {exposed ? 'Hide' : 'Expose'}
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <aside className="panel panel--inspector">
@@ -38,6 +88,13 @@ export function Inspector({ node, onChange, onToggleExposed, onDelete }: Inspect
         <span>{node.id}</span>
         <code>{node.typeId}</code>
       </div>
+      {(node.descriptor.inputs.length > 0 || node.descriptor.outputs.length > 0) && (
+        <section className="inspector__ports" aria-label="Workflow ports">
+          <span className="eyebrow">Workflow ports</span>
+          {node.descriptor.inputs.map((port) => renderPortToggle('Input', port.id, port.name))}
+          {node.descriptor.outputs.map((port) => renderPortToggle('Output', port.id, port.name))}
+        </section>
+      )}
       <div className="parameter-list">
         {node.descriptor.parameters.map((parameter) => {
           const value = node.parameters[parameter.id] ?? parameter.default;

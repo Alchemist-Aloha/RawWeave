@@ -4,9 +4,11 @@ import type { NodeDescriptor } from '../editor/types';
 interface NodeLibraryProps {
   descriptors: NodeDescriptor[];
   onAdd: (typeId: string) => void;
+  selectedCount?: number;
+  onCreateSubgraph?: () => void;
 }
 
-export function NodeLibrary({ descriptors, onAdd }: NodeLibraryProps) {
+export function NodeLibrary({ descriptors, onAdd, selectedCount = 0, onCreateSubgraph }: NodeLibraryProps) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -51,6 +53,19 @@ export function NodeLibrary({ descriptors, onAdd }: NodeLibraryProps) {
         ))}
         {filtered.length === 0 && <p className="empty-state">No nodes match this search.</p>}
       </div>
+      {onCreateSubgraph && (
+        <div className="library-selection">
+          <span>{selectedCount ? `${selectedCount} nodes selected` : 'Select nodes to compose a subgraph'}</span>
+          <button
+            className="button button--small"
+            disabled={selectedCount === 0}
+            onClick={onCreateSubgraph}
+            type="button"
+          >
+            Create subgraph
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
