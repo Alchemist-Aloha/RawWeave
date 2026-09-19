@@ -467,6 +467,64 @@ impl Graph {
         Ok(())
     }
 
+    /// Validate graph topology and the portions of its edges whose node types
+    /// are available. This is used while importing workflows that may refer to
+    /// an optional node pack; execution still requires full validation.
+    pub(crate) fn validate_for_import(&self) -> Result<(), GraphError> {
+        let mut connected_inputs = BTreeSet::new();
+        for edge in &self.edges {
+            if !connected_inputs.insert((&edge.to_node, edge.to_port.as_str())) {
+                return Err(GraphError::InputAlreadyConnected {
+                    node: edge.to_node.clone(),
+                    port: edge.to_port.clone(),
+                });
+            }
+            let source = self
+                .nodes
+                .get(&edge.from_node)
+                .ok_or_else(|| GraphError::MissingNode(edge.from_node.clone()))?;
+            let target = self
+                .nodes
+                .get(&edge.to_node)
+                .ok_or_else(|| GraphError::MissingNode(edge.to_node.clone()))?;
+            let source_available = self.registry.descriptor(&source.type_id).is_some();
+            let target_available = self.registry.descriptor(&target.type_id).is_some();
+
+            let source_port = if source_available {
+                Some(source.descriptor.output(&edge.from_port).ok_or_else(|| {
+                    GraphError::MissingPort {
+                        node: edge.from_node.clone(),
+                        port: edge.from_port.clone(),
+                    }
+                })?)
+            } else {
+                None
+            };
+            let expected_type = if target_available {
+                Some(target_input_type(target, &edge.to_port).ok_or_else(|| {
+                    GraphError::MissingPort {
+                        node: edge.to_node.clone(),
+                        port: edge.to_port.clone(),
+                    }
+                })?)
+            } else {
+                None
+            };
+            if let (Some(source_port), Some(expected_type)) = (source_port, expected_type)
+                && !types_compatible(&expected_type, &source_port.data_type)
+            {
+                return Err(GraphError::TypeMismatch {
+                    expected: expected_type,
+                    actual: source_port.data_type.clone(),
+                });
+            }
+        }
+        if self.has_cycle() {
+            return Err(GraphError::CycleDetected);
+        }
+        Ok(())
+    }
+
     pub fn evaluate(
         &self,
         node_id: &NodeId,

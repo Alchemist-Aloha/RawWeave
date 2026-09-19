@@ -1,5 +1,8 @@
 use rawweave_core::NodeId;
-use rawweave_graph::{Graph, GraphError, WorkflowDefinition, WorkflowError, WorkflowMetadata};
+use rawweave_graph::{
+    Graph, GraphError, NodeManifest, NodePackManifest, WorkflowDefinition, WorkflowError,
+    WorkflowMetadata,
+};
 use rawweave_node_api::{
     EvaluationContext, NodeDescriptor, NodePack, NodeRegistry, ParameterValue, Value,
 };
@@ -25,6 +28,35 @@ pub fn default_registry() -> NodeRegistry {
     rawweave_raw_nodes::register_nodes(&mut registry)
         .expect("the built-in RAW node pack must register once");
     registry
+}
+
+fn manifest_for_registry(package_id: &str, registry: &NodeRegistry) -> NodePackManifest {
+    registry.descriptors().into_iter().fold(
+        NodePackManifest::new(package_id, env!("CARGO_PKG_VERSION")),
+        |manifest, descriptor| {
+            manifest.with_node(NodeManifest::new(descriptor.type_id, descriptor.version))
+        },
+    )
+}
+
+/// Manifests generated from the descriptors registered by each built-in pack.
+/// Keeping this beside registry construction prevents dependency diagnostics
+/// from drifting when a built-in node is added or removed.
+pub fn built_in_node_pack_manifests() -> Vec<NodePackManifest> {
+    let mut image_registry = NodeRegistry::default();
+    rawweave_core_image::register_nodes(&mut image_registry)
+        .expect("the built-in image node pack must register once");
+    let mut values_registry = NodeRegistry::default();
+    rawweave_core_values::register_nodes(&mut values_registry)
+        .expect("the built-in values node pack must register once");
+    let mut raw_registry = NodeRegistry::default();
+    rawweave_raw_nodes::register_nodes(&mut raw_registry)
+        .expect("the built-in RAW node pack must register once");
+    vec![
+        manifest_for_registry("core-image", &image_registry),
+        manifest_for_registry("core-values", &values_registry),
+        manifest_for_registry("raw", &raw_registry),
+    ]
 }
 
 /// Application-facing backend API. Tauri commands and other frontends call this

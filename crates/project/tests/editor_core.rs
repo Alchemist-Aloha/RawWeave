@@ -2,7 +2,7 @@ use rawweave_core::NodeId;
 use rawweave_graph::Graph;
 use rawweave_image::Image;
 use rawweave_node_api::{EvaluationContext, Inputs, NodePack, NodeRegistry, Parameters, Value};
-use rawweave_project::EditorCore;
+use rawweave_project::{EditorCore, built_in_node_pack_manifests};
 use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
 use rawweave_raw_nodes::RawNodePack;
 
@@ -57,6 +57,21 @@ fn editor_core_registers_the_backbone_node_packs() {
     ] {
         assert!(types.iter().any(|registered| registered == type_id));
     }
+}
+
+#[test]
+fn built_in_pack_manifests_describe_the_registered_nodes() {
+    let editor_types = EditorCore::new()
+        .node_descriptors()
+        .into_iter()
+        .map(|descriptor| descriptor.type_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let manifest_types = built_in_node_pack_manifests()
+        .into_iter()
+        .flat_map(|manifest| manifest.nodes.into_iter().map(|node| node.type_id))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(manifest_types, editor_types);
 }
 
 #[test]

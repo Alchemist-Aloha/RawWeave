@@ -13,7 +13,7 @@ use rawweave_graph::{
 };
 use rawweave_image::Image;
 use rawweave_node_api::{NodeDescriptor, ParameterValue};
-use rawweave_project::EditorCore;
+use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -1328,7 +1328,9 @@ fn dependency_report_for_state(
     available_subgraphs: Option<Vec<WorkflowDependencyDto>>,
 ) -> Result<DependencyReportDto, String> {
     let blueprint = current_or_flat_blueprint(state)?;
-    let packs = available_manifests(available_packs.unwrap_or_default());
+    let packs = available_packs
+        .map(available_manifests)
+        .unwrap_or_else(built_in_node_pack_manifests);
     let subgraphs = available_subgraphs
         .unwrap_or_default()
         .into_iter()
@@ -1748,6 +1750,30 @@ mod tests {
             report.statuses.get("looks-pack"),
             Some(DependencyStatusDto::VersionMismatch { required, available })
                 if required == "2.0.0" && available == "1.0.0"
+        ));
+    }
+
+    #[test]
+    fn step5_dependency_status_uses_builtin_pack_manifests() {
+        let state = AppState::default();
+        {
+            let mut editor = state.editor.lock().unwrap();
+            editor.add_node("exposure", "core.exposure").unwrap();
+        }
+        let mut blueprint = current_or_flat_blueprint(&state).unwrap();
+        blueprint
+            .add_node_pack_dependency("core-image", env!("CARGO_PKG_VERSION"))
+            .unwrap();
+        *state.blueprint.lock().unwrap() = Some(blueprint);
+
+        let report = dependency_report_for_state(&state, None, None).unwrap();
+
+        assert!(report.missing.is_empty());
+        assert!(report.mismatched.is_empty());
+        assert!(report.disabled_nodes.is_empty());
+        assert!(matches!(
+            report.statuses.get("core-image"),
+            Some(DependencyStatusDto::Available)
         ));
     }
 

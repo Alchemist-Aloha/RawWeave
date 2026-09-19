@@ -4,9 +4,9 @@ use rawweave_core::NodeId;
 use rawweave_core_image::register_nodes as register_image_nodes;
 use rawweave_core_values::register_nodes as register_value_nodes;
 use rawweave_graph::{
-    DependencyStatus, Graph, NodeManifest, NodePackManifest, PlatformRequirement, TemplateMetadata,
-    WorkflowDefinition, WorkflowError, WorkflowMetadata, WorkflowParameter, WorkflowPort,
-    WorkflowPortDirection,
+    DependencyStatus, Graph, NodeManifest, NodePackManifest, PlatformRequirement,
+    SubgraphDependency, TemplateMetadata, WorkflowDefinition, WorkflowError, WorkflowImportLimits,
+    WorkflowMetadata, WorkflowParameter, WorkflowPort, WorkflowPortDirection,
 };
 use rawweave_node_api::{NodeRegistry, ParameterType};
 
@@ -75,6 +75,34 @@ fn selected_graph_becomes_a_reusable_definition_with_boundary_ports() {
             && port.node_id == NodeId::from("exposure")
             && port.port_id == "image"
     }));
+}
+
+#[test]
+fn selected_graph_preserves_exposed_parameters_and_their_defaults() {
+    let mut graph = source_graph();
+    graph
+        .expose_parameter(&NodeId::from("exposure"), "exposure")
+        .unwrap();
+    graph
+        .set_parameter(&NodeId::from("exposure"), "exposure", 2.5_f32.into())
+        .unwrap();
+
+    let definition = WorkflowDefinition::from_selection(
+        &graph,
+        &BTreeSet::from([NodeId::from("exposure")]),
+        "looks.exposure",
+        "1.0.0",
+        WorkflowMetadata::new("Exposure Look"),
+    )
+    .unwrap();
+
+    let parameter = definition.parameters().get("exposure:exposure").unwrap();
+    assert_eq!(parameter.default, 2.5_f32.into());
+    assert!(
+        definition.graph().nodes()[&NodeId::from("exposure")]
+            .exposed_parameters
+            .contains("exposure")
+    );
 }
 
 #[test]
@@ -203,7 +231,7 @@ fn template_and_node_pack_manifests_are_serializable() {
 }
 
 #[test]
-fn invalid_workflow_import_is_rejected_instead_of_silently_substituted() {
+fn unavailable_workflow_import_is_safe_for_preflight_but_rejected_for_execution() {
     let definition = WorkflowDefinition::new(
         "looks.invalid",
         "1.0.0",
@@ -216,8 +244,164 @@ fn invalid_workflow_import_is_rejected_instead_of_silently_substituted() {
         .unwrap()
         .replace("core.output", "missing.output");
 
-    let error = WorkflowDefinition::from_json(&json, registry()).unwrap_err();
-    assert!(matches!(error, WorkflowError::Graph(_)));
+    let imported = WorkflowDefinition::from_json(&json, registry()).unwrap();
+    let report = imported.diagnose_dependencies(
+        &[NodePackManifest::new("core-image", "1.0.0")
+            .with_node(NodeManifest::new("core.image-input", 1))
+            .with_node(NodeManifest::new("core.exposure", 1))],
+        &[],
+    );
+    assert_eq!(
+        report.disabled_nodes,
+        vec![NodeId::from("output").to_string()]
+    );
+    assert!(matches!(imported.validate(), Err(WorkflowError::Graph(_))));
+}
+
+#[test]
+fn blueprint_import_limits_bytes_depth_nodes_edges_dependencies_and_metadata() {
+    let mut definition = WorkflowDefinition::new(
+        "looks.limited",
+        "1.0.0",
+        source_graph(),
+        WorkflowMetadata::new("Limited"),
+    )
+    .unwrap();
+    definition
+        .add_node_pack_dependency("pack", "1.0.0")
+        .unwrap();
+    let bytes = definition.export().unwrap();
+
+    let cases = [
+        (
+            WorkflowImportLimits {
+                max_bytes: bytes.len() - 1,
+                ..Default::default()
+            },
+            "bytes",
+        ),
+        (
+            WorkflowImportLimits {
+                max_depth: 0,
+                ..Default::default()
+            },
+            "depth",
+        ),
+        (
+            WorkflowImportLimits {
+                max_nodes: 2,
+                ..Default::default()
+            },
+            "nodes",
+        ),
+        (
+            WorkflowImportLimits {
+                max_edges: 1,
+                ..Default::default()
+            },
+            "edges",
+        ),
+        (
+            WorkflowImportLimits {
+                max_dependencies: 0,
+                ..Default::default()
+            },
+            "dependencies",
+        ),
+        (
+            WorkflowImportLimits {
+                max_metadata_bytes: 1,
+                ..Default::default()
+            },
+            "metadata",
+        ),
+    ];
+
+    for (limits, resource) in cases {
+        let error = WorkflowDefinition::import_with_limits(&bytes, registry(), limits).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowError::ImportLimitExceeded {
+                resource: actual,
+                ..
+            } if actual == resource
+        ));
+    }
+}
+
+#[test]
+fn required_subgraph_hash_does_not_accept_an_unhashed_available_candidate() {
+    let mut definition = WorkflowDefinition::new(
+        "looks.parent",
+        "1.0.0",
+        source_graph(),
+        WorkflowMetadata::new("Parent"),
+    )
+    .unwrap();
+    definition
+        .add_subgraph_dependency(SubgraphDependency::new(
+            "looks.child",
+            "1.0.0",
+            "required-hash",
+        ))
+        .unwrap();
+    let report = definition
+        .diagnose_dependencies(&[], &[SubgraphDependency::new("looks.child", "1.0.0", "")]);
+
+    assert!(matches!(
+        report.status("looks.child"),
+        Some(DependencyStatus::VersionMismatch { .. })
+    ));
+    assert_eq!(report.mismatched[0].id, "looks.child");
+}
+
+#[test]
+fn embedded_nested_subgraph_hash_is_required_and_must_match() {
+    let mut child_graph = Graph::new(registry());
+    child_graph
+        .add_node(NodeId::from("amount"), "core.constant-float")
+        .unwrap();
+    let mut child = WorkflowDefinition::new(
+        "looks.child",
+        "1.0.0",
+        child_graph,
+        WorkflowMetadata::new("Child"),
+    )
+    .unwrap();
+    child
+        .add_parameter(WorkflowParameter::new(
+            "amount",
+            "Amount",
+            NodeId::from("amount"),
+            "value",
+            ParameterType::Float,
+            1.0_f32.into(),
+        ))
+        .unwrap();
+    let mut parent = WorkflowDefinition::new(
+        "looks.parent",
+        "1.0.0",
+        source_graph(),
+        WorkflowMetadata::new("Parent"),
+    )
+    .unwrap();
+    parent.add_nested_subgraph(child).unwrap();
+
+    parent
+        .open_subgraph_mut("looks.child")
+        .unwrap()
+        .set_parameter("amount", 2.0_f32.into())
+        .unwrap();
+    assert!(matches!(
+        parent.validate(),
+        Err(WorkflowError::NestedHashMismatch { .. })
+    ));
+
+    parent.subgraph_dependencies[0].hash.clear();
+    assert!(matches!(
+        parent.validate(),
+        Err(WorkflowError::MissingNestedHash(_))
+    ));
 }
 
 #[test]

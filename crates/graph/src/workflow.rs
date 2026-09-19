@@ -353,6 +353,30 @@ impl NodePackManifest {
     }
 }
 
+/// Resource limits applied before accepting an imported blueprint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkflowImportLimits {
+    pub max_bytes: usize,
+    pub max_depth: usize,
+    pub max_nodes: usize,
+    pub max_edges: usize,
+    pub max_dependencies: usize,
+    pub max_metadata_bytes: usize,
+}
+
+impl Default for WorkflowImportLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 16 * 1024 * 1024,
+            max_depth: 32,
+            max_nodes: 10_000,
+            max_edges: 20_000,
+            max_dependencies: 2_000,
+            max_metadata_bytes: 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DependencyStatus {
     Available,
@@ -394,6 +418,19 @@ pub enum WorkflowError {
     Serialization(#[from] serde_json::Error),
     #[error("workflow export is not valid UTF-8: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
+    #[error("workflow import exceeds the {resource} limit of {limit}")]
+    ImportLimitExceeded {
+        resource: &'static str,
+        limit: usize,
+    },
+    #[error("embedded nested workflow '{0}' is missing its required hash")]
+    MissingNestedHash(String),
+    #[error("embedded nested workflow '{id}' hash does not match its dependency")]
+    NestedHashMismatch {
+        id: String,
+        expected: String,
+        actual: String,
+    },
     #[error("invalid workflow identity: {0}")]
     InvalidIdentity(String),
     #[error("workflow selection cannot be empty")]
@@ -485,6 +522,21 @@ impl WorkflowDefinition {
         }
         let selected_graph = graph.clone_selection(selection)?;
         let mut definition = Self::new(id, version, selected_graph, metadata)?;
+
+        let exposed_parameters = definition
+            .graph
+            .nodes()
+            .values()
+            .flat_map(|node| {
+                node.exposed_parameters
+                    .iter()
+                    .map(|parameter_id| (node.id.clone(), parameter_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for (node_id, parameter_id) in exposed_parameters {
+            definition.expose_parameter(&node_id, &parameter_id)?;
+        }
 
         for edge in graph.edges() {
             if selection.contains(&edge.to_node) && !selection.contains(&edge.from_node) {
@@ -837,7 +889,7 @@ impl WorkflowDefinition {
     }
 
     pub fn to_json(&self) -> Result<String, WorkflowError> {
-        self.validate()?;
+        self.validate_for_import()?;
         Ok(serde_json::to_string_pretty(self)?)
     }
 
@@ -846,15 +898,35 @@ impl WorkflowDefinition {
     }
 
     pub fn from_json(json: &str, registry: NodeRegistry) -> Result<Self, WorkflowError> {
-        let mut definition = serde_json::from_str::<Self>(json)?;
-        definition.attach_registry(&registry);
-        definition.validate()?;
-        Ok(definition)
+        Self::import(json.as_bytes(), registry)
     }
 
     pub fn import(bytes: &[u8], registry: NodeRegistry) -> Result<Self, WorkflowError> {
+        Self::import_with_limits(bytes, registry, WorkflowImportLimits::default())
+    }
+
+    pub fn preflight(bytes: &[u8], registry: NodeRegistry) -> Result<Self, WorkflowError> {
+        Self::import(bytes, registry)
+    }
+
+    pub fn import_with_limits(
+        bytes: &[u8],
+        registry: NodeRegistry,
+        limits: WorkflowImportLimits,
+    ) -> Result<Self, WorkflowError> {
+        if bytes.len() > limits.max_bytes {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "bytes",
+                limit: limits.max_bytes,
+            });
+        }
+        check_json_nesting_depth(bytes, limits.max_depth)?;
         let json = std::str::from_utf8(bytes)?;
-        Self::from_json(json, registry)
+        let mut definition = serde_json::from_str::<Self>(json)?;
+        definition.attach_registry(&registry);
+        definition.check_import_limits(&limits)?;
+        definition.validate_for_import()?;
+        Ok(definition)
     }
 
     pub fn hash(&self) -> String {
@@ -977,9 +1049,7 @@ impl WorkflowDefinition {
                     }
                 }
                 Some(candidate)
-                    if !dependency.hash.is_empty()
-                        && !candidate.hash.is_empty()
-                        && dependency.hash != candidate.hash =>
+                    if !dependency.hash.is_empty() && dependency.hash != candidate.hash =>
                 {
                     report.mismatched.push(DependencyDiagnostic {
                         id: dependency.id.clone(),
@@ -1003,25 +1073,35 @@ impl WorkflowDefinition {
             report.statuses.insert(dependency.id.clone(), status);
         }
 
-        if !available_packs.is_empty() {
-            let known_nodes: BTreeSet<&str> = available_packs
-                .iter()
-                .flat_map(|manifest| manifest.nodes.iter().map(|node| node.type_id.as_str()))
-                .collect();
-            report.disabled_nodes = self
-                .graph
-                .nodes()
-                .values()
-                .filter(|node| !known_nodes.contains(node.type_id.as_str()))
-                .map(|node| node.id.to_string())
-                .collect();
-        }
+        let known_nodes: BTreeSet<&str> = available_packs
+            .iter()
+            .flat_map(|manifest| manifest.nodes.iter().map(|node| node.type_id.as_str()))
+            .collect();
+        report.disabled_nodes = self
+            .graph
+            .nodes()
+            .values()
+            .filter(|node| !known_nodes.contains(node.type_id.as_str()))
+            .map(|node| node.id.to_string())
+            .collect();
         report
     }
 
     pub fn validate(&self) -> Result<(), WorkflowError> {
+        self.validate_with_availability(false)
+    }
+
+    fn validate_for_import(&self) -> Result<(), WorkflowError> {
+        self.validate_with_availability(true)
+    }
+
+    fn validate_with_availability(&self, allow_unavailable: bool) -> Result<(), WorkflowError> {
         WorkflowIdentity::new(self.identity.id.clone(), self.identity.version.clone())?;
-        self.graph.validate()?;
+        if allow_unavailable {
+            self.graph.validate_for_import()?;
+        } else {
+            self.graph.validate()?;
+        }
         let registry = self.graph.registry();
         for (key, node) in self.graph.nodes() {
             NodeId::try_new(key.as_str()).map_err(GraphError::InvalidNodeId)?;
@@ -1031,17 +1111,27 @@ impl WorkflowDefinition {
                     node: node.id.to_string(),
                 });
             }
-            let registered =
-                registry
-                    .descriptor(&node.type_id)
-                    .ok_or_else(|| GraphError::UnknownNodeType {
+            match registry.descriptor(&node.type_id) {
+                Some(registered) if &node.descriptor != registered => {
+                    return Err(WorkflowError::NodeDescriptorMismatch {
+                        node: node.id.clone(),
                         type_id: node.type_id.clone(),
-                    })?;
-            if &node.descriptor != registered {
-                return Err(WorkflowError::NodeDescriptorMismatch {
-                    node: node.id.clone(),
-                    type_id: node.type_id.clone(),
-                });
+                    });
+                }
+                Some(_) => {}
+                None if !allow_unavailable => {
+                    return Err(GraphError::UnknownNodeType {
+                        type_id: node.type_id.clone(),
+                    }
+                    .into());
+                }
+                None if node.descriptor.type_id != node.type_id => {
+                    return Err(WorkflowError::NodeDescriptorMismatch {
+                        node: node.id.clone(),
+                        type_id: node.type_id.clone(),
+                    });
+                }
+                None => {}
             }
             for descriptor in &node.descriptor.parameters {
                 validate_parameter_descriptor(&node.id, descriptor)?;
@@ -1123,7 +1213,93 @@ impl WorkflowDefinition {
             if dependency.version != nested.version() {
                 return Err(WorkflowError::InvalidDependency(key.clone()));
             }
-            nested.validate()?;
+            if dependency.hash.is_empty() {
+                return Err(WorkflowError::MissingNestedHash(key.clone()));
+            }
+            let actual_hash = nested.hash();
+            if dependency.hash != actual_hash {
+                return Err(WorkflowError::NestedHashMismatch {
+                    id: key.clone(),
+                    expected: dependency.hash.clone(),
+                    actual: actual_hash,
+                });
+            }
+            nested.validate_with_availability(allow_unavailable)?;
+        }
+        Ok(())
+    }
+
+    fn check_import_limits(&self, limits: &WorkflowImportLimits) -> Result<(), WorkflowError> {
+        let mut counts = ImportCounts::default();
+        self.count_import_resources(1, limits, &mut counts)?;
+        Ok(())
+    }
+
+    fn count_import_resources(
+        &self,
+        depth: usize,
+        limits: &WorkflowImportLimits,
+        counts: &mut ImportCounts,
+    ) -> Result<(), WorkflowError> {
+        if depth > limits.max_depth {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "depth",
+                limit: limits.max_depth,
+            });
+        }
+        counts.nodes = counts.nodes.checked_add(self.graph.nodes().len()).ok_or(
+            WorkflowError::ImportLimitExceeded {
+                resource: "nodes",
+                limit: limits.max_nodes,
+            },
+        )?;
+        if counts.nodes > limits.max_nodes {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "nodes",
+                limit: limits.max_nodes,
+            });
+        }
+        counts.edges = counts.edges.checked_add(self.graph.edges().len()).ok_or(
+            WorkflowError::ImportLimitExceeded {
+                resource: "edges",
+                limit: limits.max_edges,
+            },
+        )?;
+        if counts.edges > limits.max_edges {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "edges",
+                limit: limits.max_edges,
+            });
+        }
+        counts.dependencies = counts
+            .dependencies
+            .checked_add(self.node_pack_dependencies.len())
+            .and_then(|count| count.checked_add(self.subgraph_dependencies.len()))
+            .ok_or(WorkflowError::ImportLimitExceeded {
+                resource: "dependencies",
+                limit: limits.max_dependencies,
+            })?;
+        if counts.dependencies > limits.max_dependencies {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "dependencies",
+                limit: limits.max_dependencies,
+            });
+        }
+        counts.metadata_bytes = counts
+            .metadata_bytes
+            .checked_add(metadata_size(&self.metadata))
+            .ok_or(WorkflowError::ImportLimitExceeded {
+                resource: "metadata",
+                limit: limits.max_metadata_bytes,
+            })?;
+        if counts.metadata_bytes > limits.max_metadata_bytes {
+            return Err(WorkflowError::ImportLimitExceeded {
+                resource: "metadata",
+                limit: limits.max_metadata_bytes,
+            });
+        }
+        for nested in self.nested_subgraphs.values() {
+            nested.count_import_resources(depth + 1, limits, counts)?;
         }
         Ok(())
     }
@@ -1180,6 +1356,73 @@ impl WorkflowDefinition {
             .values()
             .any(|nested| nested.identity.id == id || nested.contains_nested(id))
     }
+}
+
+fn check_json_nesting_depth(
+    bytes: &[u8],
+    workflow_depth_limit: usize,
+) -> Result<(), WorkflowError> {
+    let parser_limit = workflow_depth_limit.saturating_mul(16).saturating_add(64);
+    let mut depth = 0_usize;
+    let mut maximum = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match *byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                maximum = maximum.max(depth);
+                if maximum > parser_limit {
+                    return Err(WorkflowError::ImportLimitExceeded {
+                        resource: "depth",
+                        limit: workflow_depth_limit,
+                    });
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ImportCounts {
+    nodes: usize,
+    edges: usize,
+    dependencies: usize,
+    metadata_bytes: usize,
+}
+
+fn metadata_size(metadata: &WorkflowMetadata) -> usize {
+    let optional_size = |value: &Option<String>| value.as_deref().map_or(0, str::len);
+    metadata
+        .name
+        .len()
+        .saturating_add(optional_size(&metadata.author))
+        .saturating_add(optional_size(&metadata.description))
+        .saturating_add(optional_size(&metadata.thumbnail))
+        .saturating_add(
+            metadata
+                .tags
+                .iter()
+                .map(String::len)
+                .fold(0, usize::saturating_add),
+        )
+        .saturating_add(optional_size(&metadata.license))
+        .saturating_add(optional_size(&metadata.recommended_input_type))
+        .saturating_add(optional_size(&metadata.minimum_app_version))
 }
 
 fn validate_parameter_descriptor(
