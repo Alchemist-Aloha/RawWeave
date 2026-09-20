@@ -466,27 +466,41 @@ impl MaskRenderResult {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CacheEntryKey {
+    Render(CacheKey),
+    Mask(CacheKey),
+    Member(MemberCacheKey),
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryRenderCache {
     capacity: usize,
+    max_bytes: usize,
+    bytes: usize,
     entries: HashMap<CacheKey, RenderResult>,
-    order: VecDeque<CacheKey>,
     mask_entries: HashMap<CacheKey, MaskRenderResult>,
-    mask_order: VecDeque<CacheKey>,
     member_entries: HashMap<MemberCacheKey, Arc<Image>>,
-    member_order: VecDeque<MemberCacheKey>,
+    order: VecDeque<CacheEntryKey>,
 }
 
 impl MemoryRenderCache {
+    /// Creates a count-bounded cache without changing the historical
+    /// constructor's retention behavior.
     pub fn new(capacity: usize) -> Self {
+        Self::with_limits(capacity, usize::MAX)
+    }
+
+    /// Creates a cache bounded by both entry count and payload bytes.
+    pub fn with_limits(capacity: usize, max_bytes: usize) -> Self {
         Self {
             capacity,
+            max_bytes,
+            bytes: 0,
             entries: HashMap::new(),
-            order: VecDeque::new(),
             mask_entries: HashMap::new(),
-            mask_order: VecDeque::new(),
             member_entries: HashMap::new(),
-            member_order: VecDeque::new(),
+            order: VecDeque::new(),
         }
     }
 
@@ -496,6 +510,14 @@ impl MemoryRenderCache {
 
     pub fn member_len(&self) -> usize {
         self.member_entries.len()
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -514,11 +536,19 @@ impl MemoryRenderCache {
         if self.capacity == 0 {
             return;
         }
-        if !self.member_entries.contains_key(&key) {
-            self.member_order.push_back(key.clone());
+        let payload_bytes = image_payload_bytes(&image);
+        if payload_bytes > self.max_bytes {
+            return;
         }
-        self.member_entries.insert(key, image);
-        self.trim_to_capacity();
+        let is_new = !self.member_entries.contains_key(&key);
+        if let Some(previous) = self.member_entries.insert(key.clone(), image) {
+            self.bytes = self.bytes.saturating_sub(image_payload_bytes(&previous));
+        }
+        self.bytes = self.bytes.saturating_add(payload_bytes);
+        if is_new {
+            self.order.push_back(CacheEntryKey::Member(key));
+        }
+        self.trim_to_limits();
     }
 
     pub fn invalidate_member_node(&mut self, node_id: &str) -> usize {
@@ -530,10 +560,11 @@ impl MemoryRenderCache {
             .collect::<Vec<_>>();
         let count = keys.len();
         for key in keys {
-            self.member_entries.remove(&key);
+            if let Some(image) = self.member_entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(image_payload_bytes(&image));
+            }
         }
-        self.member_order
-            .retain(|key| self.member_entries.contains_key(key));
+        self.retain_live_order_entries();
         count
     }
 
@@ -541,11 +572,21 @@ impl MemoryRenderCache {
         if self.capacity == 0 {
             return;
         }
-        if !self.entries.contains_key(&key) {
-            self.order.push_back(key.clone());
+        let payload_bytes = image_payload_bytes(&result.image);
+        if payload_bytes > self.max_bytes {
+            return;
         }
-        self.entries.insert(key, result);
-        self.trim_to_capacity();
+        let is_new = !self.entries.contains_key(&key);
+        if let Some(previous) = self.entries.insert(key.clone(), result) {
+            self.bytes = self
+                .bytes
+                .saturating_sub(image_payload_bytes(&previous.image));
+        }
+        self.bytes = self.bytes.saturating_add(payload_bytes);
+        if is_new {
+            self.order.push_back(CacheEntryKey::Render(key));
+        }
+        self.trim_to_limits();
     }
 
     pub fn insert_if_current(
@@ -578,11 +619,21 @@ impl MemoryRenderCache {
         if self.capacity == 0 {
             return;
         }
-        if !self.mask_entries.contains_key(&key) {
-            self.mask_order.push_back(key.clone());
+        let payload_bytes = mask_payload_bytes(&result.mask);
+        if payload_bytes > self.max_bytes {
+            return;
         }
-        self.mask_entries.insert(key, result);
-        self.trim_to_capacity();
+        let is_new = !self.mask_entries.contains_key(&key);
+        if let Some(previous) = self.mask_entries.insert(key.clone(), result) {
+            self.bytes = self
+                .bytes
+                .saturating_sub(mask_payload_bytes(&previous.mask));
+        }
+        self.bytes = self.bytes.saturating_add(payload_bytes);
+        if is_new {
+            self.order.push_back(CacheEntryKey::Mask(key));
+        }
+        self.trim_to_limits();
     }
 
     pub fn insert_mask_if_current(
@@ -631,10 +682,11 @@ impl MemoryRenderCache {
             .cloned()
             .collect::<Vec<_>>();
         for key in &member_keys {
-            self.member_entries.remove(key);
+            if let Some(image) = self.member_entries.remove(key) {
+                self.bytes = self.bytes.saturating_sub(image_payload_bytes(&image));
+            }
         }
-        self.member_order
-            .retain(|key| self.member_entries.contains_key(key));
+        self.retain_live_order_entries();
         count + member_keys.len()
     }
 
@@ -653,24 +705,27 @@ impl MemoryRenderCache {
             .collect::<Vec<_>>();
         let count = keys.len() + mask_keys.len();
         for key in keys {
-            self.entries.remove(&key);
+            if let Some(result) = self.entries.remove(&key) {
+                self.bytes = self
+                    .bytes
+                    .saturating_sub(image_payload_bytes(&result.image));
+            }
         }
         for key in mask_keys {
-            self.mask_entries.remove(&key);
+            if let Some(result) = self.mask_entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(mask_payload_bytes(&result.mask));
+            }
         }
-        self.order.retain(|key| self.entries.contains_key(key));
-        self.mask_order
-            .retain(|key| self.mask_entries.contains_key(key));
+        self.retain_live_order_entries();
         count
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.order.clear();
         self.mask_entries.clear();
-        self.mask_order.clear();
         self.member_entries.clear();
-        self.member_order.clear();
+        self.order.clear();
+        self.bytes = 0;
     }
 
     fn invalidate_where(&mut self, predicate: impl Fn(&CacheKey) -> bool) -> usize {
@@ -688,30 +743,69 @@ impl MemoryRenderCache {
             .collect::<Vec<_>>();
         let count = keys.len() + mask_keys.len();
         for key in keys {
-            self.entries.remove(&key);
+            if let Some(result) = self.entries.remove(&key) {
+                self.bytes = self
+                    .bytes
+                    .saturating_sub(image_payload_bytes(&result.image));
+            }
         }
         for key in mask_keys {
-            self.mask_entries.remove(&key);
+            if let Some(result) = self.mask_entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(mask_payload_bytes(&result.mask));
+            }
         }
-        self.order.retain(|key| self.entries.contains_key(key));
-        self.mask_order
-            .retain(|key| self.mask_entries.contains_key(key));
+        self.retain_live_order_entries();
         count
     }
 
-    fn trim_to_capacity(&mut self) {
-        while self.len() > self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            } else if let Some(oldest) = self.mask_order.pop_front() {
-                self.mask_entries.remove(&oldest);
-            } else if let Some(oldest) = self.member_order.pop_front() {
-                self.member_entries.remove(&oldest);
-            } else {
+    fn trim_to_limits(&mut self) {
+        while self.len() > self.capacity || self.bytes > self.max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
                 break;
+            };
+            match oldest {
+                CacheEntryKey::Render(key) => {
+                    if let Some(result) = self.entries.remove(&key) {
+                        self.bytes = self
+                            .bytes
+                            .saturating_sub(image_payload_bytes(&result.image));
+                    }
+                }
+                CacheEntryKey::Mask(key) => {
+                    if let Some(result) = self.mask_entries.remove(&key) {
+                        self.bytes = self.bytes.saturating_sub(mask_payload_bytes(&result.mask));
+                    }
+                }
+                CacheEntryKey::Member(key) => {
+                    if let Some(image) = self.member_entries.remove(&key) {
+                        self.bytes = self.bytes.saturating_sub(image_payload_bytes(&image));
+                    }
+                }
             }
         }
+        self.retain_live_order_entries();
     }
+
+    fn retain_live_order_entries(&mut self) {
+        self.order.retain(|entry| match entry {
+            CacheEntryKey::Render(key) => self.entries.contains_key(key),
+            CacheEntryKey::Mask(key) => self.mask_entries.contains_key(key),
+            CacheEntryKey::Member(key) => self.member_entries.contains_key(key),
+        });
+    }
+}
+
+fn image_payload_bytes(image: &Image) -> usize {
+    image
+        .pixels()
+        .len()
+        .saturating_mul(std::mem::size_of::<Pixel>())
+}
+
+fn mask_payload_bytes(mask: &Mask) -> usize {
+    mask.tiles().iter().fold(0, |bytes, tile| {
+        bytes.saturating_add(tile.values.len().saturating_mul(std::mem::size_of::<f32>()))
+    })
 }
 
 impl Default for MemoryRenderCache {

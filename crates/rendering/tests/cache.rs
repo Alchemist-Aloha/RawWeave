@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use rawweave_image::{Image, Region};
+use rawweave_image::{Image, Mask, Region};
 use rawweave_rendering::{
     CacheKey, CancellationToken, CollectionProgress, CollectionScheduler, GpuContext,
     GraphRevision, MemberCacheKey, MemberWork, MemoryRenderCache, PreviewQuality, RenderResult,
@@ -69,6 +69,19 @@ fn collection_scheduler_reports_the_lowest_indexed_member_failure() {
 
 fn image() -> Image {
     Image::from_pixels(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]).unwrap()
+}
+
+fn image_with_size(width: u32, height: u32) -> Image {
+    Image::from_pixels(
+        width,
+        height,
+        vec![[0.25, 0.5, 0.75, 1.0]; (width * height) as usize],
+    )
+    .unwrap()
+}
+
+fn mask() -> Mask {
+    Mask::from_values(rawweave_image::Dimensions::new(1, 1), vec![0.5]).unwrap()
 }
 
 #[test]
@@ -178,7 +191,88 @@ fn member_cache_key_distinguishes_member_stage_and_upstream_identity() {
 }
 
 #[test]
-fn member_render_cache_reuses_only_matching_member_keys() {
+fn memory_cache_evicts_oldest_entry_across_render_mask_and_member_classes() {
+    let mut cache = MemoryRenderCache::new(2);
+    let old_render_key = key(PreviewQuality::Preview);
+    let mask_key = key(PreviewQuality::Final);
+    let mut new_render_key = old_render_key.clone();
+    new_render_key.parameter_hash += 1;
+    let member_key = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
+
+    cache.insert(
+        old_render_key.clone(),
+        RenderResult::new(image(), GraphRevision::new(1)),
+    );
+    cache.insert_mask(
+        mask_key.clone(),
+        rawweave_rendering::MaskRenderResult::new(mask(), GraphRevision::new(1)),
+    );
+    cache.insert(
+        new_render_key.clone(),
+        RenderResult::new(image(), GraphRevision::new(1)),
+    );
+    assert!(cache.get(&old_render_key).is_none());
+    assert!(cache.get_mask(&mask_key).is_some());
+    assert!(cache.get(&new_render_key).is_some());
+
+    cache.insert_member(member_key.clone(), Arc::new(image()));
+
+    assert!(cache.get(&new_render_key).is_some());
+    assert!(cache.get_mask(&mask_key).is_none());
+    assert!(cache.get_member(&member_key).is_some());
+    assert_eq!(cache.len(), 2);
+}
+
+#[test]
+fn memory_cache_bounds_payload_bytes_and_discards_oversized_entries() {
+    let mut cache = MemoryRenderCache::with_limits(8, 16);
+    let oversized_key = key(PreviewQuality::Preview);
+    let first_key = key(PreviewQuality::Draft);
+    let second_key = key(PreviewQuality::Final);
+
+    cache.insert(
+        oversized_key.clone(),
+        RenderResult::new(image_with_size(2, 1), GraphRevision::new(1)),
+    );
+    assert!(cache.get(&oversized_key).is_none());
+    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.byte_len(), 0);
+
+    cache.insert(
+        first_key.clone(),
+        RenderResult::new(image(), GraphRevision::new(1)),
+    );
+    assert_eq!(cache.byte_len(), 16);
+    cache.insert(
+        second_key.clone(),
+        RenderResult::new(image(), GraphRevision::new(1)),
+    );
+
+    assert!(cache.get(&first_key).is_none());
+    assert!(cache.get(&second_key).is_some());
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.byte_len(), 16);
+}
+
+#[test]
+fn memory_cache_accounts_mask_and_member_payload_bytes() {
+    let mut cache = MemoryRenderCache::with_limits(8, 20);
+    let mask_key = key(PreviewQuality::Preview);
+    let member_key = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
+
+    cache.insert_mask(
+        mask_key.clone(),
+        rawweave_rendering::MaskRenderResult::new(mask(), GraphRevision::new(1)),
+    );
+    cache.insert_member(member_key.clone(), Arc::new(image()));
+
+    assert_eq!(cache.byte_len(), 20);
+    assert!(cache.get_mask(&mask_key).is_some());
+    assert!(cache.get_member(&member_key).is_some());
+}
+
+#[test]
+fn memory_cache_reuses_only_matching_member_keys() {
     let mut cache = MemoryRenderCache::new(8);
     let key = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
     let other = MemberCacheKey::new("imageset-map", 1, "frame-2", 11, 22);
