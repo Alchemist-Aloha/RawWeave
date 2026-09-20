@@ -19,6 +19,13 @@ interface WorkflowDocument {
 
 type Listener = (state: EditorState) => void;
 
+interface HistorySnapshot {
+  graph: string;
+  positions: Record<string, Position>;
+}
+
+const HISTORY_LIMIT = 50;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -44,13 +51,19 @@ export class EditorController {
     workflowHash: null,
     dependencyReport: null,
     blueprint: null,
+    canUndo: false,
+    canRedo: false,
     error: null,
     notification: null,
   };
 
   private readonly listeners = new Set<Listener>();
   private readonly positions = new Map<string, Position>();
+  private readonly undoHistory: HistorySnapshot[] = [];
+  private readonly redoHistory: HistorySnapshot[] = [];
   private blueprintSerialized: string | null = null;
+  private currentHistorySnapshot: HistorySnapshot | null = null;
+  private pendingPositionHistory: HistorySnapshot | null = null;
 
   public constructor(private readonly platform: EditorPlatform) {}
 
@@ -68,11 +81,78 @@ export class EditorController {
     this.publish();
   }
 
+  private cloneHistorySnapshot(snapshot: HistorySnapshot): HistorySnapshot {
+    return {
+      graph: snapshot.graph,
+      positions: Object.fromEntries(
+        Object.entries(snapshot.positions).map(([id, position]) => [id, { ...position }]),
+      ),
+    };
+  }
+
+  private async captureHistorySnapshot(): Promise<HistorySnapshot> {
+    return {
+      graph: await this.platform.saveWorkflow(),
+      positions: Object.fromEntries(
+        [...this.positions.entries()].map(([id, position]) => [id, { ...position }]),
+      ),
+    };
+  }
+
+  private historyEqual(left: HistorySnapshot, right: HistorySnapshot): boolean {
+    return left.graph === right.graph && JSON.stringify(left.positions) === JSON.stringify(right.positions);
+  }
+
+  private publishHistoryState(): void {
+    this.setState({
+      canUndo: this.undoHistory.length > 0,
+      canRedo: this.redoHistory.length > 0,
+    });
+  }
+
+  private clearHistory(): void {
+    this.undoHistory.length = 0;
+    this.redoHistory.length = 0;
+    this.pendingPositionHistory = null;
+  }
+
+  private async establishHistoryBaseline(): Promise<void> {
+    this.clearHistory();
+    this.currentHistorySnapshot = await this.captureHistorySnapshot();
+    this.publishHistoryState();
+  }
+
+  private pushHistory(before: HistorySnapshot, after: HistorySnapshot): void {
+    if (this.historyEqual(before, after)) {
+      this.currentHistorySnapshot = this.cloneHistorySnapshot(after);
+      return;
+    }
+    this.undoHistory.push(this.cloneHistorySnapshot(before));
+    if (this.undoHistory.length > HISTORY_LIMIT) this.undoHistory.shift();
+    this.redoHistory.length = 0;
+    this.currentHistorySnapshot = this.cloneHistorySnapshot(after);
+    this.publishHistoryState();
+  }
+
+  private commitPendingPositionHistory(): void {
+    if (!this.pendingPositionHistory || !this.currentHistorySnapshot) return;
+    const before = this.pendingPositionHistory;
+    const after: HistorySnapshot = {
+      graph: this.currentHistorySnapshot.graph,
+      positions: Object.fromEntries(
+        [...this.positions.entries()].map(([id, position]) => [id, { ...position }]),
+      ),
+    };
+    this.pendingPositionHistory = null;
+    this.pushHistory(before, after);
+  }
+
   public async initialize(): Promise<void> {
     try {
       const descriptors = await this.platform.nodeDescriptors();
       this.setState({ descriptors, error: null });
       await this.refresh();
+      await this.establishHistoryBaseline();
     } catch (error) {
       this.setState({ error: errorMessage(error) });
       throw error;
@@ -143,10 +223,62 @@ export class EditorController {
 
   private async command(action: () => Promise<void>): Promise<void> {
     try {
+      this.commitPendingPositionHistory();
+      const before = this.currentHistorySnapshot
+        ? this.cloneHistorySnapshot(this.currentHistorySnapshot)
+        : await this.captureHistorySnapshot();
       await action();
       await this.refresh();
+      const after = await this.captureHistorySnapshot();
+      this.pushHistory(before, after);
       this.setState({ error: null });
     } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  private async restoreHistorySnapshot(snapshot: HistorySnapshot): Promise<void> {
+    await this.platform.loadWorkflow(snapshot.graph);
+    await this.refresh(snapshot.positions);
+    this.currentHistorySnapshot = this.cloneHistorySnapshot(snapshot);
+  }
+
+  public async undo(): Promise<void> {
+    this.commitPendingPositionHistory();
+    const target = this.undoHistory.pop();
+    if (!target) return;
+    const current = this.currentHistorySnapshot
+      ? this.cloneHistorySnapshot(this.currentHistorySnapshot)
+      : await this.captureHistorySnapshot();
+    try {
+      await this.restoreHistorySnapshot(target);
+      this.redoHistory.push(current);
+      if (this.redoHistory.length > HISTORY_LIMIT) this.redoHistory.shift();
+      this.publishHistoryState();
+      this.setState({ error: null, notification: 'Undid last graph edit' });
+    } catch (error) {
+      this.undoHistory.push(target);
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
+  public async redo(): Promise<void> {
+    this.commitPendingPositionHistory();
+    const target = this.redoHistory.pop();
+    if (!target) return;
+    const current = this.currentHistorySnapshot
+      ? this.cloneHistorySnapshot(this.currentHistorySnapshot)
+      : await this.captureHistorySnapshot();
+    try {
+      await this.restoreHistorySnapshot(target);
+      this.undoHistory.push(current);
+      if (this.undoHistory.length > HISTORY_LIMIT) this.undoHistory.shift();
+      this.publishHistoryState();
+      this.setState({ error: null, notification: 'Redid graph edit' });
+    } catch (error) {
+      this.redoHistory.push(target);
       this.setState({ error: errorMessage(error), notification: null });
       throw error;
     }
@@ -156,6 +288,7 @@ export class EditorController {
     try {
       const result = await this.platform.openImage(path);
       await this.refresh();
+      await this.establishHistoryBaseline();
       this.setState({
         source: result,
         error: null,
@@ -173,6 +306,7 @@ export class EditorController {
     try {
       const result = await this.platform.openImageSet(paths, order);
       await this.refresh();
+      await this.establishHistoryBaseline();
       this.setState({
         source: result,
         error: null,
@@ -296,11 +430,15 @@ export class EditorController {
     this.setState({ selectedNodeId: nodeId, selectedNodeIds: nodeId ? [nodeId] : [], error: null });
   }
 
-  public updateNodePosition(nodeId: string, position: Position): void {
-    this.positions.set(nodeId, position);
+  public updateNodePosition(nodeId: string, position: Position, dragging = false): void {
+    if (!this.pendingPositionHistory && this.currentHistorySnapshot) {
+      this.pendingPositionHistory = this.cloneHistorySnapshot(this.currentHistorySnapshot);
+    }
+    this.positions.set(nodeId, { ...position });
     this.setState({
-      nodes: this.state.nodes.map((node) => (node.id === nodeId ? { ...node, position } : node)),
+      nodes: this.state.nodes.map((node) => (node.id === nodeId ? { ...node, position: { ...position } } : node)),
     });
+    if (!dragging) this.commitPendingPositionHistory();
   }
 
   public async saveWorkflow(): Promise<string> {
@@ -388,6 +526,7 @@ export class EditorController {
           ? 'RAW workflow loaded; select the source RAW file again to render previews'
           : 'Workflow loaded; select an image to render previews',
       });
+      await this.establishHistoryBaseline();
     } catch (error) {
       this.setState({ error: errorMessage(error), notification: null });
       throw error;

@@ -10,6 +10,17 @@ interface NodeLibraryProps {
   compatibleDataTypes?: string[];
 }
 
+function dataTypesCompatible(expected: string, actual: string): boolean {
+  const wildcards = new Set(['*', 'Any', 'core.Any', 'value.Any']);
+  if (expected === actual || wildcards.has(expected) || wildcards.has(actual)) return true;
+  return (
+    (expected === 'value.Float' && actual === 'value.Integer')
+    || (expected === 'value.Integer' && actual === 'value.Float')
+    || (expected === 'value.Condition' && actual === 'value.Boolean')
+    || (expected === 'value.Boolean' && actual === 'value.Condition')
+  );
+}
+
 export function NodeLibrary({
   descriptors,
   onAdd,
@@ -26,7 +37,8 @@ export function NodeLibrary({
       : null;
     return descriptors.filter((descriptor) => {
       if (normalized && !`${descriptor.name} ${descriptor.typeId}`.toLowerCase().includes(normalized)) return false;
-      if (compatible && !descriptor.inputs.some((input) => compatible.has(input.dataType))) return false;
+      if (compatible && !descriptor.inputs.some((input) =>
+        [...compatible].some((outputType) => dataTypesCompatible(input.dataType, outputType)))) return false;
       return true;
     });
   }, [compatibleDataTypes, descriptors, query]);
@@ -60,7 +72,7 @@ export function NodeLibrary({
       <div className="node-library__toolbar">
         <span id="node-library-hint">Enter adds the first result · ⌘K focuses search</span>
         {compatibleDataTypes && compatibleDataTypes.length > 0 && (
-          <span aria-label="Compatible nodes only" className="filter-chip">Compatible</span>
+          <span aria-label="Compatible nodes only" className="filter-chip">Compatible inputs</span>
         )}
       </div>
       <div className="node-library">

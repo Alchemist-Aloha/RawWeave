@@ -487,10 +487,30 @@ export function BrowserQueue({
                     {entry.kind === 'file' && <small>{entry.metadata ? `${entry.metadata.width} × ${entry.metadata.height}` : 'Metadata pending'}</small>}
                   </button>
                   {entry.kind === 'file' && (
-                    <div className="browser-tile__marks">
-                      <button aria-label={`Set 5 stars for ${entry.name}`} aria-pressed={entry.rating === 5} className={entry.rating === 5 ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating === 5 ? null : 5, entry.flag)} type="button">★</button>
-                      <button aria-label={`Mark ${entry.name} as pick`} aria-pressed={entry.flag === 'pick'} className={entry.flag === 'pick' ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'pick' ? 'none' : 'pick')} type="button">✓</button>
-                      <button aria-label={`Mark ${entry.name} as reject`} aria-pressed={entry.flag === 'reject'} className={entry.flag === 'reject' ? 'is-active is-reject' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'reject' ? 'none' : 'reject')} type="button">×</button>
+                    <div aria-label={`Marks for ${entry.name}`} className="browser-tile__marks">
+                      <div aria-label={`Rating for ${entry.name}`} className="browser-tile__rating" role="group">
+                        {[0, 1, 2, 3, 4, 5].map((rating) => {
+                          const activeRating = rating === 0 ? null : rating;
+                          const active = entry.rating === activeRating;
+                          return (
+                            <button
+                              aria-label={`Set ${rating} stars for ${entry.name}`}
+                              aria-pressed={active}
+                              className={active ? 'is-active' : ''}
+                              key={rating}
+                              onClick={() => mark(entry.path, active ? null : activeRating, entry.flag)}
+                              title={`${rating} star${rating === 1 ? '' : 's'}`}
+                              type="button"
+                            >
+                              {rating}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div aria-label={`Flags for ${entry.name}`} className="browser-tile__flags" role="group">
+                        <button aria-label={`Mark ${entry.name} as pick`} aria-pressed={entry.flag === 'pick'} className={entry.flag === 'pick' ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'pick' ? 'none' : 'pick')} type="button">Pick</button>
+                        <button aria-label={`Mark ${entry.name} as reject`} aria-pressed={entry.flag === 'reject'} className={entry.flag === 'reject' ? 'is-active is-reject' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'reject' ? 'none' : 'reject')} type="button">Reject</button>
+                      </div>
                     </div>
                   )}
                 </article>

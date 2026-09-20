@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ViewerController } from './controller';
 import type { PreviewRequest, PreviewResult, PreviewTarget, ViewerId } from './types';
 import type { PreviewTransport } from './transport';
@@ -60,6 +60,9 @@ function result(
 }
 
 describe('viewer controller', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   it('cancels a superseded request and rejects its stale result', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
@@ -160,6 +163,49 @@ describe('viewer controller', () => {
       tile: { x: 3, y: 2 },
       quality: 'draft',
     });
+  });
+
+  it('coalesces pointer pan updates into one preview request when the gesture ends', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.viewAt100('A');
+    viewer.setTarget('A', target('output'));
+
+    viewer.beginPan('A');
+    viewer.updatePan('A', { x: 10, y: 4 });
+    viewer.updatePan('A', { x: 24, y: -8 });
+    viewer.updatePan('A', { x: 31, y: -12 });
+
+    expect(viewer.state.panes.A.pan).toEqual({ x: 31, y: -12 });
+    expect(transport.requests).toHaveLength(1);
+
+    viewer.endPan('A');
+
+    expect(transport.requests).toHaveLength(2);
+    expect(transport.requests.at(-1)).toMatchObject({
+      region: { x: 119, y: 122, width: 100, height: 80 },
+    });
+  });
+
+  it('renders a settled pan after the debounce when no pointer-up arrives', () => {
+    vi.useFakeTimers();
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.viewAt100('A');
+    viewer.setTarget('A', target('output'));
+
+    viewer.beginPan('A');
+    viewer.updatePan('A', { x: 20, y: 10 });
+    viewer.updatePan('A', { x: 25, y: 15 });
+    expect(transport.requests).toHaveLength(1);
+
+    vi.advanceTimersByTime(100);
+
+    expect(transport.requests).toHaveLength(2);
   });
 
   it('fits the complete image by requesting the full frame at viewport resolution', () => {

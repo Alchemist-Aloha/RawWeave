@@ -276,6 +276,8 @@ export interface EditorState {
   workflowHash: string | null;
   dependencyReport: DependencyReport | null;
   blueprint: WorkflowDefinition | null;
+  canUndo: boolean;
+  canRedo: boolean;
   error: string | null;
   notification: string | null;
 }

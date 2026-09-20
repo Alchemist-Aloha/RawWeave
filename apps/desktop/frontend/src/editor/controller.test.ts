@@ -79,6 +79,37 @@ describe('editor controller', () => {
     expect(editor.state.nodes[0].typeId).toBe('core.image-input');
   });
 
+  it('undoes and redoes bounded graph edits', async () => {
+    const editor = await controller();
+
+    expect(editor.state.canUndo).toBe(false);
+    expect(editor.state.canRedo).toBe(false);
+
+    await editor.createNode('core.image-input', 'input');
+    expect(editor.state.canUndo).toBe(true);
+
+    await editor.undo();
+    expect(editor.state.nodes).toHaveLength(0);
+    expect(editor.state.canUndo).toBe(false);
+    expect(editor.state.canRedo).toBe(true);
+
+    await editor.redo();
+    expect(editor.state.nodes.map((node) => node.id)).toEqual(['input']);
+    expect(editor.state.canUndo).toBe(true);
+    expect(editor.state.canRedo).toBe(false);
+  });
+
+  it('clears redo history after a new edit', async () => {
+    const editor = await controller();
+
+    await editor.createNode('core.image-input', 'input');
+    await editor.undo();
+    await editor.createNode('core.output', 'output');
+
+    expect(editor.state.nodes.map((node) => node.id)).toEqual(['output']);
+    expect(editor.state.canRedo).toBe(false);
+  });
+
   it('connects nodes and keeps the connection in the graph view', async () => {
     const editor = await controller();
     await editor.createNode('core.image-input', 'input');

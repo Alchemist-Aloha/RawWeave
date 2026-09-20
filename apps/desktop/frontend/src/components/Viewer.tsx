@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { EditorNode, ParameterValue, SourceResult } from '../editor/types';
 import { MaskPainter } from '../mask/MaskPainter';
+import { Scopes } from './Scopes';
+import { analyzeImageElement, type ImageAnalysis } from '../viewer/analysis';
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerComparison, ViewerId, ViewerPaneState } from '../viewer/types';
 
@@ -70,13 +72,14 @@ function TargetSelect({ viewer, pane, options, controller }: {
   );
 }
 
-function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, surface = false, clippingOverlay = false, className = '', style }: {
+function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, surface = false, clippingOverlay = false, className = '', style }: {
   viewer: ViewerId;
   pane: ViewerPaneState;
   options: PreviewTarget[];
   controller: ViewerController;
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
+  onAnalysis?: (analysis: ImageAnalysis | null) => void;
   surface?: boolean;
   clippingOverlay?: boolean;
   className?: string;
@@ -122,6 +125,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         ref={stageRef}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
+          controller.beginPan(viewer);
           dragStart.current = {
             x: event.clientX,
             y: event.clientY,
@@ -131,16 +135,20 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         }}
         onPointerMove={(event) => {
           if (!dragStart.current) return;
-          controller.setPan(viewer, {
+          controller.updatePan(viewer, {
             x: dragStart.current.panX + event.clientX - dragStart.current.x,
             y: dragStart.current.panY + event.clientY - dragStart.current.y,
           });
         }}
-        onPointerUp={() => {
+        onPointerUp={(event) => {
           dragStart.current = null;
+          controller.endPan(viewer);
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
-        onPointerCancel={() => {
+        onPointerCancel={(event) => {
           dragStart.current = null;
+          controller.endPan(viewer);
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
         onWheel={(event) => {
           event.preventDefault();
@@ -152,6 +160,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
             className={`viewer-pane__image${pane.zoomMode === 'fit' ? ' viewer-pane__image--fit' : ''}`}
             height={pane.height ?? undefined}
+            onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}
             ref={imageRef}
             src={pane.imageUrl}
             style={{
@@ -224,6 +233,7 @@ function ComparisonSurface({
   blinkViewer,
   paintedNode,
   onPaintedMaskChange,
+  onAnalysis,
 }: {
   comparison: Exclude<ViewerComparison, 'side-by-side'>;
   controller: ViewerController;
@@ -234,6 +244,7 @@ function ComparisonSurface({
   blinkViewer: ViewerId;
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
+  onAnalysis?: (viewer: ViewerId, analysis: ImageAnalysis | null) => void;
 }) {
   const paneA = controller.state.panes.A;
   const paneB = controller.state.panes.B;
@@ -248,6 +259,7 @@ function ComparisonSurface({
         className="viewer-pane--comparison-a"
         clippingOverlay={clippingOverlay}
         controller={controller}
+        onAnalysis={(analysis) => onAnalysis?.('A', analysis)}
         onPaintedMaskChange={onPaintedMaskChange}
         options={options}
         paintedNode={paintedNode}
@@ -260,6 +272,7 @@ function ComparisonSurface({
         className="viewer-pane--comparison-b"
         clippingOverlay={clippingOverlay}
         controller={controller}
+        onAnalysis={(analysis) => onAnalysis?.('B', analysis)}
         onPaintedMaskChange={onPaintedMaskChange}
         options={options}
         paintedNode={paintedNode}
@@ -294,9 +307,24 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
   const options = useMemo(() => targetsFor(nodes), [nodes]);
   const [wipePosition, setWipePosition] = useState(50);
   const [blinkViewer, setBlinkViewer] = useState<ViewerId>('A');
+  const [analyses, setAnalyses] = useState<Record<ViewerId, ImageAnalysis | null>>({ A: null, B: null });
+  const handleAnalysis = useCallback((viewer: ViewerId, analysis: ImageAnalysis | null) => {
+    setAnalyses((current) => current[viewer] === analysis ? current : { ...current, [viewer]: analysis });
+  }, []);
+
+  const paneAnalysis = analyses.A ?? analyses.B;
 
   useEffect(() => controller.subscribe(() => setRender((value) => value + 1)), [controller]);
   useEffect(() => controller.setRevision(revision), [controller, revision]);
+  useEffect(() => {
+    setAnalyses((current) => {
+      const next = {
+        A: controller.state.panes.A.imageUrl ? current.A : null,
+        B: controller.state.panes.B.imageUrl ? current.B : null,
+      };
+      return next.A === current.A && next.B === current.B ? current : next;
+    });
+  }, [controller, controller.state.panes.A.imageUrl, controller.state.panes.B.imageUrl]);
   useEffect(() => {
     if (controller.state.comparison !== 'blink') {
       setBlinkViewer('A');
@@ -359,21 +387,21 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
           <Pane
             clippingOverlay={controller.state.clippingOverlay}
             controller={controller}
+            onAnalysis={(analysis) => handleAnalysis('A', analysis)}
             onPaintedMaskChange={onPaintedMaskChange}
             options={options}
             paintedNode={paintedNode}
             pane={controller.state.panes.A}
-            viewer="A"
-          />
+            viewer="A" />
           <Pane
             clippingOverlay={controller.state.clippingOverlay}
             controller={controller}
+            onAnalysis={(analysis) => handleAnalysis('B', analysis)}
             onPaintedMaskChange={onPaintedMaskChange}
             options={options}
             paintedNode={paintedNode}
             pane={controller.state.panes.B}
-            viewer="B"
-          />
+            viewer="B" />
         </div>
       ) : (
         <ComparisonSurface
@@ -381,6 +409,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
           clippingOverlay={controller.state.clippingOverlay}
           comparison={controller.state.comparison}
           controller={controller}
+          onAnalysis={handleAnalysis}
           onPaintedMaskChange={onPaintedMaskChange}
           onWipePositionChange={setWipePosition}
           options={options}
@@ -388,6 +417,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
           wipePosition={wipePosition}
         />
       )}
+      {paneAnalysis && <Scopes analysis={paneAnalysis} />}
     </section>
   );
 }

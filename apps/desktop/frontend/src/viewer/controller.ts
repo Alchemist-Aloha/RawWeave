@@ -16,6 +16,7 @@ interface ActiveRequest {
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 8;
+export const PAN_RENDER_DEBOUNCE_MS = 80;
 
 function paneState(): ViewerPaneState {
   return {
@@ -101,6 +102,8 @@ export class ViewerController {
   private readonly active = new Map<ViewerId, ActiveRequest>();
   private readonly viewports = new Map<ViewerId, ImageDimensions>();
   private readonly imageDimensions = new Map<ViewerId, ImageDimensions>();
+  private readonly panTimers = new Map<ViewerId, ReturnType<typeof setTimeout>>();
+  private readonly dirtyPans = new Set<ViewerId>();
   private sourceDimensions: ImageDimensions = DEFAULT_DIMENSIONS;
   private sequence = 0;
 
@@ -134,6 +137,7 @@ export class ViewerController {
   }
 
   private restartRequest(viewer: ViewerId): void {
+    this.cancelPanRender(viewer);
     const target = this.state.panes[viewer].target;
     if (!target) return;
     const current = this.active.get(viewer);
@@ -193,6 +197,7 @@ export class ViewerController {
       void this.transport.cancelPreview(active.request.requestId);
     }
     for (const viewer of ['A', 'B'] as ViewerId[]) {
+      this.cancelPanRender(viewer);
       this.releasePanePreview(viewer);
       this.imageDimensions.delete(viewer);
       const target = this.state.panes[viewer].target;
@@ -233,6 +238,7 @@ export class ViewerController {
   }
 
   public setTarget(viewer: ViewerId, target: PreviewTarget | null): void {
+    this.cancelPanRender(viewer);
     const current = this.active.get(viewer);
     if (current) {
       this.active.delete(viewer);
@@ -337,6 +343,7 @@ export class ViewerController {
   }
 
   public async cancel(viewer: ViewerId): Promise<void> {
+    this.cancelPanRender(viewer);
     const active = this.active.get(viewer);
     if (!active) return;
     this.active.delete(viewer);
@@ -375,7 +382,56 @@ export class ViewerController {
     this.restartRequest(viewer);
   }
 
+  private cancelPanRender(viewer: ViewerId): void {
+    const timer = this.panTimers.get(viewer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.panTimers.delete(viewer);
+    }
+    this.dirtyPans.delete(viewer);
+  }
+
+  private schedulePanRender(viewer: ViewerId): void {
+    const timer = this.panTimers.get(viewer);
+    if (timer !== undefined) clearTimeout(timer);
+    this.panTimers.set(viewer, setTimeout(() => {
+      this.panTimers.delete(viewer);
+      if (!this.dirtyPans.delete(viewer)) return;
+      this.restartRequest(viewer);
+    }, PAN_RENDER_DEBOUNCE_MS));
+  }
+
+  /** Start a gesture whose intermediate positions should stay client-side. */
+  public beginPan(viewer: ViewerId): void {
+    const timer = this.panTimers.get(viewer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.panTimers.delete(viewer);
+    }
+  }
+
+  /** Update the visual pan without restarting the preview render. */
+  public updatePan(viewer: ViewerId, pan: { x: number; y: number }): void {
+    const current = this.state.panes[viewer].pan;
+    if (current.x === pan.x && current.y === pan.y) return;
+    this.setPane(viewer, { pan });
+    this.dirtyPans.add(viewer);
+    this.schedulePanRender(viewer);
+  }
+
+  /** Commit the final gesture position immediately. */
+  public endPan(viewer: ViewerId): void {
+    const timer = this.panTimers.get(viewer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.panTimers.delete(viewer);
+    }
+    if (!this.dirtyPans.delete(viewer)) return;
+    this.restartRequest(viewer);
+  }
+
   public setPan(viewer: ViewerId, pan: { x: number; y: number }): void {
+    this.cancelPanRender(viewer);
     this.setPane(viewer, { pan });
     this.restartRequest(viewer);
   }

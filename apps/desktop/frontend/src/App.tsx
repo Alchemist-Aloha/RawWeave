@@ -6,7 +6,9 @@ import {
   ReactFlow,
   type Connection,
   type Edge,
+  type EdgeChange,
   type Node,
+  type NodeChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
@@ -72,6 +74,45 @@ const IMAGE_ACCEPT = ['image/*', ...RAW_EXTENSIONS].join(',');
 
 function unavailable(value: unknown): string {
   return value === null || value === undefined || value === '' ? 'Unavailable' : String(value);
+}
+
+export interface EditorErrorContext {
+  kind: 'editor' | 'image';
+  nodeLabel?: string;
+  dependencyIssue?: boolean;
+}
+
+export interface EditorErrorNotice {
+  title: string;
+  message: string;
+  guidance: string;
+}
+
+function redactErrorDetails(message: string): string {
+  return message
+    .replace(/(api[_-]?key|token|secret|password|authorization|credential)\s*[:=]\s*["']?[^,;\s"']+/gi, '$1=[redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, '[redacted-key]')
+    .replace(/\*{3,}/g, '[redacted]');
+}
+
+export function describeEditorError(message: string, context: EditorErrorContext): EditorErrorNotice {
+  const safeMessage = redactErrorDetails(message).trim() || 'The operation did not complete.';
+  if (context.kind === 'image') {
+    return {
+      title: 'Image source could not be opened',
+      message: safeMessage,
+      guidance: 'Check that the file is readable and supported, then retry the image operation.',
+    };
+  }
+  const nodePrefix = context.nodeLabel ? `${context.nodeLabel}: ` : '';
+  return {
+    title: 'Editor operation failed',
+    message: `${nodePrefix}${safeMessage}`,
+    guidance: context.dependencyIssue
+      ? 'Check the node dependencies or AI provider configuration, then retry the operation.'
+      : 'Review the node inputs and configuration, then retry the operation.',
+  };
 }
 
 function SourceMetadata({ source }: { source: SourceResult | null }) {
@@ -220,6 +261,7 @@ export default function App() {
   const [activeImageSetId, setActiveImageSetId] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -387,10 +429,10 @@ export default function App() {
   );
 
   const onNodesChange = useCallback(
-    (changes: any[]) => {
+    (changes: NodeChange[]) => {
       for (const change of changes) {
         if (change.type === 'position' && change.position) {
-          controller.updateNodePosition(change.id, change.position);
+          controller.updateNodePosition(change.id, change.position, change.dragging ?? false);
         } else if (change.type === 'remove') {
           void controller.removeNode(change.id).catch(() => undefined);
         }
@@ -400,7 +442,7 @@ export default function App() {
   );
 
   const onEdgesChange = useCallback(
-    (changes: any[]) => {
+    (changes: EdgeChange[]) => {
       for (const change of changes) {
         if (change.type !== 'remove') continue;
         const edge = controller.state.edges.find((candidate) => candidate.id === change.id);
@@ -667,6 +709,15 @@ export default function App() {
       } else if (action === 'save-workflow') {
         event.preventDefault();
         void controller.saveWorkflow().then(downloadWorkflow).catch(() => undefined);
+      } else if (action === 'undo') {
+        event.preventDefault();
+        void controller.undo().catch(() => undefined);
+      } else if (action === 'redo') {
+        event.preventDefault();
+        void controller.redo().catch(() => undefined);
+      } else if (action === 'toggle-shortcuts') {
+        event.preventDefault();
+        setShowShortcuts((visible) => !visible);
       } else if (action === 'delete-selection' && controller.state.selectedNodeIds.length > 0) {
         event.preventDefault();
         const selectedNodeIds = [...controller.state.selectedNodeIds];
@@ -678,6 +729,18 @@ export default function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [controller, fileInput, nodeSearchInput, openImage]);
+
+  const editorErrorNotice = controller.state.error
+    ? describeEditorError(controller.state.error, {
+      dependencyIssue: Boolean(controller.state.dependencyReport
+        && (controller.state.dependencyReport.missing.length
+          || controller.state.dependencyReport.mismatched.length
+          || controller.state.dependencyReport.disabledNodes.length)),
+      kind: 'editor',
+      nodeLabel: selectedNode?.descriptor.name,
+    })
+    : null;
+  const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
     <main className="app-shell">
@@ -702,6 +765,31 @@ export default function App() {
             type="button"
           >
             Save workflow
+          </button>
+          <button
+            className="button button--quiet"
+            disabled={!controller.state.canUndo}
+            onClick={() => void controller.undo().catch(() => undefined)}
+            type="button"
+          >
+            Undo
+          </button>
+          <button
+            className="button button--quiet"
+            disabled={!controller.state.canRedo}
+            onClick={() => void controller.redo().catch(() => undefined)}
+            type="button"
+          >
+            Redo
+          </button>
+          <button
+            aria-expanded={showShortcuts}
+            aria-haspopup="dialog"
+            className="button button--quiet"
+            onClick={() => setShowShortcuts((visible) => !visible)}
+            type="button"
+          >
+            ? Shortcuts
           </button>
           <button
             className="button button--quiet"
@@ -839,9 +927,10 @@ export default function App() {
               nodeTypes={nodeTypes}
               onConnect={onConnect}
               onEdgesChange={onEdgesChange}
-              onNodeClick={(_, node: Node) => controller.selectNode(node.id)}
+              onNodeClick={(event, node) => toggleNodeSelection(event, node.id)}
               onNodesChange={onNodesChange}
               onPaneClick={() => controller.selectNode(null)}
+              onSelectionChange={onSelectionChange}
               proOptions={{ hideAttribution: true }}
             >
               <Background color="#27303d" gap={22} size={1} />
@@ -896,11 +985,33 @@ export default function App() {
         source={controller.state.source}
       />
 
-      {controller.state.error && (
+      {showShortcuts && (
+        <div aria-label="Keyboard shortcuts" aria-modal="true" className="shortcut-dialog" role="dialog">
+          <div className="shortcut-dialog__heading">
+            <div>
+              <span className="eyebrow">Editor help</span>
+              <strong>Keyboard shortcuts</strong>
+            </div>
+            <button aria-label="Close keyboard shortcuts" className="icon-button" onClick={() => setShowShortcuts(false)} type="button">×</button>
+          </div>
+          <dl>
+            <div><dt>⌘/Ctrl K</dt><dd>Focus node search</dd></div>
+            <div><dt>⌘/Ctrl O</dt><dd>Open workflow</dd></div>
+            <div><dt>⌘/Ctrl Shift O</dt><dd>Open image</dd></div>
+            <div><dt>⌘/Ctrl S</dt><dd>Save workflow</dd></div>
+            <div><dt>⌘/Ctrl Z</dt><dd>Undo graph edit</dd></div>
+            <div><dt>⌘/Ctrl Shift Z or Y</dt><dd>Redo graph edit</dd></div>
+            <div><dt>Delete / Backspace</dt><dd>Delete selected nodes</dd></div>
+            <div><dt>?</dt><dd>Toggle this help</dd></div>
+          </dl>
+        </div>
+      )}
+      {editorErrorNotice && (
         <div className="error-toast" role="alert">
-          <strong>Command failed</strong>
-          <span>{controller.state.error}</span>
-          <button onClick={() => controller.selectNode(controller.state.selectedNodeId)} type="button">
+          <strong>{editorErrorNotice.title}</strong>
+          <span>{editorErrorNotice.message}</span>
+          <small>{editorErrorNotice.guidance}</small>
+          <button aria-label="Dismiss editor error" onClick={() => controller.selectNode(controller.state.selectedNodeId)} type="button">
             ×
           </button>
         </div>
@@ -914,11 +1025,12 @@ export default function App() {
           </button>
         </div>
       )}
-      {imageError && (
+      {imageErrorNotice && (
         <div className="error-toast" role="alert">
-          <strong>Image open failed</strong>
-          <span>{imageError}</span>
-          <button onClick={() => setImageError(null)} type="button">
+          <strong>{imageErrorNotice.title}</strong>
+          <span>{imageErrorNotice.message}</span>
+          <small>{imageErrorNotice.guidance}</small>
+          <button aria-label="Dismiss image error" onClick={() => setImageError(null)} type="button">
             ×
           </button>
         </div>

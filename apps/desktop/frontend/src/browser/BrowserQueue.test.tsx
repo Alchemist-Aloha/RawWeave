@@ -217,6 +217,32 @@ describe('BrowserQueue', () => {
     expect(changes[0]?.collections[0]?.members.map((member) => member.path)).toEqual(['/photos/one.jpg']);
   });
 
+  it('renders every rating value and accessible pick/reject controls', async () => {
+    const view = await renderQueue(fakePlatform());
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+
+    const ratingGroup = view.querySelector('[aria-label="Rating for one.jpg"]');
+    expect(ratingGroup).not.toBeNull();
+    expect([...ratingGroup?.querySelectorAll('button') ?? []].map((button) => button.textContent)).toEqual(['0', '1', '2', '3', '4', '5']);
+    for (const rating of [0, 1, 2, 3, 4, 5]) {
+      expect(view.querySelector(`[aria-label="Set ${rating} stars for one.jpg"]`)).not.toBeNull();
+    }
+    expect(view.querySelector('[aria-label="Mark one.jpg as pick"]')).not.toBeNull();
+    expect(view.querySelector('[aria-label="Mark one.jpg as reject"]')).not.toBeNull();
+
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Set 3 stars for one.jpg"]')?.click();
+    });
+    expect(view.querySelector('[aria-label="Set 3 stars for one.jpg"]')?.getAttribute('aria-pressed')).toBe('true');
+
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Set 0 stars for one.jpg"]')?.click();
+    });
+    expect(view.querySelector('[aria-label="Set 0 stars for one.jpg"]')?.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('supports list mode and fast rating shortcuts for the current preview', async () => {
     const view = await renderQueue(fakePlatform());
     await act(async () => {

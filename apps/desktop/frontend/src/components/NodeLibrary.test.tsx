@@ -53,4 +53,32 @@ describe('NodeLibrary', () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  it('treats wildcard and numeric output types as compatible inputs', async () => {
+    const wildcardDescriptor: NodeDescriptor = {
+      typeId: 'core.any-consumer', name: 'Any Consumer', version: 1,
+      inputs: [{ id: 'value', name: 'Value', dataType: 'core.Any', required: true }],
+      outputs: [], parameters: [],
+    };
+    const integerDescriptor: NodeDescriptor = {
+      typeId: 'core.integer-consumer', name: 'Integer Consumer', version: 1,
+      inputs: [{ id: 'value', name: 'Value', dataType: 'value.Integer', required: true }],
+      outputs: [], parameters: [],
+    };
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(
+      <NodeLibrary
+        descriptors={[...descriptors, wildcardDescriptor, integerDescriptor]}
+        onAdd={vi.fn()}
+        compatibleDataTypes={['core.Any', 'value.Float']}
+      />,
+    ));
+
+    expect(host.textContent).toContain('Any Consumer');
+    expect(host.textContent).toContain('Integer Consumer');
+    await act(async () => root.unmount());
+    host.remove();
+  });
 });
