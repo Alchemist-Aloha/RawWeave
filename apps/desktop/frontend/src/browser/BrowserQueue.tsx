@@ -22,7 +22,7 @@ export interface BrowserQueueProps {
   unsavedWorkflowWorkingCopy?: string | null;
   viewerTargets?: BrowserSession['viewer']['targets'];
   panelLayout?: string;
-  onSessionLoaded?: (session: BrowserSession) => void;
+  onSessionLoaded?: (session: BrowserSession) => void | Promise<void>;
   onOpenImage?: (path: string) => void | Promise<void>;
   imageSets?: ImageSetCollection[];
   activeImageSetId?: string | null;
@@ -139,7 +139,7 @@ export function BrowserQueue({
         if (cancelled) return;
         const folder = saved?.browser.currentFolder || initialFolder;
         if (saved) {
-          onSessionLoaded?.(saved);
+          await onSessionLoaded?.(saved);
           if (providedImageSets === undefined) {
             setLocalImageSets(saved.imageSets);
             setLocalActiveImageSetId(saved.activeImageSetId);

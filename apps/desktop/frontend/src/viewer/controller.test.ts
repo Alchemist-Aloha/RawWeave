@@ -74,9 +74,11 @@ describe('viewer controller', () => {
     const second = transport.requests[1];
 
     expect(transport.cancellations).toEqual([first.requestId]);
-    transport.pending.get(first.requestId)!.resolve(result(first));
+    const staleResult = result(first);
+    transport.pending.get(first.requestId)!.resolve(staleResult);
     await Promise.resolve();
     expect(viewer.state.panes.A.imageUrl).toBeNull();
+    expect(transport.releases).toEqual([staleResult.url]);
 
     transport.pending.get(second.requestId)!.resolve(result(second));
     await Promise.resolve();
@@ -91,13 +93,33 @@ describe('viewer controller', () => {
     const request = transport.requests[0];
 
     viewer.setRevision(11);
-    transport.pending.get(request.requestId)!.resolve(result(request, {}, 10));
+    const staleResult = result(request, {}, 10);
+    transport.pending.get(request.requestId)!.resolve(staleResult);
     await Promise.resolve();
 
     expect(viewer.state.panes.B.imageUrl).toBeNull();
+    expect(transport.releases).toEqual([staleResult.url]);
     expect(viewer.state.panes.B.status).toBe('loading');
     expect(transport.requests).toHaveLength(2);
     expect(transport.cancellations).toContain(request.requestId);
+  });
+
+  it('only publishes session changes for target and layout changes', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    let sessionChanges = 0;
+    viewer.subscribeSession(() => {
+      sessionChanges += 1;
+    });
+
+    viewer.setTarget('A', target('output'));
+    expect(sessionChanges).toBe(1);
+
+    viewer.updatePan('A', { x: 20, y: 10 });
+    expect(sessionChanges).toBe(1);
+
+    viewer.setLayout('split');
+    expect(sessionChanges).toBe(2);
   });
 
   it('keeps A/B targets and zoom controls independent', () => {

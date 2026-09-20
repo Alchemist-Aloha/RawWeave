@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { compatibleDataTypesForNode, describeEditorError } from './App';
-import type { EditorNode } from './editor/types';
+import { compatibleDataTypesForNode, describeEditorError, restoreBrowserSession } from './App';
+import type { EditorNode, OpenImageResult } from './editor/types';
+import { defaultSession } from './browser/session';
 
 describe('editor error UX', () => {
   it('redacts secret-shaped details and gives contextual recovery guidance', () => {
@@ -20,6 +21,49 @@ describe('editor error UX', () => {
 
     expect(notice.title).toBe('Image source could not be opened');
     expect(notice.guidance).toMatch(/retry|supported|permission/i);
+  });
+
+  it('restores the graph before opening its source and attaching viewer targets', async () => {
+    const session = defaultSession('/photos');
+    session.queue.currentPath = '/photos/current.dng';
+    session.workflow.unsavedWorkingCopy = '{"version":1,"graph":"saved-graph"}';
+    session.viewer.targets.A = { nodeId: 'display', outputPort: 'display' };
+    session.panelLayout = 'split';
+    const events: string[] = [];
+    const source: OpenImageResult = {
+      kind: 'raw',
+      width: 400,
+      height: 300,
+      revision: 7,
+      metadata: null,
+    };
+
+    await restoreBrowserSession(session, {
+      initializeEditor: async () => { events.push('initialize'); },
+      setImageSets: () => { events.push('image-sets'); },
+      setActiveImageSetId: () => { events.push('active-image-set'); },
+      setPanelLayout: () => { events.push('panel-layout'); },
+      loadWorkflow: async () => { events.push('load-workflow'); },
+      openImage: async (path) => {
+        events.push(`open-image:${path}`);
+        return source;
+      },
+      setSourceDimensions: () => { events.push('source-dimensions'); },
+      setViewerTargets: (targets) => {
+        events.push(`viewer-targets:${targets.A?.nodeId ?? 'none'}`);
+      },
+    });
+
+    expect(events).toEqual([
+      'initialize',
+      'image-sets',
+      'active-image-set',
+      'panel-layout',
+      'load-workflow',
+      'open-image:/photos/current.dng',
+      'source-dimensions',
+      'viewer-targets:display',
+    ]);
   });
 
   it('derives compatible library types from the selected node outputs', () => {

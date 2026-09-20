@@ -441,15 +441,28 @@ export class EditorController {
     if (!dragging) this.commitPendingPositionHistory();
   }
 
+  private async serializeWorkflowDocument(): Promise<string> {
+    const graph = await this.platform.saveWorkflow();
+    const document: WorkflowDocument = {
+      version: 1,
+      graph,
+      positions: Object.fromEntries(this.positions),
+    };
+    return JSON.stringify(document, null, 2);
+  }
+
+  public async serializeWorkflow(): Promise<string> {
+    try {
+      return await this.serializeWorkflowDocument();
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
   public async saveWorkflow(): Promise<string> {
     try {
-      const graph = await this.platform.saveWorkflow();
-      const document: WorkflowDocument = {
-        version: 1,
-        graph,
-        positions: Object.fromEntries(this.positions),
-      };
-      const serialized = JSON.stringify(document, null, 2);
+      const serialized = await this.serializeWorkflowDocument();
       this.setState({ error: null, notification: 'Workflow saved' });
       return serialized;
     } catch (error) {

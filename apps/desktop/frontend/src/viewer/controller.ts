@@ -99,6 +99,7 @@ export class ViewerController {
   };
 
   private readonly listeners = new Set<(state: ViewerState) => void>();
+  private readonly sessionListeners = new Set<() => void>();
   private readonly active = new Map<ViewerId, ActiveRequest>();
   private readonly viewports = new Map<ViewerId, ImageDimensions>();
   private readonly imageDimensions = new Map<ViewerId, ImageDimensions>();
@@ -114,8 +115,17 @@ export class ViewerController {
     return () => this.listeners.delete(listener);
   }
 
+  public subscribeSession(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
+  }
+
   private publish(): void {
     for (const listener of this.listeners) listener(this.state);
+  }
+
+  private publishSession(): void {
+    for (const listener of this.sessionListeners) listener();
   }
 
   private setPane(viewer: ViewerId, patch: Partial<ViewerPaneState>): void {
@@ -133,7 +143,11 @@ export class ViewerController {
 
   private releasePanePreview(viewer: ViewerId): void {
     const url = this.state.panes[viewer].imageUrl;
-    if (url) void this.transport.releasePreview(url).catch(() => undefined);
+    if (url) this.releasePreview(url);
+  }
+
+  private releasePreview(url: string): void {
+    void this.transport.releasePreview(url).catch(() => undefined);
   }
 
   private restartRequest(viewer: ViewerId): void {
@@ -219,16 +233,20 @@ export class ViewerController {
     if (layout === this.state.layout) return;
     this.state = { ...this.state, layout };
     this.publish();
+    this.publishSession();
   }
 
   public setComparison(comparison: ViewerComparison): void {
     if (comparison === this.state.comparison) return;
+    const layout = comparison === 'side-by-side' ? this.state.layout : 'side-by-side';
+    const layoutChanged = layout !== this.state.layout;
     this.state = {
       ...this.state,
       comparison,
-      layout: comparison === 'side-by-side' ? this.state.layout : 'side-by-side',
+      layout,
     };
     this.publish();
+    if (layoutChanged) this.publishSession();
   }
 
   public setClippingOverlay(enabled: boolean): void {
@@ -259,6 +277,7 @@ export class ViewerController {
       imageRegion: null,
       imageOrigin: { x: 0, y: 0 },
     });
+    this.publishSession();
     if (target) this.startRequest(viewer, target);
   }
 
@@ -303,6 +322,7 @@ export class ViewerController {
           result.requestId !== request.requestId ||
           result.revision !== this.state.currentRevision
         ) {
+          this.releasePreview(result.url);
           return;
         }
         this.active.delete(viewer);
@@ -315,7 +335,7 @@ export class ViewerController {
           this.state.panes[viewer].zoomMode === 'fit' &&
           (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip)
         ) {
-          void this.transport.releasePreview(result.url).catch(() => undefined);
+          this.releasePreview(result.url);
           this.setPane(viewer, { imageUrl: null, width: null, height: null });
           this.startRequest(viewer, target);
           return;

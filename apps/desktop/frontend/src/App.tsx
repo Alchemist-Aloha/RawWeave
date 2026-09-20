@@ -12,7 +12,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
-import type { EditorNode, ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
+import type { EditorNode, OpenImageResult, ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
@@ -23,6 +23,7 @@ import type {
 import { NodeLibrary } from './components/NodeLibrary';
 import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
+import type { ViewerState } from './viewer/types';
 import { createPreviewTransport } from './platform/preview';
 import { BrowserQueue } from './browser/BrowserQueue';
 import type { BrowserSession } from './browser/types';
@@ -39,6 +40,62 @@ import { describeOperationError, redactErrorDetails } from './ui/errors';
 import { shortcutAction } from './ui/shortcuts';
 
 const nodeTypes = { rawweave: GraphNode };
+
+type ViewerSessionState = {
+  layout: ViewerState['layout'];
+  targets: BrowserSession['viewer']['targets'];
+};
+
+export interface BrowserSessionRestoreActions {
+  initializeEditor: () => Promise<void>;
+  setImageSets: (collections: ImageSetCollection[]) => void;
+  setActiveImageSetId: (activeId: string | null) => void;
+  setPanelLayout: (layout: ViewerState['layout']) => void;
+  loadWorkflow: (serialized: string) => Promise<void>;
+  openImage: (path: string) => Promise<OpenImageResult>;
+  setSourceDimensions: (source: OpenImageResult) => void;
+  setViewerTargets: (targets: BrowserSession['viewer']['targets']) => void;
+}
+
+export async function restoreBrowserSession(
+  session: BrowserSession,
+  actions: BrowserSessionRestoreActions,
+): Promise<void> {
+  await actions.initializeEditor();
+  actions.setImageSets(session.imageSets);
+  actions.setActiveImageSetId(session.activeImageSetId);
+  if (session.panelLayout === 'side-by-side' || session.panelLayout === 'split') {
+    actions.setPanelLayout(session.panelLayout);
+  }
+  if (session.workflow.unsavedWorkingCopy) {
+    await actions.loadWorkflow(session.workflow.unsavedWorkingCopy);
+  }
+  const sourcePath = session.queue.currentPath ?? session.browser.selectedPaths.at(-1) ?? null;
+  if (!sourcePath) return;
+  const source = await actions.openImage(sourcePath);
+  actions.setSourceDimensions(source);
+  actions.setViewerTargets(session.viewer.targets);
+}
+
+function viewerSessionSnapshot(viewerController: ViewerController): ViewerSessionState {
+  return {
+    layout: viewerController.state.layout,
+    targets: {
+      A: viewerController.state.panes.A.target
+        ? {
+            nodeId: viewerController.state.panes.A.target.nodeId,
+            outputPort: viewerController.state.panes.A.target.outputPort,
+          }
+        : null,
+      B: viewerController.state.panes.B.target
+        ? {
+            nodeId: viewerController.state.panes.B.target.nodeId,
+            outputPort: viewerController.state.panes.B.target.outputPort,
+          }
+        : null,
+    },
+  };
+}
 
 function downloadWorkflow(contents: string, filename = 'rawweave-workflow.json'): void {
   const blob = new Blob([contents], { type: 'application/json' });
@@ -252,9 +309,9 @@ export default function App() {
   const [checkpointPlatform] = useState(() => createCheckpointPlatform());
   const [checkpointController] = useState(() => new CheckpointController(checkpointPlatform));
   const [, setRevision] = useState(0);
-  const [, setViewerRevision] = useState(0);
   const [, setCheckpointRevision] = useState(0);
-  const [restoredSession, setRestoredSession] = useState<BrowserSession | null>(null);
+  const [viewerSession, setViewerSession] = useState<ViewerSessionState>(() => viewerSessionSnapshot(viewerController));
+  const [unsavedWorkflowWorkingCopy, setUnsavedWorkflowWorkingCopy] = useState<string | null>(null);
   const [imageSets, setImageSets] = useState<ImageSetCollection[]>([]);
   const [activeImageSetId, setActiveImageSetId] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -264,6 +321,7 @@ export default function App() {
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const nodeSearchInput = useRef<HTMLInputElement>(null);
+  const editorInitialization = useRef<Promise<void> | null>(null);
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
   const refreshEditorDescriptors = useCallback(
@@ -271,13 +329,45 @@ export default function App() {
     [controller],
   );
 
-  useEffect(() => {
-    const unsubscribe = controller.subscribe(() => setRevision((revision) => revision + 1));
-    void controller.initialize().catch(() => undefined);
-    return unsubscribe;
+  const initializeEditor = useCallback(() => {
+    if (!editorInitialization.current) editorInitialization.current = controller.initialize();
+    return editorInitialization.current;
   }, [controller]);
 
-  useEffect(() => viewerController.subscribe(() => setViewerRevision((revision) => revision + 1)), [viewerController]);
+  useEffect(() => {
+    const unsubscribe = controller.subscribe(() => setRevision((revision) => revision + 1));
+    void initializeEditor().catch(() => undefined);
+    return unsubscribe;
+  }, [controller, initializeEditor]);
+
+  useEffect(() => viewerController.subscribeSession(() => {
+    setViewerSession(viewerSessionSnapshot(viewerController));
+  }), [viewerController]);
+
+  useEffect(() => {
+    if (controller.state.descriptors.length === 0) return;
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      void controller.serializeWorkflow()
+        .then((serialized) => {
+          if (!cancelled) setUnsavedWorkflowWorkingCopy(serialized);
+        })
+        .catch(() => undefined);
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [
+    controller,
+    controller.state.edges,
+    controller.state.nodes,
+    controller.state.revision,
+    controller.state.scopePath,
+    controller.state.workflowInputs,
+    controller.state.workflowOutputs,
+    controller.state.workflowParameters,
+  ]);
 
   useEffect(() => {
     const unsubscribe = checkpointController.subscribe(() => setCheckpointRevision((revision) => revision + 1));
@@ -499,14 +589,30 @@ export default function App() {
     }
   }, [controller]);
 
-  const onBrowserSessionLoaded = useCallback((session: BrowserSession) => {
-    setRestoredSession(session);
-    setImageSets(session.imageSets);
-    setActiveImageSetId(session.activeImageSetId);
-    if (session.panelLayout === 'side-by-side' || session.panelLayout === 'split') {
-      viewerController.setLayout(session.panelLayout);
-    }
-  }, [viewerController]);
+  const onBrowserSessionLoaded = useCallback(async (session: BrowserSession) => {
+    await restoreBrowserSession(session, {
+      initializeEditor,
+      setImageSets,
+      setActiveImageSetId,
+      setPanelLayout: (layout) => viewerController.setLayout(layout),
+      loadWorkflow: (serialized) => controller.loadWorkflow(serialized),
+      openImage: (path) => controller.openImage(path),
+      setSourceDimensions: (source) => viewerController.setSourceDimensions(source),
+      setViewerTargets: (targets) => {
+        const options = targetsFor(controller.state.nodes);
+        for (const viewer of ['A', 'B'] as const) {
+          const savedTarget = targets[viewer];
+          const target = savedTarget
+            ? options.find((option) => option.nodeId === savedTarget.nodeId && option.outputPort === savedTarget.outputPort) ?? null
+            : null;
+          const currentTarget = viewerController.state.panes[viewer].target;
+          if (currentTarget?.nodeId !== target?.nodeId || currentTarget?.outputPort !== target?.outputPort) {
+            viewerController.setTarget(viewer, target);
+          }
+        }
+      },
+    });
+  }, [controller, initializeEditor, setActiveImageSetId, setImageSets, viewerController]);
 
   const onImageSetsChange = useCallback((collections: ImageSetCollection[], activeId: string | null) => {
     setImageSets(collections);
@@ -532,29 +638,7 @@ export default function App() {
     }
   }, [activeImageSet, imageSets, onImageSetsChange]);
 
-  useEffect(() => {
-    if (!restoredSession || !controller.state.source) return;
-    const options = targetsFor(controller.state.nodes);
-    for (const viewer of ['A', 'B'] as const) {
-      const savedTarget = restoredSession.viewer.targets[viewer];
-      if (!savedTarget) continue;
-      const target = options.find((option) => option.nodeId === savedTarget.nodeId && option.outputPort === savedTarget.outputPort);
-      if (target
-        && (viewerController.state.panes[viewer].target?.nodeId !== target.nodeId
-          || viewerController.state.panes[viewer].target?.outputPort !== target.outputPort)) {
-        viewerController.setTarget(viewer, target);
-      }
-    }
-  }, [controller.state.nodes, controller.state.source, restoredSession, viewerController]);
-
-  const persistedViewerTargets = useMemo<BrowserSession['viewer']['targets']>(() => ({
-    A: viewerController.state.panes.A.target
-      ? { nodeId: viewerController.state.panes.A.target.nodeId, outputPort: viewerController.state.panes.A.target.outputPort }
-      : null,
-    B: viewerController.state.panes.B.target
-      ? { nodeId: viewerController.state.panes.B.target.nodeId, outputPort: viewerController.state.panes.B.target.outputPort }
-      : null,
-  }), [viewerController.state.panes.A.target, viewerController.state.panes.B.target]);
+  const persistedViewerTargets = viewerSession.targets;
 
   const createSubgraph = useCallback(
     (options: { id: string; version: string; metadata: WorkflowMetadata }) => {
@@ -872,7 +956,8 @@ export default function App() {
         onOpenFailedItem={(item) => openImagePath(item.sourcePath)}
         onPromoteOverrides={promoteOverrides}
         onSessionLoaded={onBrowserSessionLoaded}
-        panelLayout={viewerController.state.layout}
+        panelLayout={viewerSession.layout}
+        unsavedWorkflowWorkingCopy={unsavedWorkflowWorkingCopy}
         viewerTargets={persistedViewerTargets}
         workflowBinding={browserWorkflowBinding}
         workflowParameters={controller.state.workflowParameters}

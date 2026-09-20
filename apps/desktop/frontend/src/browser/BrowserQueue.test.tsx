@@ -6,6 +6,7 @@ import type { BrowserPlatform, BrowserState } from './controller';
 import type { QueueState } from '../queue/controller';
 import type { BrowserEntry, BrowserSession, DirectoryPage, FileOperationResult } from './types';
 import type { WorkflowParameter } from '../editor/types';
+import { defaultSession } from './session';
 
 function entry(path: string, overrides: Partial<BrowserEntry> = {}): BrowserEntry {
   const name = path.split('/').at(-1) ?? path;
@@ -121,6 +122,35 @@ describe('BrowserQueue', () => {
       viewer: { targets: { A: { nodeId: 'display', outputPort: 'display' }, B: null } },
       panelLayout: 'split',
     });
+  });
+
+  it('waits for session reattachment before restoring browser state', async () => {
+    const events: string[] = [];
+    const session = defaultSession('/photos');
+    session.queue.currentPath = '/photos/one.jpg';
+    const base = fakePlatform();
+    const platform: BrowserPlatform = {
+      ...base,
+      async loadSession() {
+        events.push('load-session');
+        return session;
+      },
+      async listDirectory(path, offset, limit) {
+        events.push('load-folder');
+        return base.listDirectory(path, offset, limit);
+      },
+    };
+
+    await renderQueue(platform, {
+      onSessionLoaded: async () => {
+        events.push('reattach-start');
+        await Promise.resolve();
+        events.push('reattach-end');
+      },
+    });
+
+    expect(events.indexOf('reattach-end')).toBeGreaterThan(events.indexOf('reattach-start'));
+    expect(events.indexOf('reattach-end')).toBeLessThan(events.indexOf('load-folder'));
   });
 
   it('shows the browser, navigates folders, and switches the selected preview', async () => {

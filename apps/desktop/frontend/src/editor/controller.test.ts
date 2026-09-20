@@ -209,6 +209,17 @@ describe('editor controller', () => {
     expect(reopened.state.edges).toHaveLength(1);
   });
 
+  it('serializes a session working copy without changing the editor notification', async () => {
+    const editor = await controller();
+    await editor.createNode('core.image-input', 'input');
+    const notification = editor.state.notification;
+
+    const serialized = await editor.serializeWorkflow();
+
+    expect(JSON.parse(serialized)).toMatchObject({ version: 1 });
+    expect(editor.state.notification).toBe(notification);
+  });
+
   it('exposes backend errors without throwing from the UI command', async () => {
     const editor = await controller();
     await editor.createNode('core.constant-float', 'constant');
