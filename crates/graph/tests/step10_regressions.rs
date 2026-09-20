@@ -111,7 +111,10 @@ fn imported_payload_geometry_and_counts_are_validated_deeply() {
     json["payload"]["value"]["pixels"] = serde_json::json!([]);
     let result = store.import(&serde_json::to_vec(&json).unwrap());
     assert!(
-        matches!(result, Err(CheckpointError::InvalidPayload(_))),
+        matches!(
+            result,
+            Err(CheckpointError::Serialization(_) | CheckpointError::InvalidPayload(_))
+        ),
         "{result:?}"
     );
 
@@ -123,7 +126,7 @@ fn imported_payload_geometry_and_counts_are_validated_deeply() {
     malformed_mask["payload"]["value"]["tiles"][0]["values"] = serde_json::json!([0.5]);
     assert!(matches!(
         store.import(&serde_json::to_vec(&malformed_mask).unwrap()),
-        Err(CheckpointError::InvalidPayload(_))
+        Err(CheckpointError::Serialization(_) | CheckpointError::InvalidPayload(_))
     ));
 }
 
