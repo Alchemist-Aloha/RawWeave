@@ -1326,6 +1326,13 @@ fn hash_stable_context(context: &EvaluationContext, hasher: &mut impl Hasher) {
         }
         None => 1_u8.hash(hasher),
     }
+    match context.source_image_set.as_ref() {
+        Some(set) => {
+            2_u8.hash(hasher);
+            hash_stable_value(&Value::ImageSet(set.clone()), hasher);
+        }
+        None => 3_u8.hash(hasher),
+    }
     match context.source_bytes.as_ref() {
         Some(bytes) => {
             2_u8.hash(hasher);
@@ -1384,6 +1391,10 @@ fn hash_stable_value(value: &Value, hasher: &mut impl Hasher) {
                 }
             }
         }
+        Value::ImageSet(set) => {
+            25_u8.hash(hasher);
+            hash_stable_image_set(set, hasher);
+        }
         _ => hash_value(value, hasher),
     }
 }
@@ -1395,6 +1406,13 @@ fn hash_evaluation_context(context: &EvaluationContext, hasher: &mut impl Hasher
             hash_image(source_image, hasher);
         }
         None => 1_u8.hash(hasher),
+    }
+    match context.source_image_set.as_ref() {
+        Some(source_image_set) => {
+            2_u8.hash(hasher);
+            hash_image_set(source_image_set, hasher);
+        }
+        None => 3_u8.hash(hasher),
     }
     match context.source_bytes.as_ref() {
         Some(source_bytes) => {
@@ -1631,6 +1649,10 @@ fn hash_value(value: &Value, hasher: &mut impl Hasher) {
             0_u8.hash(hasher);
             hash_image(image, hasher);
         }
+        Value::ImageSet(set) => {
+            25_u8.hash(hasher);
+            hash_image_set(set, hasher);
+        }
         Value::Mask(mask) => {
             19_u8.hash(hasher);
             mask.cache_identity().hash(hasher);
@@ -1866,6 +1888,54 @@ fn hash_working_space(space: &rawweave_color::WorkingSpace, hasher: &mut impl Ha
         rawweave_color::WorkingSpace::Custom(name) => {
             5_u8.hash(hasher);
             name.hash(hasher);
+        }
+    }
+}
+
+fn hash_image_set(set: &rawweave_node_api::ImageSet, hasher: &mut impl Hasher) {
+    match set.order() {
+        rawweave_node_api::ImageSetOrder::Ordered => 0_u8.hash(hasher),
+        rawweave_node_api::ImageSetOrder::Unordered => 1_u8.hash(hasher),
+    }
+    for member in set.members() {
+        member.id.hash(hasher);
+        hash_image(&member.image, hasher);
+        hash_metadata(&member.metadata, hasher);
+    }
+    hash_metadata(set.shared_metadata(), hasher);
+    match set.alignment() {
+        rawweave_node_api::AlignmentState::Unaligned => 0_u8.hash(hasher),
+        rawweave_node_api::AlignmentState::Aligned { reference_member } => {
+            1_u8.hash(hasher);
+            reference_member.hash(hasher);
+        }
+    }
+}
+
+fn hash_stable_image_set(set: &rawweave_node_api::ImageSet, hasher: &mut impl Hasher) {
+    match set.order() {
+        rawweave_node_api::ImageSetOrder::Ordered => 0_u8.hash(hasher),
+        rawweave_node_api::ImageSetOrder::Unordered => 1_u8.hash(hasher),
+    }
+    for member in set.members() {
+        member.id.hash(hasher);
+        member.image.dimensions().hash(hasher);
+        member.image.origin().hash(hasher);
+        member.image.pixel_format().hash(hasher);
+        member.image.color_metadata().hash(hasher);
+        for pixel in member.image.pixels() {
+            for channel in pixel {
+                channel.to_bits().hash(hasher);
+            }
+        }
+        hash_metadata(&member.metadata, hasher);
+    }
+    hash_metadata(set.shared_metadata(), hasher);
+    match set.alignment() {
+        rawweave_node_api::AlignmentState::Unaligned => 0_u8.hash(hasher),
+        rawweave_node_api::AlignmentState::Aligned { reference_member } => {
+            1_u8.hash(hasher);
+            reference_member.hash(hasher);
         }
     }
 }

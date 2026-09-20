@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rawweave_image::{ConfidenceMap, DepthMap, Image, LabelMap, Mask, MaskSet, Region, RegionSet};
-use rawweave_node_api::Value;
+use rawweave_node_api::{ImageSet, Value};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -100,6 +100,7 @@ impl fmt::Display for ArtifactId {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CheckpointPayload {
     Image(Image),
+    ImageSet(ImageSet),
     Mask(Mask),
     MaskSet(MaskSet),
     LabelMap(LabelMap),
@@ -115,6 +116,7 @@ impl CheckpointPayload {
     pub fn to_value(&self) -> Value {
         match self {
             Self::Image(image) => Value::Image(image.clone()),
+            Self::ImageSet(set) => Value::ImageSet(set.clone()),
             Self::Mask(mask) => Value::Mask(mask.clone()),
             Self::MaskSet(set) => Value::MaskSet(set.clone()),
             Self::LabelMap(map) => Value::LabelMap(map.clone()),
@@ -162,6 +164,28 @@ impl CheckpointPayload {
                     return Err(CheckpointError::InvalidPayload(
                         "image contains a non-finite channel".into(),
                     ));
+                }
+            }
+            Self::ImageSet(set) => {
+                set.validate()
+                    .map_err(|error| CheckpointError::InvalidPayload(error.to_string()))?;
+                let pixels = set.members().iter().try_fold(0_usize, |total, member| {
+                    let member_pixels = member.image.dimensions().pixel_count().map_err(|_| {
+                        CheckpointError::InvalidPayload(
+                            "image set member dimensions overflow".into(),
+                        )
+                    })?;
+                    total.checked_add(member_pixels).ok_or_else(|| {
+                        CheckpointError::InvalidPayload(
+                            "image set aggregate pixel count overflow".into(),
+                        )
+                    })
+                })?;
+                if pixels > limits.max_pixels {
+                    return Err(CheckpointError::ImportLimitExceeded {
+                        resource: "pixels",
+                        limit: limits.max_pixels,
+                    });
                 }
             }
             Self::Mask(mask) => {
@@ -556,6 +580,7 @@ struct ArtifactContent<'a> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum CanonicalPayload<'a> {
     Image(CanonicalImage<'a>),
+    ImageSet(CanonicalImageSet<'a>),
     Mask(CanonicalMask<'a>),
     MaskSet {
         masks: Vec<CanonicalMask<'a>>,
@@ -590,6 +615,21 @@ struct CanonicalImage<'a> {
 }
 
 #[derive(Serialize)]
+struct CanonicalImageSet<'a> {
+    order: rawweave_node_api::ImageSetOrder,
+    members: Vec<CanonicalImageSetMember<'a>>,
+    shared_metadata: &'a rawweave_node_api::Metadata,
+    alignment: rawweave_node_api::AlignmentState,
+}
+
+#[derive(Serialize)]
+struct CanonicalImageSetMember<'a> {
+    id: &'a str,
+    image: CanonicalImage<'a>,
+    metadata: &'a rawweave_node_api::Metadata,
+}
+
+#[derive(Serialize)]
 struct CanonicalMask<'a> {
     dimensions: rawweave_image::Dimensions,
     origin: (u32, u32),
@@ -606,6 +646,26 @@ impl<'a> From<&'a CheckpointPayload> for CanonicalPayload<'a> {
                 pixel_format: image.pixel_format(),
                 color_metadata: image.color_metadata(),
                 pixels: image.pixels(),
+            }),
+            CheckpointPayload::ImageSet(set) => Self::ImageSet(CanonicalImageSet {
+                order: set.order(),
+                members: set
+                    .members()
+                    .iter()
+                    .map(|member| CanonicalImageSetMember {
+                        id: &member.id,
+                        image: CanonicalImage {
+                            dimensions: member.image.dimensions(),
+                            origin: member.image.origin(),
+                            pixel_format: member.image.pixel_format(),
+                            color_metadata: member.image.color_metadata(),
+                            pixels: member.image.pixels(),
+                        },
+                        metadata: &member.metadata,
+                    })
+                    .collect(),
+                shared_metadata: set.shared_metadata(),
+                alignment: set.alignment(),
             }),
             CheckpointPayload::Mask(mask) => Self::Mask(CanonicalMask {
                 dimensions: mask.dimensions(),
@@ -760,6 +820,7 @@ impl ArtifactStore {
     }
 
     pub fn put(&self, artifact: &CheckpointArtifact) -> Result<ArtifactId, CheckpointError> {
+        artifact.validate_with_limits(&self.limits)?;
         let bytes = serde_json::to_vec_pretty(artifact)?;
         if bytes.len() > self.limits.max_bytes {
             return Err(CheckpointError::ImportLimitExceeded {
@@ -767,7 +828,6 @@ impl ArtifactStore {
                 limit: self.limits.max_bytes,
             });
         }
-        artifact.validate_with_limits(&self.limits)?;
         match &self.backend {
             ArtifactStoreBackend::Memory(artifacts) => {
                 let mut artifacts = artifacts

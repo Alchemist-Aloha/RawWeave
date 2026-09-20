@@ -10,6 +10,14 @@ use rawweave_rendering::{PreviewQuality, RenderContext, TileCoord, TileRequest};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+mod imageset;
+
+pub use imageset::{
+    AlignmentState, ImageSet, ImageSetError, ImageSetMember, ImageSetOrder,
+    MAX_IMAGE_SET_MEMBER_ID_BYTES, MAX_IMAGE_SET_MEMBERS, MAX_IMAGE_SET_METADATA_BYTES,
+    MAX_IMAGE_SET_PIXELS,
+};
+
 pub type TypeId = String;
 pub type PortId = String;
 pub type Parameters = BTreeMap<String, ParameterValue>;
@@ -454,6 +462,7 @@ impl NodeDescriptor {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Image(Image),
+    ImageSet(ImageSet),
     Mask(Mask),
     MaskSet(MaskSet),
     LabelMap(LabelMap),
@@ -484,6 +493,7 @@ impl Value {
     pub fn data_type(&self) -> &'static str {
         match self {
             Self::Image(_) => "core.Image",
+            Self::ImageSet(_) => "core.ImageSet",
             Self::Mask(_) => "core.Mask",
             Self::MaskSet(_) => "core.MaskSet",
             Self::LabelMap(_) => "core.LabelMap",
@@ -530,6 +540,7 @@ impl NodeResult {
 #[derive(Clone, Debug, Default)]
 pub struct EvaluationContext {
     pub source_image: Option<Image>,
+    pub source_image_set: Option<ImageSet>,
     pub source_bytes: Option<Vec<u8>>,
     pub source_path: Option<PathBuf>,
     pub external_inputs: BTreeMap<String, Value>,
@@ -550,6 +561,11 @@ impl EvaluationContext {
             source_image: Some(source_image),
             ..Self::default()
         }
+    }
+
+    pub fn with_source_image_set(mut self, source_image_set: ImageSet) -> Self {
+        self.source_image_set = Some(source_image_set);
+        self
     }
 
     pub fn with_source_bytes(mut self, source_bytes: Vec<u8>) -> Self {

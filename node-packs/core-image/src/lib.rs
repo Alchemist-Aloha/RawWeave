@@ -7,6 +7,8 @@ use rawweave_node_api::{
     PortDescriptor, Value,
 };
 
+mod imageset;
+
 const MAX_IMAGE_PIXELS: u64 = 16_777_216;
 const MAX_BLUR_RADIUS: u32 = 64;
 const MAX_MASK_RADIUS: u32 = 64;
@@ -1759,7 +1761,8 @@ pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_a
     registry.register(levels_descriptor(), levels_factory)?;
     registry.register(curves_descriptor(), curves_factory)?;
     registry.register(color_matrix_descriptor(), color_matrix_factory)?;
-    registry.register(output_descriptor(), output_factory)
+    registry.register(output_descriptor(), output_factory)?;
+    imageset::register_nodes(registry)
 }
 
 pub struct CoreImagePack;
