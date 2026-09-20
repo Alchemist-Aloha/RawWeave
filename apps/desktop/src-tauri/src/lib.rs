@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rawweave_ai_provider::{
+    AiImage, AiInput, AiOperation, AiResult, AiWorkflow, ColorInterchange, PollPolicy,
+    SubmitRequest, TaskProvenance, WorkflowBindings,
+};
 use rawweave_batch::{
     dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore, PreflightOptions,
 };
@@ -17,8 +21,8 @@ use rawweave_core::NodeId;
 use rawweave_graph::{
     hash_upstream_inputs, ArtifactStore, Checkpoint, CheckpointArtifact, CheckpointAvailability,
     CheckpointPayload, CheckpointState, DependencyReport, DependencyStatus, EvaluationPolicy,
-    GenerationMetadata, GenerationToken, Graph, NodePackManifest, Provenance, SubgraphDependency,
-    WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
+    ExternalToolMetadata, GenerationMetadata, GenerationToken, Graph, NodePackManifest, Provenance,
+    SubgraphDependency, WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
 };
 use rawweave_image::Image;
 use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value};
@@ -919,6 +923,182 @@ fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, String> {
             value.data_type()
         )),
     }
+}
+
+#[derive(Debug)]
+enum CheckpointGeneration {
+    Local(CheckpointPayload),
+    Provider(AiResult),
+}
+
+fn parameter_json(value: &ParameterValue) -> serde_json::Value {
+    match value {
+        ParameterValue::Float(value) => serde_json::json!(value),
+        ParameterValue::Integer(value) => serde_json::json!(value),
+        ParameterValue::Boolean(value) => serde_json::json!(value),
+        ParameterValue::String(value) => serde_json::Value::String(value.clone()),
+    }
+}
+
+fn ai_parameter_string(
+    node: &rawweave_graph::GraphNode,
+    parameter: &str,
+) -> Result<String, String> {
+    match node.parameters.get(parameter) {
+        Some(ParameterValue::String(value)) if !value.trim().is_empty() => Ok(value.clone()),
+        Some(_) => Err(format!(
+            "AI node parameter '{parameter}' must be a non-empty string"
+        )),
+        None => Err(format!("AI node is missing parameter '{parameter}'")),
+    }
+}
+
+fn ai_operation_for_type(type_id: &str) -> Result<AiOperation, String> {
+    match type_id {
+        "ai.img2img" => Ok(AiOperation::Img2Img),
+        "ai.inpaint" => Ok(AiOperation::Inpaint),
+        "ai.generative-fill" => Ok(AiOperation::GenerativeFill),
+        "ai.upscale" => Ok(AiOperation::Upscale),
+        _ => Err(format!("unsupported AI checkpoint node '{type_id}'")),
+    }
+}
+
+fn source_ai_image(source: Option<&SourceAsset>) -> Result<AiImage, String> {
+    let Some(SourceAsset::Ordinary(image)) = source else {
+        return Err("AI checkpoint generation requires an ordinary image source".to_owned());
+    };
+    let bytes = preview::encode_png(image)?;
+    AiImage::new(
+        bytes,
+        [image.width(), image.height()],
+        ColorInterchange::png_srgb(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn build_ai_submit_request(
+    editor: &EditorCore,
+    node_id: &str,
+    input_port: &str,
+    source: Option<&SourceAsset>,
+    dependency_hash: &str,
+) -> Result<SubmitRequest, String> {
+    let node = editor
+        .graph()
+        .node(&NodeId::from(node_id))
+        .ok_or_else(|| format!("AI node '{node_id}' does not exist"))?;
+    let operation = ai_operation_for_type(&node.type_id)?;
+    let provider_id = ai_parameter_string(node, "provider_id")?;
+    let workflow_id = ai_parameter_string(node, "workflow_id")?;
+    let workflow_definition = ai_parameter_string(node, "workflow_definition")?;
+    let workflow_definition: serde_json::Value = serde_json::from_str(&workflow_definition)
+        .map_err(|error| format!("AI workflow definition is not valid JSON: {error}"))?;
+    let workflow_version = workflow_definition
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or("1")
+        .to_owned();
+    let bindings = workflow_definition
+        .get("bindings")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("AI workflow bindings are invalid: {error}"))?
+        .unwrap_or_else(WorkflowBindings::default);
+    let workflow = AiWorkflow::new(workflow_id, workflow_version, workflow_definition, bindings);
+    let provenance = TaskProvenance::new(node_id, node.descriptor.version, dependency_hash)
+        .with_provider(provider_id.clone())
+        .with_workflow_hash(
+            workflow
+                .content_hash()
+                .map_err(|error| format!("could not hash AI workflow: {error}"))?,
+        );
+    let mut request = SubmitRequest::new(workflow, provenance)
+        .with_input(input_port, AiInput::Image(source_ai_image(source)?))
+        .with_parameter("operation", serde_json::to_value(operation).unwrap());
+    for (parameter, value) in &node.parameters {
+        if matches!(
+            parameter.as_str(),
+            "provider_id" | "workflow_id" | "workflow_definition"
+        ) {
+            continue;
+        }
+        request = request.with_parameter(parameter, parameter_json(value));
+    }
+    if input_port != "image" {
+        let image = source_ai_image(source)?;
+        request = request.with_input("image", AiInput::Image(image));
+    }
+    if let Some(ParameterValue::String(prompt)) = node.parameters.get("prompt") {
+        request = request.with_input("prompt", AiInput::Text(prompt.clone()));
+    }
+    Ok(request)
+}
+
+fn provider_result_payload(result: &AiResult) -> Result<CheckpointPayload, String> {
+    let bytes = result
+        .bytes()
+        .ok_or_else(|| "AI provider returned no image bytes".to_owned())?;
+    let decoded = image::load_from_memory(bytes)
+        .map_err(|error| format!("could not decode AI provider image: {error}"))?
+        .to_rgba32f();
+    let image = Image::from_pixels(
+        decoded.width(),
+        decoded.height(),
+        decoded.pixels().map(|pixel| pixel.0).collect(),
+    )
+    .map_err(|error| format!("could not create AI checkpoint image: {error}"))?;
+    Ok(CheckpointPayload::Image(image))
+}
+
+fn provider_checkpoint_artifact(
+    result: &AiResult,
+    dependency_hash: &str,
+    upstream_hashes: BTreeMap<String, String>,
+    node_version: u32,
+    generation_revision: u64,
+) -> Result<CheckpointArtifact, String> {
+    let provider_id = result
+        .provenance
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| "unknown-ai-provider".to_owned());
+    let mut parameters = BTreeMap::new();
+    parameters.insert("task_id".to_owned(), result.task_id.clone());
+    if !result.provenance.workflow_id.is_empty() {
+        parameters.insert(
+            "workflow_id".to_owned(),
+            result.provenance.workflow_id.clone(),
+        );
+    }
+    let external_tool = ExternalToolMetadata {
+        id: provider_id,
+        version: if result.provenance.workflow_version.is_empty() {
+            "unknown".to_owned()
+        } else {
+            result.provenance.workflow_version.clone()
+        },
+        model: None,
+        parameters,
+    };
+    CheckpointArtifact::new(
+        provider_result_payload(result)?,
+        dependency_hash,
+        Provenance {
+            dependency_hash: dependency_hash.to_owned(),
+            upstream_hashes,
+            node_version,
+            external_tool: Some(external_tool),
+        },
+        GenerationMetadata {
+            generation_revision,
+            generated_at: Some(checkpoint_timestamp()),
+            duration_millis: None,
+            generator: Some("rawweave-ai-provider".to_owned()),
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn checkpoint_status_dto(
@@ -2415,19 +2595,65 @@ async fn generate_checkpoint(
     };
     emit_checkpoint_progress(&app, &node_id, &output_port, 0.05, "generating", None);
 
+    let evaluation_node_id = NodeId::from(node_id.as_str());
+    let is_ai_node = evaluation_editor
+        .graph()
+        .node(&evaluation_node_id)
+        .is_some_and(|node| {
+            matches!(
+                node.type_id.as_str(),
+                "ai.img2img" | "ai.inpaint" | "ai.generative-fill" | "ai.upscale"
+            )
+        });
+    let ai_input_port = evaluation_editor
+        .graph()
+        .node(&evaluation_node_id)
+        .and_then(|node| {
+            node.descriptor
+                .inputs
+                .iter()
+                .find(|port| port.data_type == "core.Image")
+                .map(|port| port.id.clone())
+        })
+        .unwrap_or_else(|| "image".to_owned());
+    let ai_request = is_ai_node.then(|| {
+        build_ai_submit_request(
+            &evaluation_editor,
+            &node_id,
+            &ai_input_port,
+            source.as_ref(),
+            &dependency_hash,
+        )
+    });
+    let ai_providers = is_ai_node.then(|| app.state::<ai::AiProviderManager>().inner().clone());
     let evaluation_source = source.clone();
     let evaluation_node = node_id.clone();
     let evaluation_output = output_port.clone();
     let evaluated = match tauri::async_runtime::spawn_blocking(move || {
-        evaluation_editor
-            .graph()
-            .evaluate_checkpoint_generation(
-                &NodeId::from(evaluation_node),
-                &evaluation_output,
-                &checkpoint_context(evaluation_source.as_ref()),
-            )
-            .map_err(|error| error.to_string())
-            .and_then(checkpoint_payload)
+        if let Some(request) = ai_request {
+            let request = request?;
+            let provider_id = request
+                .provenance
+                .provider_id
+                .clone()
+                .ok_or_else(|| "AI request has no provider id".to_owned())?;
+            let providers =
+                ai_providers.ok_or_else(|| "AI provider manager is unavailable".to_owned())?;
+            let task = providers.submit(&provider_id, request)?;
+            let result = providers.wait(&provider_id, &task.task_id, PollPolicy::default())?;
+            Ok(CheckpointGeneration::Provider(result))
+        } else {
+            evaluation_editor
+                .graph()
+                .evaluate_checkpoint_generation(
+                    &NodeId::from(evaluation_node),
+                    &evaluation_output,
+                    &checkpoint_context(evaluation_source.as_ref()),
+                )
+                .map_err(|error| error.to_string())
+                .and_then(checkpoint_payload)
+                .map(CheckpointGeneration::Local)
+        }
     })
     .await
     {
@@ -2489,8 +2715,8 @@ async fn generate_checkpoint(
         return Ok(status);
     }
 
-    let payload = match evaluated {
-        Ok(payload) => payload,
+    let generated = match evaluated {
+        Ok(generated) => generated,
         Err(error) => {
             record
                 .checkpoint
@@ -2521,23 +2747,34 @@ async fn generate_checkpoint(
         .set_dependency_hash(current_dependency_hash);
     record.progress = Some(90.0);
     emit_checkpoint_progress(&app, &node_id, &selected_port, 0.9, "committing", None);
-    let provenance = Provenance {
-        dependency_hash: dependency_hash.clone(),
-        upstream_hashes,
-        node_version,
-        external_tool: None,
+    let generation = GenerationMetadata {
+        generation_revision: token.generation_id(),
+        generated_at: Some(checkpoint_timestamp()),
+        duration_millis: None,
+        generator: Some("rawweave-desktop".to_owned()),
     };
-    let artifact = match CheckpointArtifact::new(
-        payload,
-        dependency_hash,
-        provenance,
-        GenerationMetadata {
-            generation_revision: token.generation_id(),
-            generated_at: Some(checkpoint_timestamp()),
-            duration_millis: None,
-            generator: Some("rawweave-desktop".to_owned()),
-        },
-    ) {
+    let artifact_result = match generated {
+        CheckpointGeneration::Local(payload) => CheckpointArtifact::new(
+            payload,
+            dependency_hash.clone(),
+            Provenance {
+                dependency_hash: dependency_hash.clone(),
+                upstream_hashes,
+                node_version,
+                external_tool: None,
+            },
+            generation,
+        )
+        .map_err(|error| error.to_string()),
+        CheckpointGeneration::Provider(result) => provider_checkpoint_artifact(
+            &result,
+            &dependency_hash,
+            upstream_hashes,
+            node_version,
+            token.generation_id(),
+        ),
+    };
+    let artifact = match artifact_result {
         Ok(artifact) => artifact,
         Err(error) => {
             record
@@ -2552,14 +2789,7 @@ async fn generate_checkpoint(
                 .map_err(|failure| failure.to_string())?;
             drop(records);
             manager.persist()?;
-            emit_checkpoint_progress(
-                &app,
-                &node_id,
-                &selected_port,
-                0.0,
-                "failed",
-                Some(error.to_string()),
-            );
+            emit_checkpoint_progress(&app, &node_id, &selected_port, 0.0, "failed", Some(error));
             return Ok(status);
         }
     };
@@ -3386,5 +3616,98 @@ mod tests {
             Some(artifact_id.as_str())
         );
         assert!(status.provenance.is_some());
+    }
+
+    #[test]
+    fn ai_provider_result_becomes_a_durable_image_artifact_with_provider_provenance() {
+        let mut bytes = Vec::new();
+        let mut encoder = Encoder::new(Cursor::new(&mut bytes), 1, 1);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[64, 128, 255, 255]).unwrap();
+        writer.finish().unwrap();
+        let result = rawweave_ai_provider::AiResult::from_bytes("task-1", bytes, "image/png")
+            .with_provenance(
+                rawweave_ai_provider::TaskProvenance::new("ai-node", 1, "snapshot-hash")
+                    .with_provider("fixture-provider"),
+            );
+
+        let artifact = provider_checkpoint_artifact(
+            &result,
+            "snapshot-hash",
+            BTreeMap::from([("source".to_owned(), "source-hash".to_owned())]),
+            1,
+            7,
+        )
+        .unwrap();
+
+        assert!(matches!(artifact.payload, CheckpointPayload::Image(_)));
+        assert_eq!(artifact.dependency_hash, "snapshot-hash");
+        assert_eq!(artifact.provenance.node_version, 1);
+        assert_eq!(
+            artifact
+                .provenance
+                .external_tool
+                .as_ref()
+                .map(|tool| tool.id.as_str()),
+            Some("fixture-provider")
+        );
+        assert_eq!(artifact.generation.generation_revision, 7);
+        let store = ArtifactStore::memory();
+        store.put(&artifact).unwrap();
+        assert!(store.get(artifact.id()).unwrap().is_some());
+    }
+
+    #[test]
+    fn ai_checkpoint_request_routes_node_parameters_and_connected_image_to_provider() {
+        let mut editor = EditorCore::default();
+        editor.add_node("input", "core.image-input").unwrap();
+        editor.add_node("ai", "ai.img2img").unwrap();
+        editor.connect("input", "image", "ai", "image").unwrap();
+        editor
+            .set_node_parameter(
+                "ai",
+                "provider_id",
+                ParameterValue::String("fixture".to_owned()),
+            )
+            .unwrap();
+        editor
+            .set_node_parameter(
+                "ai",
+                "workflow_id",
+                ParameterValue::String("edit-v1".to_owned()),
+            )
+            .unwrap();
+        editor
+            .set_node_parameter(
+                "ai",
+                "workflow_definition",
+                ParameterValue::String(r#"{"nodes":{}}"#.to_owned()),
+            )
+            .unwrap();
+        editor
+            .set_node_parameter(
+                "ai",
+                "prompt",
+                ParameterValue::String("make it blue".to_owned()),
+            )
+            .unwrap();
+        let source = SourceAsset::Ordinary(Image::new(1, 1).unwrap());
+
+        let request =
+            build_ai_submit_request(&editor, "ai", "image", Some(&source), "dependency-hash")
+                .unwrap();
+
+        assert_eq!(request.provenance.provider_id.as_deref(), Some("fixture"));
+        assert_eq!(request.workflow.id, "edit-v1");
+        assert_eq!(
+            request.parameters["prompt"],
+            serde_json::json!("make it blue")
+        );
+        assert!(matches!(
+            request.inputs.get("image"),
+            Some(rawweave_ai_provider::AiInput::Image(_))
+        ));
     }
 }
