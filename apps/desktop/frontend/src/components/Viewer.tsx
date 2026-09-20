@@ -13,7 +13,17 @@ interface ViewerProps {
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
 }
 
-const PREVIEWABLE_DATA_TYPES = new Set(['core.Image', 'core.Mask', 'color.DisplayRGB', 'color.SceneLinearRGB']);
+const PREVIEWABLE_DATA_TYPES = new Set([
+  'core.Image',
+  'core.Mask',
+  'core.MaskSet',
+  'core.LabelMap',
+  'core.ConfidenceMap',
+  'core.DepthMap',
+  'core.RegionSet',
+  'color.DisplayRGB',
+  'color.SceneLinearRGB',
+]);
 
 export function targetsFor(nodes: EditorNode[]): PreviewTarget[] {
   return nodes.flatMap((node) =>

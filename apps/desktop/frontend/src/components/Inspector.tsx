@@ -1,6 +1,10 @@
 import type { EditorNode, ParameterValue, WorkflowPort } from '../editor/types';
 import type { CheckpointStatus } from '../checkpoint/types';
-import { CheckpointPanel, type CheckpointPreviewActions } from './CheckpointPanel';
+import {
+  CheckpointPanel,
+  type CheckpointOutputPort,
+  type CheckpointPreviewActions,
+} from './CheckpointPanel';
 
 interface InspectorProps {
   node: EditorNode | undefined;
@@ -13,8 +17,9 @@ interface InspectorProps {
   onDelete: (nodeId: string) => void;
   checkpointStatus?: CheckpointStatus | null;
   checkpointLoading?: boolean;
-  onGenerateCheckpoint?: () => void | Promise<void>;
+  onGenerateCheckpoint?: (outputPort: string) => void | Promise<void>;
   onCancelCheckpoint?: () => void | Promise<void>;
+  checkpointOutputPorts?: CheckpointOutputPort[];
   checkpointPreviewActions?: CheckpointPreviewActions;
 }
 
@@ -31,6 +36,7 @@ export function Inspector({
   checkpointLoading = false,
   onGenerateCheckpoint,
   onCancelCheckpoint,
+  checkpointOutputPorts = [],
   checkpointPreviewActions,
 }: InspectorProps) {
   if (selectedNodeIds.length > 1) {
@@ -186,6 +192,7 @@ export function Inspector({
           loading={checkpointLoading}
           onCancel={onCancelCheckpoint}
           onGenerate={onGenerateCheckpoint}
+          outputPorts={checkpointOutputPorts}
           previewActions={checkpointPreviewActions}
           status={checkpointStatus}
         />

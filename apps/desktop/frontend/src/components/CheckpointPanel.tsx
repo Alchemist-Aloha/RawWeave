@@ -1,10 +1,18 @@
+import { useEffect, useState } from 'react';
 import type { CheckpointStatus } from '../checkpoint/types';
+
+export interface CheckpointOutputPort {
+  id: string;
+  name: string;
+  dataType: string;
+}
 
 export interface CheckpointPanelProps {
   status: CheckpointStatus | null;
   loading: boolean;
-  onGenerate: () => void | Promise<void>;
+  onGenerate: (outputPort: string) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
+  outputPorts?: CheckpointOutputPort[];
   previewActions?: CheckpointPreviewActions;
 }
 
@@ -28,7 +36,28 @@ const labels: Record<CheckpointStatus['state'], string> = {
   cancelled: 'Cancelled',
 };
 
-export function CheckpointPanel({ status, loading, onGenerate, onCancel, previewActions }: CheckpointPanelProps) {
+export function CheckpointPanel({
+  status,
+  loading,
+  onGenerate,
+  onCancel,
+  outputPorts = [],
+  previewActions,
+}: CheckpointPanelProps) {
+  const [selectedOutput, setSelectedOutput] = useState(
+    () => outputPorts.find((port) => port.id === status?.outputPort)?.id ?? outputPorts[0]?.id ?? status?.outputPort ?? '',
+  );
+
+  useEffect(() => {
+    if (!status) return;
+    setSelectedOutput(
+      outputPorts.find((port) => port.id === status.outputPort)?.id
+        ?? outputPorts[0]?.id
+        ?? status.outputPort
+        ?? '',
+    );
+  }, [outputPorts, status?.nodeId, status?.outputPort]);
+
   if (!status) {
     return (
       <section aria-label="Checkpoint" className="checkpoint-panel">
@@ -53,6 +82,22 @@ export function CheckpointPanel({ status, loading, onGenerate, onCancel, preview
         <code>{status.nodeId}:{status.outputPort}</code>
         {status.generation && <span>Revision {status.generation.generationRevision}</span>}
       </div>
+      {outputPorts.length > 1 && (
+        <label className="checkpoint-panel__output">
+          <span>Output to checkpoint</span>
+          <select
+            aria-label="Checkpoint output"
+            onChange={(event) => setSelectedOutput(event.target.value)}
+            value={selectedOutput}
+          >
+            {outputPorts.map((port) => (
+              <option key={port.id} value={port.id}>
+                {port.name} · {port.dataType}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       {status.state === 'stale' && status.canUseCommitted && (
         <p className="checkpoint-panel__notice">Committed result remains usable while inputs are stale.</p>
       )}
@@ -68,7 +113,7 @@ export function CheckpointPanel({ status, loading, onGenerate, onCancel, preview
           aria-label={generating ? 'Cancel checkpoint' : actionLabel}
           className={generating ? 'button button--quiet' : 'button button--primary'}
           disabled={loading && !generating}
-          onClick={() => void (generating ? onCancel() : onGenerate())}
+          onClick={() => void (generating ? onCancel() : onGenerate(selectedOutput || status.outputPort))}
           type="button"
         >
           {generating ? 'Cancel' : actionLabel.replace(' checkpoint', '')}

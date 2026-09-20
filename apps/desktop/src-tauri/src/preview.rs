@@ -459,33 +459,231 @@ fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
     }
 }
 
-fn color_value_to_image(value: Value, mask_display: MaskDisplayRequest) -> Result<Image, String> {
-    let (dimensions, origin, pixels) = match value {
-        Value::Image(image) => return Ok(image),
-        Value::Mask(mask) => {
-            let dimensions = mask.dimensions();
-            let origin = mask.origin();
-            let mut pixels = Vec::with_capacity(
-                (dimensions.width as usize).saturating_mul(dimensions.height as usize),
-            );
-            for y in 0..dimensions.height {
-                for x in 0..dimensions.width {
-                    let value = mask.pixel_global(origin.0 + x, origin.1 + y).unwrap_or(0.0);
-                    pixels.push(match mask_display {
-                        MaskDisplayRequest::Grayscale => [value, value, value, 1.0],
-                        MaskDisplayRequest::Overlay => [1.0, 0.25, 0.1, value],
-                    });
+const LABEL_PREVIEW_COLORS: [[f32; 3]; 8] = [
+    [0.12, 0.42, 0.78],
+    [0.92, 0.32, 0.18],
+    [0.22, 0.68, 0.38],
+    [0.72, 0.32, 0.78],
+    [0.88, 0.66, 0.16],
+    [0.14, 0.68, 0.72],
+    [0.78, 0.24, 0.46],
+    [0.46, 0.52, 0.2],
+];
+
+fn display_image(
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    pixels: Vec<[f32; 4]>,
+) -> Result<Image, String> {
+    Image::from_pixels_with_origin(
+        dimensions,
+        origin,
+        pixels,
+        Default::default(),
+        Default::default(),
+    )
+    .map_err(|error| format!("could not create display preview image: {error}"))
+}
+
+fn mask_pixel(mask: &rawweave_image::Mask, x: u32, y: u32) -> f32 {
+    mask.pixel_global(x, y).unwrap_or(0.0)
+}
+
+fn mask_preview_pixels(
+    mask: &rawweave_image::Mask,
+    mask_display: MaskDisplayRequest,
+) -> (Dimensions, (u32, u32), Vec<[f32; 4]>) {
+    let dimensions = mask.dimensions();
+    let origin = mask.origin();
+    let pixels = (0..dimensions.height)
+        .flat_map(|y| {
+            (0..dimensions.width).map(move |x| {
+                let value = mask_pixel(mask, origin.0 + x, origin.1 + y);
+                match mask_display {
+                    MaskDisplayRequest::Grayscale => [value, value, value, 1.0],
+                    MaskDisplayRequest::Overlay => [1.0, 0.25, 0.1, value],
+                }
+            })
+        })
+        .collect();
+    (dimensions, origin, pixels)
+}
+
+fn union_regions<I>(regions: I) -> Result<Option<Region>, String>
+where
+    I: IntoIterator<Item = Region>,
+{
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for region in regions {
+        if region.width == 0 || region.height == 0 {
+            continue;
+        }
+        let end_x = region
+            .end_x()
+            .ok_or_else(|| "spatial preview region x overflowed".to_owned())?;
+        let end_y = region
+            .end_y()
+            .ok_or_else(|| "spatial preview region y overflowed".to_owned())?;
+        bounds = Some(match bounds {
+            Some((min_x, min_y, max_x, max_y)) => (
+                min_x.min(region.x),
+                min_y.min(region.y),
+                max_x.max(end_x),
+                max_y.max(end_y),
+            ),
+            None => (region.x, region.y, end_x, end_y),
+        });
+    }
+    Ok(bounds.map(|(min_x, min_y, max_x, max_y)| {
+        Region::new(min_x, min_y, max_x - min_x, max_y - min_y)
+    }))
+}
+
+fn mask_set_preview(
+    masks: &rawweave_image::MaskSet,
+    mask_display: MaskDisplayRequest,
+) -> Result<Image, String> {
+    let bounds = union_regions(masks.iter().map(|mask| mask.global_region()))?
+        .ok_or_else(|| "cannot preview an empty MaskSet".to_owned())?;
+    let mut pixels =
+        Vec::with_capacity((bounds.width as usize).saturating_mul(bounds.height as usize));
+    for y in 0..bounds.height {
+        for x in 0..bounds.width {
+            let global_x = bounds.x + x;
+            let global_y = bounds.y + y;
+            let mut strongest = 0.0;
+            let mut strongest_index = 0;
+            for (index, mask) in masks.iter().enumerate() {
+                let value = mask_pixel(mask, global_x, global_y);
+                if value > strongest {
+                    strongest = value;
+                    strongest_index = index;
                 }
             }
-            (dimensions, origin, pixels)
+            pixels.push(match mask_display {
+                MaskDisplayRequest::Grayscale => [strongest, strongest, strongest, 1.0],
+                MaskDisplayRequest::Overlay => {
+                    let color = LABEL_PREVIEW_COLORS[strongest_index % LABEL_PREVIEW_COLORS.len()];
+                    [color[0], color[1], color[2], strongest]
+                }
+            });
         }
-        Value::DisplayRGB(display) => (
-            (display.dimensions()),
+    }
+    display_image(bounds.dimensions(), (bounds.x, bounds.y), pixels)
+}
+
+fn label_map_preview(label_map: &rawweave_image::LabelMap) -> Result<Image, String> {
+    let dimensions = label_map.dimensions();
+    let origin = label_map.origin();
+    let pixels = (0..dimensions.height)
+        .flat_map(|y| {
+            (0..dimensions.width).map(move |x| {
+                let value = label_map
+                    .pixel_global(origin.0 + x, origin.1 + y)
+                    .unwrap_or(0);
+                if value == 0 {
+                    [0.0, 0.0, 0.0, 1.0]
+                } else {
+                    let color =
+                        LABEL_PREVIEW_COLORS[(value as usize - 1) % LABEL_PREVIEW_COLORS.len()];
+                    [color[0], color[1], color[2], 1.0]
+                }
+            })
+        })
+        .collect();
+    display_image(dimensions, origin, pixels)
+}
+
+fn depth_map_preview(depth_map: &rawweave_image::DepthMap) -> Result<Image, String> {
+    let dimensions = depth_map.dimensions();
+    let origin = depth_map.origin();
+    let (minimum, maximum) = depth_map
+        .values()
+        .iter()
+        .copied()
+        .fold(None, |range: Option<(f64, f64)>, value| {
+            let value = f64::from(value);
+            Some(match range {
+                Some((minimum, maximum)) => (minimum.min(value), maximum.max(value)),
+                None => (value, value),
+            })
+        })
+        .ok_or_else(|| "cannot preview an empty DepthMap".to_owned())?;
+    let span = maximum - minimum;
+    let pixels = (0..dimensions.height)
+        .flat_map(|y| {
+            (0..dimensions.width).map(move |x| {
+                let value = f64::from(
+                    depth_map
+                        .pixel_global(origin.0 + x, origin.1 + y)
+                        .unwrap_or(minimum as f32),
+                );
+                let normalized = if span == 0.0 {
+                    0.5
+                } else {
+                    ((value - minimum) / span) as f32
+                };
+                [normalized, normalized, normalized, 1.0]
+            })
+        })
+        .collect();
+    display_image(dimensions, origin, pixels)
+}
+
+fn region_set_preview(region_set: &rawweave_image::RegionSet) -> Result<Image, String> {
+    let Some(bounds) = union_regions(region_set.regions().iter().copied())? else {
+        return display_image(Dimensions::new(1, 1), (0, 0), vec![[0.0, 0.0, 0.0, 0.0]]);
+    };
+    let mut pixels =
+        vec![[0.0, 0.0, 0.0, 0.0]; (bounds.width as usize).saturating_mul(bounds.height as usize)];
+    for (index, region) in region_set.regions().iter().enumerate() {
+        let Some(region) = region.intersection(bounds) else {
+            continue;
+        };
+        let color = LABEL_PREVIEW_COLORS[index % LABEL_PREVIEW_COLORS.len()];
+        for y in region.y..region.y + region.height {
+            for x in region.x..region.x + region.width {
+                let local_x = (x - bounds.x) as usize;
+                let local_y = (y - bounds.y) as usize;
+                let pixel_index = local_y * bounds.width as usize + local_x;
+                let border = x == region.x
+                    || y == region.y
+                    || x + 1 == region.x + region.width
+                    || y + 1 == region.y + region.height;
+                pixels[pixel_index] = [
+                    color[0],
+                    color[1],
+                    color[2],
+                    if border { 1.0 } else { 0.35 },
+                ];
+            }
+        }
+    }
+    display_image(bounds.dimensions(), (bounds.x, bounds.y), pixels)
+}
+
+fn color_value_to_image(value: Value, mask_display: MaskDisplayRequest) -> Result<Image, String> {
+    match value {
+        Value::Image(image) => Ok(image),
+        Value::Mask(mask) => {
+            let (dimensions, origin, pixels) = mask_preview_pixels(&mask, mask_display);
+            display_image(dimensions, origin, pixels)
+        }
+        Value::MaskSet(masks) => mask_set_preview(&masks, mask_display),
+        Value::LabelMap(label_map) => label_map_preview(&label_map),
+        Value::ConfidenceMap(confidence_map) => {
+            let (dimensions, origin, pixels) =
+                mask_preview_pixels(confidence_map.mask(), MaskDisplayRequest::Grayscale);
+            display_image(dimensions, origin, pixels)
+        }
+        Value::DepthMap(depth_map) => depth_map_preview(&depth_map),
+        Value::RegionSet(region_set) => region_set_preview(&region_set),
+        Value::DisplayRGB(display) => display_image(
+            display.dimensions(),
             (0, 0),
             display
                 .pixels()
-                .to_vec()
-                .into_iter()
+                .iter()
                 .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
                 .collect(),
         ),
@@ -498,32 +696,21 @@ fn color_value_to_image(value: Value, mask_display: MaskDisplayRequest) -> Resul
                 .map_err(|error| {
                     format!("could not convert scene preview to display RGB: {error}")
                 })?;
-            (
+            display_image(
                 display.dimensions(),
                 (0, 0),
                 display
                     .pixels()
-                    .to_vec()
-                    .into_iter()
+                    .iter()
                     .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
                     .collect(),
             )
         }
-        other => {
-            return Err(format!(
-                "preview output has unsupported data type {}",
-                other.data_type()
-            ));
-        }
-    };
-    Image::from_pixels_with_origin(
-        dimensions,
-        origin,
-        pixels,
-        Default::default(),
-        Default::default(),
-    )
-    .map_err(|error| format!("could not create display preview image: {error}"))
+        other => Err(format!(
+            "preview output has unsupported data type {}",
+            other.data_type()
+        )),
+    }
 }
 
 pub fn render_preview(
@@ -653,7 +840,9 @@ pub fn render_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rawweave_image::Image;
+    use rawweave_image::{
+        ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
+    };
 
     #[test]
     fn encodes_float_rgba_pixels_as_a_browser_png() {
@@ -672,6 +861,55 @@ mod tests {
         let info = reader.next_frame(&mut output).unwrap();
         assert_eq!((info.width, info.height), (2, 1));
         assert_eq!(&output[..8], &[0, 128, 255, 255, 255, 0, 0, 64]);
+    }
+
+    #[test]
+    fn converts_spatial_checkpoint_values_into_inspectable_preview_images() {
+        let dimensions = Dimensions::new(2, 1);
+        let origin = (4, 7);
+        let mask = Mask::from_values_with_origin(dimensions, origin, vec![0.0, 0.75]).unwrap();
+        let labels = std::collections::BTreeMap::from([
+            ("background".to_owned(), 0_u16),
+            ("sky".to_owned(), 1_u16),
+        ]);
+        let values = [
+            (
+                Value::MaskSet(MaskSet::new(vec![mask.clone()])),
+                dimensions,
+                origin,
+            ),
+            (
+                Value::LabelMap(
+                    LabelMap::from_values_with_labels(dimensions, origin, vec![0, 1], labels)
+                        .unwrap(),
+                ),
+                dimensions,
+                origin,
+            ),
+            (
+                Value::ConfidenceMap(ConfidenceMap::from_mask(mask)),
+                dimensions,
+                origin,
+            ),
+            (
+                Value::DepthMap(DepthMap::from_values(dimensions, origin, vec![1.0, 2.0]).unwrap()),
+                dimensions,
+                origin,
+            ),
+            (
+                Value::RegionSet(RegionSet::new(vec![Region::new(4, 7, 2, 1)])),
+                dimensions,
+                origin,
+            ),
+        ];
+
+        for (value, expected_dimensions, expected_origin) in values {
+            let image = color_value_to_image(value, MaskDisplayRequest::Grayscale).unwrap();
+
+            assert_eq!(image.dimensions(), expected_dimensions);
+            assert_eq!(image.origin(), expected_origin);
+            assert!(image.pixels().iter().any(|pixel| pixel[3] > 0.0));
+        }
     }
 
     #[test]

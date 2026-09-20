@@ -14,7 +14,10 @@ import type { OpenImageResult, ParameterValue, WorkflowMetadata } from './editor
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
-import type { CheckpointPreviewActions } from './components/CheckpointPanel';
+import type {
+  CheckpointOutputPort,
+  CheckpointPreviewActions,
+} from './components/CheckpointPanel';
 import { NodeLibrary } from './components/NodeLibrary';
 import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
@@ -285,11 +288,20 @@ export default function App() {
     void checkpointController.refresh(selectedNode.id).catch(() => undefined);
   }, [checkpointController, controller.state.revision, selectedNode?.descriptor.evaluationPolicy, selectedNode?.id]);
 
-  const generateCheckpoint = useCallback(() => {
-    const outputPort = selectedNode?.descriptor.outputs[0]?.id;
+  const checkpointOutputPorts = useMemo<CheckpointOutputPort[]>(
+    () => selectedNode?.descriptor.outputs.map((output) => ({
+      id: output.id,
+      name: output.name,
+      dataType: output.dataType,
+    })) ?? [],
+    [selectedNode],
+  );
+
+  const generateCheckpoint = useCallback((requestedOutputPort?: string) => {
+    const outputPort = requestedOutputPort ?? selectedCheckpointStatus?.outputPort ?? selectedNode?.descriptor.outputs[0]?.id;
     if (!selectedNode || !outputPort) return;
     void checkpointController.generate(selectedNode.id, outputPort).catch(() => undefined);
-  }, [checkpointController, selectedNode]);
+  }, [checkpointController, selectedCheckpointStatus?.outputPort, selectedNode]);
 
   const cancelCheckpoint = useCallback(() => {
     if (!selectedNode) return;
@@ -751,6 +763,7 @@ export default function App() {
           onToggleInput={onToggleInput}
           onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
           checkpointLoading={checkpointController.state.loading}
+          checkpointOutputPorts={checkpointOutputPorts}
           checkpointStatus={selectedCheckpointStatus}
           onCancelCheckpoint={cancelCheckpoint}
           onGenerateCheckpoint={generateCheckpoint}

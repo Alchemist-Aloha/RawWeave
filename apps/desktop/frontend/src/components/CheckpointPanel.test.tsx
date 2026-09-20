@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CheckpointPanel, type CheckpointPreviewActions } from './CheckpointPanel';
 import type { CheckpointStatus } from '../checkpoint/types';
 
@@ -61,5 +61,39 @@ describe('CheckpointPanel', () => {
     expect(host.querySelector('[aria-label="Preview checkpoint inputs"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Preview committed checkpoint"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Compare checkpoint previews"]')).not.toBeNull();
+  });
+
+  it('lets spatial checkpoints choose a label-map output before generation', async () => {
+    const onGenerate = vi.fn();
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(
+        <CheckpointPanel
+          outputPorts={[
+            { id: 'label_map', name: 'Label Map', dataType: 'core.LabelMap' },
+            { id: 'confidence', name: 'Confidence', dataType: 'core.ConfidenceMap' },
+          ]}
+          status={{ ...stale, outputPort: 'label_map' }}
+          loading={false}
+          onGenerate={onGenerate}
+          onCancel={() => undefined}
+        />,
+      );
+    });
+
+    const output = host.querySelector<HTMLSelectElement>('[aria-label="Checkpoint output"]');
+    expect(output).not.toBeNull();
+    expect(output?.value).toBe('label_map');
+    expect(output?.textContent).toContain('core.LabelMap');
+    await act(async () => {
+      output!.value = 'confidence';
+      output!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {
+      host?.querySelector<HTMLButtonElement>('[aria-label="Regenerate checkpoint"]')?.click();
+    });
+    expect(onGenerate).toHaveBeenCalledWith('confidence');
   });
 });
