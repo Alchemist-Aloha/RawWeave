@@ -100,7 +100,7 @@ impl fmt::Display for ArtifactId {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum CheckpointPayload {
     Image(Image),
-    ImageSet(ImageSet),
+    ImageSet(Box<ImageSet>),
     Mask(Mask),
     MaskSet(MaskSet),
     LabelMap(LabelMap),
@@ -116,7 +116,7 @@ impl CheckpointPayload {
     pub fn to_value(&self) -> Value {
         match self {
             Self::Image(image) => Value::Image(image.clone()),
-            Self::ImageSet(set) => Value::ImageSet(set.clone()),
+            Self::ImageSet(set) => Value::ImageSet(set.as_ref().clone()),
             Self::Mask(mask) => Value::Mask(mask.clone()),
             Self::MaskSet(set) => Value::MaskSet(set.clone()),
             Self::LabelMap(map) => Value::LabelMap(map.clone()),

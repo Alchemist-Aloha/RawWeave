@@ -1027,7 +1027,7 @@ fn checkpoint_context(source: Option<&SourceAsset>) -> EvaluationContext {
 fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, String> {
     match value {
         Value::Image(image) => Ok(CheckpointPayload::Image(image)),
-        Value::ImageSet(set) => Ok(CheckpointPayload::ImageSet(set)),
+        Value::ImageSet(set) => Ok(CheckpointPayload::ImageSet(Box::new(set))),
         Value::Mask(mask) => Ok(CheckpointPayload::Mask(mask)),
         Value::MaskSet(set) => Ok(CheckpointPayload::MaskSet(set)),
         Value::LabelMap(map) => Ok(CheckpointPayload::LabelMap(map)),
