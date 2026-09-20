@@ -16,6 +16,7 @@ use rawweave_ai_provider::{
 };
 use rawweave_batch::{
     dry_run, BatchEngine, BatchJob, DryRunSubset, ImageFileProcessor, JobStore, PreflightOptions,
+    MAX_BATCH_WORKERS,
 };
 use rawweave_core::NodeId;
 use rawweave_graph::{
@@ -757,6 +758,18 @@ struct CreateBatchJobRequest {
 
 fn default_batch_workers() -> usize {
     4
+}
+
+fn validate_batch_workers(max_workers: usize) -> Result<(), String> {
+    if max_workers == 0 {
+        return Err("worker concurrency must be greater than zero".to_owned());
+    }
+    if max_workers > MAX_BATCH_WORKERS {
+        return Err(format!(
+            "worker concurrency cannot exceed the maximum of {MAX_BATCH_WORKERS}"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -3168,6 +3181,7 @@ fn create_batch_job(
     state: State<'_, AppState>,
     request: CreateBatchJobRequest,
 ) -> Result<BatchJob, String> {
+    validate_batch_workers(request.max_workers)?;
     let job_id = request.job.id.clone();
     let store = request
         .state_path
@@ -3191,6 +3205,7 @@ fn load_batch_job(
     state: State<'_, AppState>,
     request: LoadBatchJobRequest,
 ) -> Result<BatchJob, String> {
+    validate_batch_workers(request.max_workers)?;
     let store = JobStore::new(request.state_path);
     let snapshot = store.load().map_err(|error| error.to_string())?;
     let job_id = snapshot.id.clone();
@@ -3948,6 +3963,13 @@ mod tests {
     use super::*;
     use png::{BitDepth, ColorType, Encoder};
     use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
+
+    #[test]
+    fn tauri_batch_request_rejects_worker_counts_above_the_engine_bound() {
+        let error = validate_batch_workers(MAX_BATCH_WORKERS + 1)
+            .expect_err("the Tauri request boundary must reject excessive workers");
+        assert!(error.contains("maximum"));
+    }
     use std::io::Cursor;
 
     #[test]
