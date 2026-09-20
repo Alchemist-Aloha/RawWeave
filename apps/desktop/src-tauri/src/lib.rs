@@ -2016,6 +2016,65 @@ pub(crate) fn raw_metadata(frame: &RawFrame) -> OpenMetadataSummary {
     }
 }
 
+#[derive(Clone, Debug)]
+struct DecodedFrameDecoder {
+    frame: RawFrame,
+}
+
+impl RawDecoder for DecodedFrameDecoder {
+    fn decode(&self, _input: &[u8]) -> Result<RawFrame, rawweave_raw::RawError> {
+        Ok(self.frame.clone())
+    }
+}
+
+fn render_raw_frame_to_image(frame: RawFrame) -> Result<Image, String> {
+    let mut editor = EditorCore::new_with_raw_decoder(DecodedFrameDecoder { frame });
+    build_raw_workflow(&mut editor)?;
+    let value = editor
+        .evaluate(
+            "display-transform",
+            "display",
+            EvaluationContext::default().with_source_bytes(Vec::new()),
+        )
+        .map_err(|error| format!("could not render RAW image set member: {error}"))?;
+    let Value::DisplayRGB(display) = value else {
+        return Err("RAW image set member did not produce display RGB output".to_owned());
+    };
+    let dimensions = display.dimensions();
+    Image::from_pixels(
+        dimensions.width,
+        dimensions.height,
+        display
+            .pixels()
+            .iter()
+            .map(|[red, green, blue]| [*red, *green, *blue, 1.0])
+            .collect(),
+    )
+    .map_err(|error| format!("could not create RAW image set member: {error}"))
+}
+
+fn open_raw_image_set_member_with_decoder(
+    path: &Path,
+    decoder: &dyn RawDecoder,
+) -> Result<(Image, preview::OpenImageMetadata, rawweave_node_api::Metadata), String> {
+    let bytes = read_raw_file(path, RawDecodeLimits::default())?;
+    let frame = decoder
+        .decode(&bytes)
+        .map_err(|error| format!("could not decode RAW '{}': {error}", path.display()))?;
+    let dimensions = frame.sensor_dimensions();
+    let metadata = preview::OpenImageMetadata {
+        kind: SourceKind::Raw,
+        width: dimensions.width,
+        height: dimensions.height,
+        revision: 0,
+        metadata: Some(raw_metadata(&frame)),
+    };
+    let member_metadata =
+        rawweave_node_api::Metadata::from_sources(frame.camera(), frame.exif());
+    let image = render_raw_frame_to_image(frame)?;
+    Ok((image, metadata, member_metadata))
+}
+
 pub(crate) fn open_image_file_with_decoder(
     path: &Path,
     decoder: &dyn RawDecoder,
@@ -2193,21 +2252,26 @@ fn open_image_set_files_with_decoder(
             return Err(format!("image set member path '{path}' is duplicated"));
         }
         let path_ref = Path::new(path);
-        let (source, summary) = open_image_file_with_decoder(path_ref, decoder)?;
-        let image = match source {
-            SourceAsset::Ordinary(image) => image,
-            SourceAsset::ImageSet(_) => {
-                return Err(format!(
-                    "image set member '{path}' decoded as another image set"
-                ));
-            }
-            SourceAsset::Raw { .. } => {
-                return Err(format!("RAW image set member '{path}' is not supported"));
-            }
+        let (image, summary, member_metadata) = if is_raw_path(path_ref) {
+            open_raw_image_set_member_with_decoder(path_ref, decoder)?
+        } else {
+            let (source, summary) = open_image_file_with_decoder(path_ref, decoder)?;
+            let image = match source {
+                SourceAsset::Ordinary(image) => image,
+                SourceAsset::ImageSet(_) => {
+                    return Err(format!(
+                        "image set member '{path}' decoded as another image set"
+                    ));
+                }
+                SourceAsset::Raw { .. } => {
+                    return Err(format!("RAW image set member '{path}' is not supported"));
+                }
+            };
+            (image, summary, rawweave_node_api::Metadata::default())
         };
         metadata.insert(path.clone(), summary.metadata);
         members.push(
-            ImageSetMember::new(path.clone(), image, rawweave_node_api::Metadata::default())
+            ImageSetMember::new(path.clone(), image, member_metadata)
                 .with_source(ImageSetSourceDescriptor::new(path.clone())),
         );
     }
@@ -4141,6 +4205,38 @@ mod tests {
         );
         assert_eq!(members[0].id, set.members()[0].id);
         assert_eq!(members[0].path, set.members()[0].source().unwrap().path);
+    }
+
+    #[test]
+    fn image_set_loader_accepts_bounded_raw_members_and_renders_them_to_images() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-open-imageset-raw-{}.dng",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"deterministic raw fixture").unwrap();
+        let path_string = path.to_string_lossy().into_owned();
+        let decoder = DeterministicDecoder::new(DeterministicCorpus::bayer_12_bit());
+
+        let result = open_image_set_files_with_decoder(
+            std::slice::from_ref(&path_string),
+            rawweave_node_api::ImageSetOrder::Ordered,
+            &decoder,
+        );
+        let _ = std::fs::remove_file(&path);
+
+        let (set, members) = result.unwrap();
+        assert_eq!(set.member_ids(), vec![path_string.clone()]);
+        assert_eq!(
+            (
+                set.members()[0].image.width(),
+                set.members()[0].image.height()
+            ),
+            (4, 2)
+        );
+        assert_eq!(members[0].path, path_string);
+        assert_eq!(members[0].metadata.as_ref().unwrap().camera, "Canon EOS R5");
+        assert_eq!(set.members()[0].metadata.make, "Canon");
+        assert_eq!(set.members()[0].metadata.model, "EOS R5");
     }
 
     #[test]
