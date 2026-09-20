@@ -1,10 +1,198 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
+
 use rawweave_image::{Image, Region};
 use rawweave_rendering::{
-    CacheKey, GpuContext, GraphRevision, MemoryRenderCache, PreviewQuality, RenderResult, TileCoord,
+    CacheKey, CancellationToken, CollectionProgress, CollectionScheduler, GpuContext,
+    GraphRevision, MemberCacheKey, MemberWork, MemoryRenderCache, PreviewQuality, RenderResult,
+    TileCoord,
 };
+
+#[test]
+fn collection_scheduler_stops_launching_new_members_after_cancellation() {
+    let scheduler = CollectionScheduler::new(2);
+    let cancellation = CancellationToken::new();
+    let started = Arc::new(AtomicUsize::new(0));
+    let works = (0..6)
+        .map(|index| MemberWork::new(format!("frame-{index}"), index))
+        .collect::<Vec<_>>();
+    let cancellation_for_work = cancellation.clone();
+    let started_for_work = Arc::clone(&started);
+
+    let error = scheduler
+        .run("map", &works, &cancellation, move |member_id, _, _| {
+            started_for_work.fetch_add(1, Ordering::SeqCst);
+            if member_id == "frame-0" {
+                cancellation_for_work.cancel();
+            }
+            Ok::<_, &'static str>(())
+        })
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        rawweave_rendering::CollectionError::Cancelled { .. }
+    ));
+    assert!(started.load(Ordering::SeqCst) < works.len());
+}
+
+#[test]
+fn collection_scheduler_reports_the_lowest_indexed_member_failure() {
+    let scheduler = CollectionScheduler::new(2);
+    let barrier = Arc::new(Barrier::new(2));
+    let works = [MemberWork::new("first", ()), MemberWork::new("second", ())];
+    let barrier_for_work = Arc::clone(&barrier);
+
+    let error = scheduler
+        .run(
+            "develop",
+            &works,
+            &CancellationToken::new(),
+            move |member_id, _, _| {
+                barrier_for_work.wait();
+                if member_id == "first" {
+                    Err::<(), _>("first failure")
+                } else {
+                    Err::<(), _>("second failure")
+                }
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "image-set member 'first' failed during stage 'develop': first failure"
+    );
+}
 
 fn image() -> Image {
     Image::from_pixels(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]).unwrap()
+}
+
+#[test]
+fn default_collection_scheduler_is_usable() {
+    let scheduler = CollectionScheduler::default();
+    let works = [MemberWork::new("frame-1", 1), MemberWork::new("frame-2", 2)];
+
+    let result = scheduler
+        .run("map", &works, &CancellationToken::new(), |_, value, _| {
+            Ok::<_, &'static str>(*value)
+        })
+        .unwrap();
+
+    assert_eq!(result, [1, 2]);
+}
+
+#[test]
+fn collection_scheduler_bounds_workers_and_restores_input_order() {
+    let scheduler = CollectionScheduler::new(2);
+    let cancellation = CancellationToken::new();
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let progress = Arc::new(std::sync::Mutex::new(Vec::<CollectionProgress>::new()));
+    let works = ["a", "b", "c", "d"]
+        .into_iter()
+        .map(|member_id| MemberWork::new(member_id, member_id.to_owned()))
+        .collect::<Vec<_>>();
+    let progress_observer = Arc::clone(&progress);
+    let peak_observer = Arc::clone(&peak);
+    let scheduler = scheduler.with_progress(move |event| {
+        progress_observer.lock().unwrap().push(event);
+    });
+
+    let result = scheduler
+        .run("develop", &works, &cancellation, move |member_id, _, _| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak_observer.fetch_max(current, Ordering::SeqCst);
+            if member_id == "a" || member_id == "c" {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let output = member_id.to_owned();
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok::<_, &'static str>(output)
+        })
+        .unwrap();
+
+    assert_eq!(result, ["a", "b", "c", "d"]);
+    assert!(peak.load(Ordering::SeqCst) <= 2);
+    let progress = progress.lock().unwrap();
+    assert_eq!(progress.len(), 4);
+    assert_eq!(progress.last().unwrap().completed, 4);
+    assert_eq!(progress.last().unwrap().total, 4);
+}
+
+#[test]
+fn collection_scheduler_names_member_and_stage_failures() {
+    let scheduler = CollectionScheduler::new(1);
+    let works = [MemberWork::new("frame-2", ())];
+
+    let error = scheduler
+        .run(
+            "raw-develop",
+            &works,
+            &CancellationToken::new(),
+            |_, _, _| Err::<(), _>("decoder unavailable"),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "image-set member 'frame-2' failed during stage 'raw-develop': decoder unavailable"
+    );
+}
+
+#[test]
+fn collection_scheduler_honors_cancellation_before_start() {
+    let scheduler = CollectionScheduler::new(2);
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let works = [MemberWork::new("frame-1", ())];
+
+    let error = scheduler
+        .run("map", &works, &cancellation, |_, _, _| {
+            Ok::<_, &'static str>(())
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cancelled"));
+}
+
+#[test]
+fn member_cache_key_distinguishes_member_stage_and_upstream_identity() {
+    let first = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
+    let same = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
+    let different_member = MemberCacheKey::new("imageset-map", 1, "frame-2", 11, 22);
+    let different_stage = MemberCacheKey::new("raw-develop", 1, "frame-1", 11, 22);
+    let different_version = MemberCacheKey::new("imageset-map", 2, "frame-1", 11, 22);
+    let different_input = MemberCacheKey::new("imageset-map", 1, "frame-1", 12, 22);
+    let different_parameters = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 23);
+
+    assert_eq!(first, same);
+    assert_ne!(first, different_member);
+    assert_ne!(first, different_stage);
+    assert_ne!(first, different_version);
+    assert_ne!(first, different_input);
+    assert_ne!(first, different_parameters);
+}
+
+#[test]
+fn member_render_cache_reuses_only_matching_member_keys() {
+    let mut cache = MemoryRenderCache::new(8);
+    let key = MemberCacheKey::new("imageset-map", 1, "frame-1", 11, 22);
+    let other = MemberCacheKey::new("imageset-map", 1, "frame-2", 11, 22);
+    let image = Arc::new(image());
+
+    cache.insert_member(key.clone(), Arc::clone(&image));
+
+    let cached = cache.get_member(&key).unwrap();
+    assert!(Arc::ptr_eq(&cached, &image));
+    assert!(cache.get_member(&other).is_none());
+    assert_eq!(cache.member_len(), 1);
+    assert_eq!(cache.invalidate_node("imageset-map"), 1);
+    assert!(cache.get_member(&key).is_none());
+    assert!(cache.is_empty());
 }
 
 fn key(quality: PreviewQuality) -> CacheKey {

@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 
 use rawweave_image::{
     Dimensions, GpuImage, GpuImageResource, Image, Mask, Pixel, PixelFormat, Region,
@@ -70,6 +71,313 @@ impl TileRequest {
             mip_level,
             quality,
         }
+    }
+}
+
+/// Cooperative cancellation shared by one collection evaluation.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Progress reported after a member completes successfully.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectionProgress {
+    pub member_id: String,
+    pub stage: String,
+    pub completed: usize,
+    pub total: usize,
+}
+
+pub type CollectionProgressCallback = Arc<dyn Fn(CollectionProgress) + Send + Sync>;
+
+/// A member and its stable position in a collection evaluation.
+#[derive(Clone, Debug)]
+pub struct MemberWork<T> {
+    pub member_id: String,
+    pub input: T,
+}
+
+impl<T> MemberWork<T> {
+    pub fn new(member_id: impl Into<String>, input: T) -> Self {
+        Self {
+            member_id: member_id.into(),
+            input,
+        }
+    }
+}
+
+/// Identity for cached work performed for one ImageSet member.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MemberCacheKey {
+    pub node_id: String,
+    pub implementation_version: u32,
+    pub member_id: String,
+    pub upstream_hash: u64,
+    pub parameter_hash: u64,
+}
+
+impl MemberCacheKey {
+    pub fn new(
+        node_id: impl Into<String>,
+        implementation_version: u32,
+        member_id: impl Into<String>,
+        upstream_hash: u64,
+        parameter_hash: u64,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            implementation_version,
+            member_id: member_id.into(),
+            upstream_hash,
+            parameter_hash,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CollectionError {
+    #[error("image-set evaluation was cancelled after {completed} of {total} members")]
+    Cancelled { completed: usize, total: usize },
+    #[error("image-set member '{member_id}' failed during stage '{stage}': {message}")]
+    MemberFailure {
+        member_id: String,
+        stage: String,
+        message: String,
+    },
+}
+
+/// Runs independent member work with a local bounded set of in-flight jobs.
+///
+/// The scheduler owns no queue and has no process-global state. Each call
+/// starts at most `concurrency` scoped threads and stores results by input
+/// index, so completion order cannot change the returned collection order.
+#[derive(Clone)]
+pub struct CollectionScheduler {
+    concurrency: usize,
+    progress: Option<CollectionProgressCallback>,
+}
+
+impl Default for CollectionScheduler {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+impl fmt::Debug for CollectionScheduler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CollectionScheduler")
+            .field("concurrency", &self.concurrency)
+            .field("has_progress_callback", &self.progress.is_some())
+            .finish()
+    }
+}
+
+impl CollectionScheduler {
+    pub fn new(concurrency: usize) -> Self {
+        Self {
+            concurrency: concurrency.max(1),
+            progress: None,
+        }
+    }
+
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    pub fn with_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(CollectionProgress) + Send + Sync + 'static,
+    {
+        self.progress = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn with_progress_callback(mut self, callback: CollectionProgressCallback) -> Self {
+        self.progress = Some(callback);
+        self
+    }
+
+    pub fn run<T, R, E, F>(
+        &self,
+        stage: &str,
+        works: &[MemberWork<T>],
+        cancellation: &CancellationToken,
+        work: F,
+    ) -> Result<Vec<R>, CollectionError>
+    where
+        T: Sync,
+        R: Send,
+        E: fmt::Display + Send,
+        F: Fn(&str, &T, &CancellationToken) -> Result<R, E> + Send + Sync,
+    {
+        self.run_inner(stage, works, cancellation, work, self.progress.as_ref())
+    }
+
+    pub fn run_with_progress<T, R, E, F>(
+        &self,
+        stage: &str,
+        works: &[MemberWork<T>],
+        cancellation: &CancellationToken,
+        work: F,
+        progress: CollectionProgressCallback,
+    ) -> Result<Vec<R>, CollectionError>
+    where
+        T: Sync,
+        R: Send,
+        E: fmt::Display + Send,
+        F: Fn(&str, &T, &CancellationToken) -> Result<R, E> + Send + Sync,
+    {
+        self.run_inner(stage, works, cancellation, work, Some(&progress))
+    }
+
+    fn run_inner<T, R, E, F>(
+        &self,
+        stage: &str,
+        works: &[MemberWork<T>],
+        cancellation: &CancellationToken,
+        work: F,
+        progress: Option<&CollectionProgressCallback>,
+    ) -> Result<Vec<R>, CollectionError>
+    where
+        T: Sync,
+        R: Send,
+        E: fmt::Display + Send,
+        F: Fn(&str, &T, &CancellationToken) -> Result<R, E> + Send + Sync,
+    {
+        let total = works.len();
+        if cancellation.is_cancelled() {
+            return Err(CollectionError::Cancelled {
+                completed: 0,
+                total,
+            });
+        }
+        if works.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let work = Arc::new(work);
+        thread::scope(|scope| {
+            let (sender, receiver) = mpsc::channel();
+            let mut next = 0_usize;
+            let mut active = 0_usize;
+            let mut completed = 0_usize;
+            let mut results = (0..total).map(|_| None).collect::<Vec<Option<R>>>();
+            let mut failure: Option<(usize, CollectionError)> = None;
+
+            while active > 0 || (next < total && failure.is_none() && !cancellation.is_cancelled())
+            {
+                while active < self.concurrency
+                    && next < total
+                    && failure.is_none()
+                    && !cancellation.is_cancelled()
+                {
+                    let index = next;
+                    next += 1;
+                    active += 1;
+                    let member = &works[index];
+                    let member_id = member.member_id.clone();
+                    let input = &member.input;
+                    let sender = sender.clone();
+                    let cancellation = cancellation.clone();
+                    let work = Arc::clone(&work);
+                    scope.spawn(move || {
+                        let result = work(&member_id, input, &cancellation)
+                            .map_err(|error| error.to_string());
+                        let _ = sender.send((index, member_id, result));
+                    });
+                }
+
+                if active == 0 {
+                    break;
+                }
+                let Ok((index, member_id, result)) = receiver.recv() else {
+                    break;
+                };
+                active -= 1;
+                match result {
+                    Ok(value) if !cancellation.is_cancelled() && failure.is_none() => {
+                        results[index] = Some(value);
+                        completed += 1;
+                        if let Some(progress) = progress {
+                            progress(CollectionProgress {
+                                member_id,
+                                stage: stage.to_owned(),
+                                completed,
+                                total,
+                            });
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(message) => {
+                        let candidate = CollectionError::MemberFailure {
+                            member_id,
+                            stage: stage.to_owned(),
+                            message,
+                        };
+                        if failure
+                            .as_ref()
+                            .is_none_or(|(failed_index, _)| index < *failed_index)
+                        {
+                            failure = Some((index, candidate));
+                        }
+                        cancellation.cancel();
+                    }
+                }
+            }
+
+            while active > 0 {
+                let Ok((index, member_id, result)) = receiver.recv() else {
+                    break;
+                };
+                active -= 1;
+                if let Err(message) = result {
+                    let candidate = CollectionError::MemberFailure {
+                        member_id,
+                        stage: stage.to_owned(),
+                        message,
+                    };
+                    if failure
+                        .as_ref()
+                        .is_none_or(|(failed_index, _)| index < *failed_index)
+                    {
+                        failure = Some((index, candidate));
+                    }
+                }
+            }
+
+            if let Some((_, error)) = failure {
+                return Err(error);
+            }
+            if cancellation.is_cancelled() {
+                return Err(CollectionError::Cancelled { completed, total });
+            }
+            results
+                .into_iter()
+                .map(|result| result.ok_or(CollectionError::Cancelled { completed, total }))
+                .collect()
+        })
+    }
+}
+
+impl From<usize> for CollectionScheduler {
+    fn from(concurrency: usize) -> Self {
+        Self::new(concurrency)
     }
 }
 
@@ -165,6 +473,8 @@ pub struct MemoryRenderCache {
     order: VecDeque<CacheKey>,
     mask_entries: HashMap<CacheKey, MaskRenderResult>,
     mask_order: VecDeque<CacheKey>,
+    member_entries: HashMap<MemberCacheKey, Arc<Image>>,
+    member_order: VecDeque<MemberCacheKey>,
 }
 
 impl MemoryRenderCache {
@@ -175,19 +485,56 @@ impl MemoryRenderCache {
             order: VecDeque::new(),
             mask_entries: HashMap::new(),
             mask_order: VecDeque::new(),
+            member_entries: HashMap::new(),
+            member_order: VecDeque::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len() + self.mask_entries.len()
+        self.entries.len() + self.mask_entries.len() + self.member_entries.len()
+    }
+
+    pub fn member_len(&self) -> usize {
+        self.member_entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.mask_entries.is_empty()
+        self.entries.is_empty() && self.mask_entries.is_empty() && self.member_entries.is_empty()
     }
 
     pub fn get(&self, key: &CacheKey) -> Option<RenderResult> {
         self.entries.get(key).cloned()
+    }
+
+    pub fn get_member(&self, key: &MemberCacheKey) -> Option<Arc<Image>> {
+        self.member_entries.get(key).cloned()
+    }
+
+    pub fn insert_member(&mut self, key: MemberCacheKey, image: Arc<Image>) {
+        if self.capacity == 0 {
+            return;
+        }
+        if !self.member_entries.contains_key(&key) {
+            self.member_order.push_back(key.clone());
+        }
+        self.member_entries.insert(key, image);
+        self.trim_to_capacity();
+    }
+
+    pub fn invalidate_member_node(&mut self, node_id: &str) -> usize {
+        let keys = self
+            .member_entries
+            .keys()
+            .filter(|key| key.node_id == node_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = keys.len();
+        for key in keys {
+            self.member_entries.remove(&key);
+        }
+        self.member_order
+            .retain(|key| self.member_entries.contains_key(key));
+        count
     }
 
     pub fn insert(&mut self, key: CacheKey, result: RenderResult) {
@@ -269,14 +616,26 @@ impl MemoryRenderCache {
     }
 
     pub fn invalidate_node(&mut self, node_id: &str) -> usize {
-        self.invalidate_where(|key| key.node_id == node_id)
+        self.invalidate_where(|key| key.node_id == node_id) + self.invalidate_member_node(node_id)
     }
 
     pub fn invalidate_nodes<'a>(&mut self, node_ids: impl IntoIterator<Item = &'a str>) -> usize {
         let node_ids = node_ids
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        self.invalidate_where(|key| node_ids.contains(key.node_id.as_str()))
+        let count = self.invalidate_where(|key| node_ids.contains(key.node_id.as_str()));
+        let member_keys = self
+            .member_entries
+            .keys()
+            .filter(|key| node_ids.contains(key.node_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &member_keys {
+            self.member_entries.remove(key);
+        }
+        self.member_order
+            .retain(|key| self.member_entries.contains_key(key));
+        count + member_keys.len()
     }
 
     pub fn invalidate_revision(&mut self, revision: GraphRevision) -> usize {
@@ -310,6 +669,8 @@ impl MemoryRenderCache {
         self.order.clear();
         self.mask_entries.clear();
         self.mask_order.clear();
+        self.member_entries.clear();
+        self.member_order.clear();
     }
 
     fn invalidate_where(&mut self, predicate: impl Fn(&CacheKey) -> bool) -> usize {
@@ -344,6 +705,8 @@ impl MemoryRenderCache {
                 self.entries.remove(&oldest);
             } else if let Some(oldest) = self.mask_order.pop_front() {
                 self.mask_entries.remove(&oldest);
+            } else if let Some(oldest) = self.member_order.pop_front() {
+                self.member_entries.remove(&oldest);
             } else {
                 break;
             }
