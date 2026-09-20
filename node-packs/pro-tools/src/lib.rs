@@ -102,7 +102,7 @@ fn string_parameter(
 }
 
 fn radius_parameter(default: i64, max: i64) -> ParameterDescriptor {
-    integer_parameter("radius", "Radius", default).with_bounds(Some(0.0), Some(max as f32))
+    integer_parameter("radius", "Radius", default).with_bounds(Some(1.0), Some(max as f32))
 }
 
 trait ParameterDescriptorBounds {
