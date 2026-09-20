@@ -1,12 +1,23 @@
+use std::collections::BTreeMap;
+
 use rawweave_core_image::register_nodes;
-use rawweave_image::Image;
+use rawweave_image::{Image, PixelFormat};
 use rawweave_node_api::{
-    AlignmentState, EvaluationContext, ImageSet, ImageSetMember, ImageSetOrder, Inputs, Metadata,
-    NodeRegistry, Parameters, Value,
+    AlignmentProvenance, AlignmentState, AlignmentTransform, EvaluationContext, ImageSet,
+    ImageSetMember, ImageSetOrder, Inputs, Metadata, NodeRegistry, Parameters, Value,
 };
 
 fn image(value: f32) -> Image {
     Image::from_pixels(2, 1, vec![[value, value, value, 1.0]; 2]).unwrap()
+}
+
+fn metadata(iso: u32, aperture: f32, shutter_seconds: f32) -> Metadata {
+    Metadata {
+        iso: Some(iso),
+        aperture: Some(aperture),
+        shutter_seconds: Some(shutter_seconds),
+        ..Metadata::default()
+    }
 }
 
 fn set() -> ImageSet {
@@ -18,6 +29,24 @@ fn set() -> ImageSet {
         ],
     )
     .unwrap()
+}
+
+fn aligned_set(members: Vec<ImageSetMember>) -> ImageSet {
+    let ids = members
+        .iter()
+        .map(|member| member.id.clone())
+        .collect::<Vec<_>>();
+    let transforms = ids
+        .iter()
+        .map(|id| (id.clone(), AlignmentTransform::identity()))
+        .collect::<BTreeMap<_, _>>();
+    ImageSet::new(ImageSetOrder::Ordered, members)
+        .unwrap()
+        .with_alignment(AlignmentState::Aligned {
+            reference_member: ids[0].clone(),
+            transforms,
+            provenance: AlignmentProvenance::new("test-alignment", 1, 0),
+        })
 }
 
 fn evaluate(
@@ -52,20 +81,112 @@ fn imageset_nodes_are_registered_and_hdr_merge_is_collection_level() {
         assert!(registry.descriptor(type_id).is_some(), "missing {type_id}");
     }
 
+    let set = aligned_set(vec![
+        ImageSetMember::new("dark", image(0.25), metadata(100, 2.0, 0.01)),
+        ImageSetMember::new("bright", image(1.0), metadata(400, 2.0, 0.01)),
+    ]);
     let result = evaluate(
         &registry,
         "core.hdr-merge",
-        [("images".into(), Value::ImageSet(set()))]
+        [("images".into(), Value::ImageSet(set))]
             .into_iter()
             .collect(),
         Parameters::new(),
         EvaluationContext::default(),
     );
-    assert_eq!(
-        result.outputs["image"],
-        Value::Image(image(2.0)),
-        "HDR should combine all members instead of evaluating one image repeatedly"
-    );
+    let Value::Image(merged) = &result.outputs["image"] else {
+        panic!("HDR should emit an image");
+    };
+    assert!((merged.pixel(0, 0).unwrap()[0] - 1.0).abs() < 0.01);
+    let Value::ConfidenceMap(confidence) = &result.outputs["confidence"] else {
+        panic!("HDR should expose confidence");
+    };
+    assert!(confidence.pixel(0, 0).unwrap() > 0.0);
+    let Value::Mask(highlight_mask) = &result.outputs["highlight_mask"] else {
+        panic!("HDR should expose a highlight mask");
+    };
+    assert!(highlight_mask.pixel(0, 0).unwrap() > 0.0);
+    assert!(matches!(result.outputs["deghost_mask"], Value::Mask(_)));
+    assert!(matches!(result.outputs["diagnostics"], Value::String(_)));
+}
+
+#[test]
+fn hdr_merge_requires_alignment_and_reports_the_contract() {
+    let mut registry = NodeRegistry::default();
+    register_nodes(&mut registry).unwrap();
+    let error = registry
+        .instantiate("core.hdr-merge")
+        .unwrap()
+        .evaluate(
+            &[("images".into(), Value::ImageSet(set()))]
+                .into_iter()
+                .collect(),
+            &Parameters::new(),
+            &EvaluationContext::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("aligned"), "unexpected error: {error}");
+}
+
+#[test]
+fn hdr_merge_rejects_incompatible_formats_with_member_identity() {
+    let mut registry = NodeRegistry::default();
+    register_nodes(&mut registry).unwrap();
+    let incompatible = Image::from_pixels_with_metadata(
+        2,
+        1,
+        vec![[1.0, 1.0, 1.0, 1.0]; 2],
+        PixelFormat::Rgba16Float,
+        Default::default(),
+    )
+    .unwrap();
+    let error = registry
+        .instantiate("core.hdr-merge")
+        .unwrap()
+        .evaluate(
+            &[(
+                "images".into(),
+                Value::ImageSet(aligned_set(vec![
+                    ImageSetMember::new("reference", image(0.5), metadata(100, 2.0, 0.01)),
+                    ImageSetMember::new("bad-format", incompatible, metadata(100, 2.0, 0.01)),
+                ])),
+            )]
+            .into_iter()
+            .collect(),
+            &Parameters::new(),
+            &EvaluationContext::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("bad-format"), "unexpected error: {error}");
+    assert!(error.contains("format"), "unexpected error: {error}");
+}
+
+#[test]
+fn hdr_merge_reports_the_member_with_invalid_capture_metadata() {
+    let mut registry = NodeRegistry::default();
+    register_nodes(&mut registry).unwrap();
+    let error = registry
+        .instantiate("core.hdr-merge")
+        .unwrap()
+        .evaluate(
+            &[(
+                "images".into(),
+                Value::ImageSet(aligned_set(vec![
+                    ImageSetMember::new("good", image(0.5), metadata(100, 2.0, 0.01)),
+                    ImageSetMember::new("missing-iso", image(0.5), Metadata::default()),
+                ])),
+            )]
+            .into_iter()
+            .collect(),
+            &Parameters::new(),
+            &EvaluationContext::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("missing-iso"), "unexpected error: {error}");
+    assert!(error.contains("ISO"), "unexpected error: {error}");
 }
 
 #[test]
@@ -90,7 +211,92 @@ fn focus_stack_and_select_report_member_identity_on_failure() {
         &Parameters::new(),
         &EvaluationContext::default().with_parameter_override("images", "unused", 0_i64),
     );
-    assert!(invalid.is_ok());
+    assert!(invalid.is_err());
+}
+
+#[test]
+fn focus_stack_requires_alignment_and_emits_blended_diagnostics() {
+    let mut registry = NodeRegistry::default();
+    register_nodes(&mut registry).unwrap();
+    let reference = Image::from_pixels(
+        3,
+        1,
+        vec![
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap();
+    let focused = Image::from_pixels(
+        3,
+        1,
+        vec![
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+    .unwrap();
+    let result = evaluate(
+        &registry,
+        "core.focus-stack",
+        [(
+            "images".into(),
+            Value::ImageSet(aligned_set(vec![
+                ImageSetMember::new("reference", reference, Metadata::default()),
+                ImageSetMember::new("focused", focused, Metadata::default()),
+            ])),
+        )]
+        .into_iter()
+        .collect(),
+        Parameters::new(),
+        EvaluationContext::default(),
+    );
+    let Value::Image(output) = &result.outputs["image"] else {
+        panic!("focus stack should emit an image");
+    };
+    assert!(output.pixel(1, 0).unwrap()[0] > 0.0);
+    assert!(output.pixel(1, 0).unwrap()[0] < 1.0);
+    let Value::ConfidenceMap(confidence) = &result.outputs["confidence"] else {
+        panic!("focus stack should expose confidence");
+    };
+    assert!(
+        confidence
+            .mask()
+            .values()
+            .iter()
+            .all(|value| (0.0..=1.0).contains(value))
+    );
+    let Value::Mask(selection) = &result.outputs["selection_mask"] else {
+        panic!("focus stack should expose a selection mask");
+    };
+    assert!(
+        selection
+            .values()
+            .iter()
+            .all(|value| (0.0..=1.0).contains(value))
+    );
+    assert!(matches!(result.outputs["diagnostics"], Value::String(_)));
+}
+
+#[test]
+fn focus_stack_rejects_unaligned_sets() {
+    let mut registry = NodeRegistry::default();
+    register_nodes(&mut registry).unwrap();
+    let error = registry
+        .instantiate("core.focus-stack")
+        .unwrap()
+        .evaluate(
+            &[("images".into(), Value::ImageSet(set()))]
+                .into_iter()
+                .collect(),
+            &Parameters::new(),
+            &EvaluationContext::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("aligned"), "unexpected error: {error}");
 }
 
 #[test]
