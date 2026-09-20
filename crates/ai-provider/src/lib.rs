@@ -775,9 +775,9 @@ pub struct HttpProviderManifest {
     pub status_path: Option<String>,
     #[serde(default)]
     pub result_path: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_completion_states")]
     pub completion_states: BTreeSet<String>,
-    #[serde(default)]
+    #[serde(default = "default_failure_states")]
     pub failure_states: BTreeSet<String>,
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: usize,
@@ -808,10 +808,20 @@ impl HttpProviderManifest {
         }
     }
 
+    /// Validate and canonicalize the persisted manifest contract.
+    pub fn canonical(mut self) -> Result<Self, ProviderError> {
+        self.completion_states = normalized_states(&self.completion_states);
+        self.failure_states = normalized_states(&self.failure_states);
+        self.validate()?;
+        Ok(self)
+    }
+
     fn validate(&self) -> Result<(), ProviderError> {
-        if self.id.trim().is_empty() {
+        validate_manifest_text(&self.id, "id", 128)?;
+        validate_manifest_text(&self.name, "name", 256)?;
+        if self.submit.url.contains("$JOB_ID") {
             return Err(ProviderError::InvalidRequest(
-                "HTTP provider id cannot be empty".to_owned(),
+                "HTTP submit endpoint cannot contain $JOB_ID".to_owned(),
             ));
         }
         for endpoint in std::iter::once(&self.submit)
@@ -826,25 +836,144 @@ impl HttpProviderManifest {
                 "HTTP response limit must be greater than zero".to_owned(),
             ));
         }
-        if self.job_id_path.is_some() && self.status.is_none() && self.result.is_none() {
+        validate_json_path(self.job_id_path.as_deref(), "job_id_path")?;
+        validate_json_path(self.status_path.as_deref(), "status_path")?;
+        validate_json_path(self.result_path.as_deref(), "result_path")?;
+
+        let asynchronous = self.job_id_path.is_some();
+        if asynchronous {
+            let status = self.status.as_ref().ok_or_else(|| {
+                ProviderError::InvalidRequest(
+                    "asynchronous HTTP manifests require a status endpoint".to_owned(),
+                )
+            })?;
+            let result = self.result.as_ref().ok_or_else(|| {
+                ProviderError::InvalidRequest(
+                    "asynchronous HTTP manifests require a result endpoint".to_owned(),
+                )
+            })?;
+            for (name, endpoint) in [("status", status), ("result", result)] {
+                if endpoint.url.matches("$JOB_ID").count() != 1 {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "asynchronous HTTP {name} endpoint must contain exactly one $JOB_ID"
+                    )));
+                }
+            }
+            if let Some(cancel) = self.cancel.as_ref()
+                && cancel.url.matches("$JOB_ID").count() != 1
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "HTTP cancel endpoint must contain exactly one $JOB_ID".to_owned(),
+                ));
+            }
+            if self.completion_states.is_empty() || self.failure_states.is_empty() {
+                return Err(ProviderError::InvalidRequest(
+                    "asynchronous HTTP manifests need completion and failure states".to_owned(),
+                ));
+            }
+            if self
+                .completion_states
+                .iter()
+                .any(|state| self.failure_states.contains(state))
+            {
+                return Err(ProviderError::InvalidRequest(
+                    "completion and failure states must be disjoint".to_owned(),
+                ));
+            }
+        } else if self.status.is_some()
+            || self.result.is_some()
+            || self.cancel.is_some()
+            || self.status_path.is_some()
+            || self.result_path.is_some()
+            || !self.completion_states.is_empty()
+                && self.completion_states != default_completion_states()
+            || !self.failure_states.is_empty() && self.failure_states != default_failure_states()
+        {
             return Err(ProviderError::InvalidRequest(
-                "asynchronous HTTP manifests need a status or result endpoint".to_owned(),
+                "synchronous HTTP manifests cannot declare async endpoints or mappings".to_owned(),
             ));
         }
         Ok(())
     }
 }
 
+fn default_completion_states() -> BTreeSet<String> {
+    BTreeSet::from(["completed".to_owned(), "succeeded".to_owned()])
+}
+
+fn default_failure_states() -> BTreeSet<String> {
+    BTreeSet::from(["failed".to_owned(), "error".to_owned()])
+}
+
+fn normalized_states(states: &BTreeSet<String>) -> BTreeSet<String> {
+    states
+        .iter()
+        .map(|state| state.trim().to_ascii_lowercase())
+        .filter(|state| !state.is_empty())
+        .collect()
+}
+
+fn validate_manifest_text(value: &str, field: &str, max_bytes: usize) -> Result<(), ProviderError> {
+    if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(ProviderError::InvalidRequest(format!(
+            "HTTP manifest {field} is empty, oversized, or contains control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_json_path(path: Option<&str>, field: &str) -> Result<(), ProviderError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let Some(path) = path.strip_prefix("$.") else {
+        return Err(ProviderError::InvalidRequest(format!(
+            "HTTP manifest {field} must start with $."
+        )));
+    };
+    if path.is_empty() || path.split('.').any(|segment| segment.is_empty()) {
+        return Err(ProviderError::InvalidRequest(format!(
+            "HTTP manifest {field} must contain non-empty object segments"
+        )));
+    }
+    Ok(())
+}
+
 fn sensitive_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    let lower = name.trim().to_ascii_lowercase();
     lower == "authorization"
         || lower == "proxy-authorization"
         || lower == "cookie"
         || lower == "set-cookie"
+        || lower == "key"
         || lower.contains("api-key")
+        || lower.contains("api_key")
         || lower.contains("apikey")
         || lower.contains("token")
         || lower.contains("secret")
+}
+
+fn sensitive_query_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower == "key"
+        || lower == "api_key"
+        || lower == "apikey"
+        || lower == "api-key"
+        || lower.ends_with("_key")
+        || lower.ends_with("-key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("authorization")
+}
+
+fn loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
 }
 
 fn validate_endpoint(
@@ -852,23 +981,89 @@ fn validate_endpoint(
     allow_insecure_http: bool,
 ) -> Result<(), ProviderError> {
     let url = endpoint.url.replace("$JOB_ID", "job-id");
-    let https = url.starts_with("https://");
-    let http = url.starts_with("http://");
-    if !https && !(allow_insecure_http && http) {
+    if url.chars().any(char::is_control)
+        || url.chars().any(char::is_whitespace)
+        || url.contains('\\')
+    {
+        return Err(ProviderError::InvalidEndpoint(
+            "endpoint contains control characters or whitespace".to_owned(),
+        ));
+    }
+    let (scheme, remainder) = url.split_once("://").ok_or_else(|| {
+        ProviderError::InvalidEndpoint("endpoint must use an absolute HTTP(S) URL".to_owned())
+    })?;
+    if scheme != "https" && scheme != "http" {
+        return Err(ProviderError::InvalidEndpoint(
+            "endpoint must use HTTP or HTTPS".to_owned(),
+        ));
+    }
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ProviderError::InvalidEndpoint(
+            "endpoint must not contain credentials and must include a host".to_owned(),
+        ));
+    }
+    let host = if authority.starts_with('[') {
+        authority
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return Err(ProviderError::InvalidEndpoint(
+            "endpoint host cannot be empty".to_owned(),
+        ));
+    }
+    if !scheme.eq("https") && !(allow_insecure_http || loopback_host(host)) {
         return Err(ProviderError::InvalidEndpoint(
             "endpoint must use HTTPS unless insecure HTTP is explicitly enabled".to_owned(),
         ));
     }
-    if url.contains('@') || url.contains('\n') || url.contains('\r') {
+    if remainder
+        .split_once('?')
+        .map(|(_, query)| query)
+        .and_then(|query| query.split('#').next())
+        .unwrap_or_default()
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.split_once('=').map_or(part, |(name, _)| name))
+        .any(sensitive_query_name)
+    {
         return Err(ProviderError::InvalidEndpoint(
-            "endpoint contains credentials or control characters".to_owned(),
+            "endpoint credentials must use a secret header reference".to_owned(),
         ));
     }
     for (name, value) in &endpoint.headers {
-        if sensitive_header(name) && matches!(value, HeaderValue::Literal(_)) {
-            return Err(ProviderError::InvalidEndpoint(format!(
-                "sensitive header '{name}' must use a secret reference"
-            )));
+        if name.trim().is_empty() || name.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidEndpoint(
+                "endpoint header names must be non-empty and printable".to_owned(),
+            ));
+        }
+        match value {
+            HeaderValue::Literal(value) if value.chars().any(char::is_control) => {
+                return Err(ProviderError::InvalidEndpoint(
+                    "endpoint header values must not contain control characters".to_owned(),
+                ));
+            }
+            HeaderValue::Literal(_) if sensitive_header(name) => {
+                return Err(ProviderError::InvalidEndpoint(format!(
+                    "sensitive header '{name}' must use a secret reference"
+                )));
+            }
+            HeaderValue::SecretRef(reference) if reference.trim().is_empty() => {
+                return Err(ProviderError::InvalidEndpoint(
+                    "secret header references cannot be empty".to_owned(),
+                ));
+            }
+            HeaderValue::SecretRef(reference) if reference.chars().any(char::is_control) => {
+                return Err(ProviderError::InvalidEndpoint(
+                    "secret header references must not contain control characters".to_owned(),
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -988,7 +1183,7 @@ impl HttpProvider {
     where
         F: Fn(&str) -> Result<Option<String>, ProviderError> + Send + Sync + 'static,
     {
-        manifest.validate()?;
+        let manifest = manifest.canonical()?;
         Ok(Self {
             manifest,
             transport,
@@ -1317,7 +1512,7 @@ pub struct ComfyUiConfig {
     pub client_id: String,
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: usize,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub allow_insecure_http: bool,
 }
 
@@ -1329,10 +1524,6 @@ fn default_provider_id() -> String {
     "comfyui".to_owned()
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 impl ComfyUiConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
@@ -1340,7 +1531,7 @@ impl ComfyUiConfig {
             base_url: base_url.into(),
             client_id: default_client_id(),
             max_response_bytes: default_max_response_bytes(),
-            allow_insecure_http: true,
+            allow_insecure_http: false,
         }
     }
 
@@ -1770,5 +1961,106 @@ mod tests {
             &Value::String("one".to_owned())
         );
         assert!(json_path(&value, "job.id").is_err());
+    }
+
+    #[test]
+    fn async_http_manifests_require_status_and_result_contracts() {
+        let mut manifest = HttpProviderManifest::new(
+            "id",
+            "name",
+            HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+        );
+        manifest.job_id_path = Some("$.id".to_owned());
+        manifest.status = Some(HttpEndpoint::new(
+            HttpMethod::Get,
+            "https://example.test/jobs/$JOB_ID",
+        ));
+        assert!(
+            HttpProvider::new(manifest, Arc::new(NoopTransport), |_reference| Ok(None)).is_err()
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_credentials_in_endpoint_query_parameters() {
+        let endpoint = HttpEndpoint::new(
+            HttpMethod::Post,
+            "https://example.test/submit?api_key=plaintext-secret",
+        );
+        let manifest = HttpProviderManifest::new("id", "name", endpoint);
+        assert!(
+            HttpProvider::new(manifest, Arc::new(NoopTransport), |_reference| Ok(None)).is_err()
+        );
+    }
+
+    #[test]
+    fn comfyui_rejects_remote_insecure_http_without_opt_in() {
+        let config = ComfyUiConfig::new("http://ai.example.test:8188");
+        assert!(ComfyUiProvider::new(config, Arc::new(NoopTransport)).is_err());
+    }
+
+    #[test]
+    fn http_provider_uses_canonical_manifest_state_names() {
+        let mut manifest = HttpProviderManifest::new(
+            "id",
+            "name",
+            HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+        );
+        manifest.job_id_path = Some("$.id".to_owned());
+        manifest.status = Some(HttpEndpoint::new(
+            HttpMethod::Get,
+            "https://example.test/jobs/$JOB_ID",
+        ));
+        manifest.result = Some(HttpEndpoint::new(
+            HttpMethod::Get,
+            "https://example.test/jobs/$JOB_ID/result",
+        ));
+        manifest.completion_states = BTreeSet::from([" COMPLETED ".to_owned()]);
+        manifest.failure_states = BTreeSet::from([" FAILED ".to_owned()]);
+
+        let provider =
+            HttpProvider::new(manifest, Arc::new(NoopTransport), |_reference| Ok(None)).unwrap();
+        assert_eq!(
+            provider.manifest.completion_states,
+            BTreeSet::from(["completed".to_owned()])
+        );
+        assert_eq!(
+            provider.manifest.failure_states,
+            BTreeSet::from(["failed".to_owned()])
+        );
+    }
+
+    #[test]
+    fn omitted_async_state_mappings_use_safe_defaults() {
+        let manifest: HttpProviderManifest = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "submit": {"method": "Post", "url": "https://example.test/submit"},
+            "status": {"method": "Get", "url": "https://example.test/jobs/$JOB_ID"},
+            "result": {"method": "Get", "url": "https://example.test/jobs/$JOB_ID/result"},
+            "job_id_path": "$.id"
+        }))
+        .unwrap();
+        let provider =
+            HttpProvider::new(manifest, Arc::new(NoopTransport), |_reference| Ok(None)).unwrap();
+        assert!(provider.manifest.completion_states.contains("completed"));
+        assert!(provider.manifest.failure_states.contains("failed"));
+    }
+
+    #[test]
+    fn manifest_rejects_sensitive_query_names_without_values() {
+        let endpoint = HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit?x-api-key");
+        let manifest = HttpProviderManifest::new("id", "name", endpoint);
+        assert!(
+            HttpProvider::new(manifest, Arc::new(NoopTransport), |_reference| Ok(None)).is_err()
+        );
+    }
+
+    #[derive(Debug)]
+    struct NoopTransport;
+
+    impl HttpTransport for NoopTransport {
+        fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+            Err(ProviderError::Transport("test transport".to_owned()))
+        }
     }
 }
