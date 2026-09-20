@@ -118,6 +118,21 @@ describe('BatchPanel', () => {
     expect(create?.disabled).toBe(false);
   });
 
+  it('does not expose desktop policies that require checkpoint generation', async () => {
+    const controller = new BatchController(createMemoryBatchPlatform(), () => 'unsupported-policy-ui');
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<BatchPanel controller={controller} queueItems={[item]} workflow={manualContext} />);
+    });
+
+    const policy = host.querySelector<HTMLSelectElement>('[aria-label="Batch checkpoint policy"]');
+    const values = Array.from(policy?.querySelectorAll('option') ?? [], (option) => option.value);
+    expect(values).not.toContain('generate_if_missing');
+    expect(values).not.toContain('regenerate_all');
+  });
+
   it('requires an explicit checkpoint policy when a nested workflow contains one', async () => {
     const controller = new BatchController(createMemoryBatchPlatform(), () => 'nested-policy-ui');
     host = document.createElement('div');

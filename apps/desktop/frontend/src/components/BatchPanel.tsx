@@ -61,13 +61,13 @@ function formatResolution(value: BatchResolution): string {
   return 'long_edge';
 }
 
-const checkpointPolicyLabels: Record<BatchCheckpointPolicy, string> = {
+type DesktopCheckpointPolicy = Exclude<BatchCheckpointPolicy, 'generate_if_missing' | 'regenerate_all'>;
+
+const checkpointPolicyLabels: Record<DesktopCheckpointPolicy, string> = {
   after_each_item: 'After each item (legacy)',
   after_each_output: 'After each output (legacy)',
   manual: 'Manual (legacy)',
   use_committed: 'Use committed',
-  generate_if_missing: 'Generate if missing',
-  regenerate_all: 'Regenerate all',
   fail_if_stale: 'Fail if stale',
 };
 
@@ -244,7 +244,7 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
             onChange={(event) => controller.updateCheckpointPolicy(event.target.value as BatchCheckpointPolicy)}
             value={controller.checkpointPolicy}
           >
-            {(Object.keys(checkpointPolicyLabels) as BatchCheckpointPolicy[]).map((policy) => (
+            {(Object.keys(checkpointPolicyLabels) as DesktopCheckpointPolicy[]).map((policy) => (
               <option key={policy} value={policy}>{checkpointPolicyLabels[policy]}</option>
             ))}
           </select>

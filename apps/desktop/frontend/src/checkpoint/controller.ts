@@ -79,15 +79,16 @@ export class CheckpointController {
     const current = this.state.statuses.find((candidate) => candidate.nodeId === event.nodeId);
     if (!current || current.outputPort !== event.outputPort) return;
     const progress = event.progress <= 1 ? event.progress * 100 : event.progress;
-    const state = event.phase === 'generating' || event.phase === 'committing'
+    const inferredState = event.phase === 'generating' || event.phase === 'committing'
       ? 'generating'
       : event.phase === 'complete'
         ? 'fresh'
         : event.phase;
+    const state = event.state ?? inferredState;
     this.setStatus({
       ...current,
       state,
-      availability: state === 'fresh' ? 'fresh' : current.availability,
+      availability: event.availability ?? (state === 'fresh' ? 'fresh' : current.availability),
       progress: event.phase === 'generating' || event.phase === 'committing' ? progress : null,
       failure: event.phase === 'failed' ? event.message ?? current.failure : current.failure,
     });

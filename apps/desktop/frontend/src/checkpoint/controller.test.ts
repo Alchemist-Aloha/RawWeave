@@ -79,6 +79,42 @@ describe('CheckpointController', () => {
     expect(controller.state.status?.progress).toBe(42);
   });
 
+  it('keeps a completed generation stale when the authoritative event says inputs changed', async () => {
+    let progressListener: ((event: CheckpointProgressEvent) => void) | undefined;
+    let resolveGeneration: ((value: CheckpointStatus) => void) | undefined;
+    const stale = status('stale');
+    const platform: CheckpointPlatform = {
+      async list() { return [stale]; },
+      async status() { return stale; },
+      async generate() {
+        return new Promise<CheckpointStatus>((resolve) => { resolveGeneration = resolve; });
+      },
+      async cancel() { return status('cancelled'); },
+      subscribeProgress(listener) {
+        progressListener = listener;
+        return () => undefined;
+      },
+    };
+    const controller = new CheckpointController(platform);
+    await controller.refresh('manual-1');
+    const pending = controller.generate('manual-1', 'image');
+
+    progressListener?.({
+      nodeId: 'manual-1',
+      outputPort: 'image',
+      progress: 1,
+      phase: 'complete',
+      message: 'checkpoint inputs changed while generating',
+      ...({ state: 'stale', availability: 'stale' } as Partial<CheckpointProgressEvent>),
+    });
+
+    expect(controller.state.status?.state).toBe('stale');
+    expect(controller.state.status?.availability).toBe('stale');
+
+    resolveGeneration?.(stale);
+    await pending;
+  });
+
   it('can dismiss an operation error after it has been rendered', async () => {
     const platform: CheckpointPlatform = {
       async list() { throw new Error('checkpoint service unavailable'); },

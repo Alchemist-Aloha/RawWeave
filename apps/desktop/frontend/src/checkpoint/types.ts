@@ -41,6 +41,9 @@ export interface CheckpointProgressEvent {
   progress: number;
   phase: 'generating' | 'committing' | 'complete' | 'failed' | 'cancelled';
   message?: string | null;
+  /** The backend may report a state that is more authoritative than the phase. */
+  state?: CheckpointState;
+  availability?: CheckpointAvailability;
 }
 
 export interface CheckpointPlatform {

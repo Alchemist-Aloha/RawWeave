@@ -59,6 +59,8 @@ interface RustCheckpointProgress {
   progress: number;
   phase: CheckpointProgressEvent['phase'];
   message?: string | null;
+  state?: string;
+  availability?: string;
 }
 
 function message(error: unknown): Error {
@@ -95,6 +97,12 @@ function mapState(value: string): CheckpointState {
     case 'cancelled': return 'cancelled';
     default: return 'ungenerated';
   }
+}
+
+function mapAvailability(value: string | undefined): CheckpointStatus['availability'] | undefined {
+  return value === 'fresh' || value === 'stale' || value === 'missing' || value === 'incompatible'
+    ? value
+    : undefined;
 }
 
 function mapStatus(value: RustCheckpointStatus): CheckpointStatus {
@@ -162,6 +170,8 @@ export function createTauriCheckpointPlatform(): CheckpointPlatform {
           progress: payload.progress,
           phase: payload.phase,
           message: payload.message,
+          state: payload.state === undefined ? undefined : mapState(payload.state),
+          availability: mapAvailability(payload.availability),
         });
       }).then((remove) => {
         if (active) unlisten = remove;
