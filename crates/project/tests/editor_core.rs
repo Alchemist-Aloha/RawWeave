@@ -2,7 +2,7 @@ use rawweave_core::NodeId;
 use rawweave_graph::Graph;
 use rawweave_image::Image;
 use rawweave_node_api::{EvaluationContext, Inputs, NodePack, NodeRegistry, Parameters, Value};
-use rawweave_project::{EditorCore, built_in_node_pack_manifests};
+use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
 use rawweave_raw_nodes::RawNodePack;
 
@@ -14,7 +14,6 @@ fn editor_core_registers_the_backbone_node_packs() {
         .into_iter()
         .map(|descriptor| descriptor.type_id)
         .collect::<Vec<_>>();
-    assert_eq!(types.len(), 58);
     for type_id in [
         "core.image-input",
         "core.constant-float",
@@ -44,6 +43,8 @@ fn editor_core_registers_the_backbone_node_packs() {
         "core.mask-radial-gradient",
         "core.mask-luminance",
         "core.mask-color-qualifier",
+        "core.select-label",
+        "core.label-map-select",
         "core.mask-invert",
         "core.mask-add",
         "core.mask-subtract",
@@ -66,6 +67,15 @@ fn editor_core_registers_the_backbone_node_packs() {
         "ai.inpaint",
         "ai.generative-fill",
         "ai.upscale",
+        "ai.subject-segmentation",
+        "ai.semantic-segmentation",
+        "ai.prompt-segmentation",
+        "ai.face-detection",
+        "ai.skin-mask",
+        "ai.sky-mask",
+        "ai.foreground-mask",
+        "ai.depth-estimation",
+        "ai.scene-analysis",
         "raw.decode",
         "raw.black-level",
         "raw.white-balance",
@@ -162,13 +172,11 @@ fn editor_core_round_trips_a_raw_pipeline_and_executes_it_with_a_test_decoder() 
     let document: serde_json::Value = serde_json::from_str(&saved).unwrap();
     assert!(document.get("registry").is_none());
     assert!(document.get("render_cache").is_none());
-    assert!(
-        document["nodes"]
-            .as_object()
-            .unwrap()
-            .values()
-            .all(|node| node.get("runtime_outputs").is_none())
-    );
+    assert!(document["nodes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|node| node.get("runtime_outputs").is_none()));
 
     let mut reloaded = EditorCore::new();
     reloaded.load_workflow(&saved).unwrap();

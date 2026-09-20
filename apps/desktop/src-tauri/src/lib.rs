@@ -908,6 +908,11 @@ fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, String> {
     match value {
         Value::Image(image) => Ok(CheckpointPayload::Image(image)),
         Value::Mask(mask) => Ok(CheckpointPayload::Mask(mask)),
+        Value::MaskSet(set) => Ok(CheckpointPayload::MaskSet(set)),
+        Value::LabelMap(map) => Ok(CheckpointPayload::LabelMap(map)),
+        Value::ConfidenceMap(map) => Ok(CheckpointPayload::ConfidenceMap(map)),
+        Value::DepthMap(map) => Ok(CheckpointPayload::DepthMap(map)),
+        Value::RegionSet(set) => Ok(CheckpointPayload::RegionSet(set)),
         Value::Bytes(bytes) => Ok(CheckpointPayload::SpatialData(bytes)),
         value => Err(format!(
             "checkpoint output type '{}' is not persistable",

@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -562,6 +563,22 @@ impl MaskSet {
     pub fn masks(&self) -> &[Mask] {
         &self.masks
     }
+
+    pub fn len(&self) -> usize {
+        self.masks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.masks.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Mask> {
+        self.masks.get(index)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Mask> {
+        self.masks.iter()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -569,6 +586,8 @@ pub struct LabelMap {
     dimensions: Dimensions,
     origin: (u32, u32),
     values: Vec<u16>,
+    #[serde(default)]
+    labels: BTreeMap<String, u16>,
     revision: u64,
     cache_identity: u64,
 }
@@ -578,6 +597,15 @@ impl LabelMap {
         dimensions: Dimensions,
         origin: (u32, u32),
         values: Vec<u16>,
+    ) -> Result<Self, MaskError> {
+        Self::from_values_with_labels(dimensions, origin, values, BTreeMap::new())
+    }
+
+    pub fn from_values_with_labels(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        values: Vec<u16>,
+        labels: BTreeMap<String, u16>,
     ) -> Result<Self, MaskError> {
         let expected = dimensions
             .pixel_count()
@@ -591,11 +619,13 @@ impl LabelMap {
                 actual: values.len(),
             });
         }
-        let cache_identity = integer_identity(dimensions, origin, &values);
+        validate_spatial_origin(origin, dimensions)?;
+        let cache_identity = integer_identity_with_labels(dimensions, origin, &values, &labels);
         Ok(Self {
             dimensions,
             origin,
             values,
+            labels,
             revision: next_revision(),
             cache_identity,
         })
@@ -604,15 +634,58 @@ impl LabelMap {
     pub fn dimensions(&self) -> Dimensions {
         self.dimensions
     }
+
     pub fn origin(&self) -> (u32, u32) {
         self.origin
     }
+
+    pub fn global_region(&self) -> Region {
+        Region::new(
+            self.origin.0,
+            self.origin.1,
+            self.dimensions.width,
+            self.dimensions.height,
+        )
+    }
+
     pub fn values(&self) -> &[u16] {
         &self.values
     }
+
+    pub fn labels(&self) -> &BTreeMap<String, u16> {
+        &self.labels
+    }
+
+    pub fn label_value(&self, name: &str) -> Option<u16> {
+        self.labels.get(name).copied()
+    }
+
+    pub fn label_name(&self, value: u16) -> Option<&str> {
+        self.labels
+            .iter()
+            .find_map(|(name, candidate)| (*candidate == value).then_some(name.as_str()))
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<u16> {
+        if x >= self.dimensions.width || y >= self.dimensions.height {
+            return None;
+        }
+        self.values
+            .get(y as usize * self.dimensions.width as usize + x as usize)
+            .copied()
+    }
+
+    pub fn pixel_global(&self, x: u32, y: u32) -> Option<u16> {
+        if !self.global_region().contains(x, y) {
+            return None;
+        }
+        self.pixel(x - self.origin.0, y - self.origin.1)
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
     pub fn cache_identity(&self) -> u64 {
         self.cache_identity
     }
@@ -627,8 +700,29 @@ impl ConfidenceMap {
     pub fn from_mask(mask: Mask) -> Self {
         Self { mask }
     }
+
     pub fn mask(&self) -> &Mask {
         &self.mask
+    }
+
+    pub fn dimensions(&self) -> Dimensions {
+        self.mask.dimensions()
+    }
+
+    pub fn origin(&self) -> (u32, u32) {
+        self.mask.origin()
+    }
+
+    pub fn global_region(&self) -> Region {
+        self.mask.global_region()
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<f32> {
+        self.mask.pixel(x, y)
+    }
+
+    pub fn pixel_global(&self, x: u32, y: u32) -> Option<f32> {
+        self.mask.pixel_global(x, y)
     }
 }
 
@@ -659,6 +753,7 @@ impl DepthMap {
                 actual: values.len(),
             });
         }
+        validate_spatial_origin(origin, dimensions)?;
         if values.iter().any(|value| !value.is_finite()) {
             return Err(MaskError::NonFiniteValue);
         }
@@ -675,15 +770,44 @@ impl DepthMap {
     pub fn dimensions(&self) -> Dimensions {
         self.dimensions
     }
+
     pub fn origin(&self) -> (u32, u32) {
         self.origin
     }
+
+    pub fn global_region(&self) -> Region {
+        Region::new(
+            self.origin.0,
+            self.origin.1,
+            self.dimensions.width,
+            self.dimensions.height,
+        )
+    }
+
     pub fn values(&self) -> &[f32] {
         &self.values
     }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<f32> {
+        if x >= self.dimensions.width || y >= self.dimensions.height {
+            return None;
+        }
+        self.values
+            .get(y as usize * self.dimensions.width as usize + x as usize)
+            .copied()
+    }
+
+    pub fn pixel_global(&self, x: u32, y: u32) -> Option<f32> {
+        if !self.global_region().contains(x, y) {
+            return None;
+        }
+        self.pixel(x - self.origin.0, y - self.origin.1)
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
     pub fn cache_identity(&self) -> u64 {
         self.cache_identity
     }
@@ -698,8 +822,21 @@ impl RegionSet {
     pub fn new(regions: Vec<Region>) -> Self {
         Self { regions }
     }
+
     pub fn regions(&self) -> &[Region] {
         &self.regions
+    }
+
+    pub fn len(&self) -> usize {
+        self.regions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Region> {
+        self.regions.get(index)
     }
 }
 
@@ -769,13 +906,35 @@ fn mask_identity(
     hash
 }
 
-fn integer_identity(dimensions: Dimensions, origin: (u32, u32), values: &[u16]) -> u64 {
+fn integer_identity_with_labels(
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    values: &[u16],
+    labels: &BTreeMap<String, u16>,
+) -> u64 {
     let mut hash = mask_identity(dimensions, origin, 1, &[]);
+    for (name, value) in labels {
+        hash ^= u64::from(*value);
+        hash = hash.wrapping_mul(0x100000001b3);
+        for byte in name.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
     for value in values {
         hash ^= u64::from(*value);
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn validate_spatial_origin(origin: (u32, u32), dimensions: Dimensions) -> Result<(), MaskError> {
+    if origin.0.checked_add(dimensions.width).is_none()
+        || origin.1.checked_add(dimensions.height).is_none()
+    {
+        return Err(MaskError::OriginOverflow { origin, dimensions });
+    }
+    Ok(())
 }
 
 fn float_identity(dimensions: Dimensions, origin: (u32, u32), values: &[f32]) -> u64 {

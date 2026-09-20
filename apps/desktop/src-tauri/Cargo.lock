@@ -3136,6 +3136,7 @@ dependencies = [
 name = "rawweave-ai-nodes"
 version = "0.1.0"
 dependencies = [
+ "rawweave-image",
  "rawweave-node-api",
 ]
 

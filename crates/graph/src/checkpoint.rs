@@ -5,9 +5,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rawweave_image::{Image, Mask};
+use rawweave_image::{ConfidenceMap, DepthMap, Image, LabelMap, Mask, MaskSet, Region, RegionSet};
 use rawweave_node_api::Value;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -101,6 +101,11 @@ impl fmt::Display for ArtifactId {
 pub enum CheckpointPayload {
     Image(Image),
     Mask(Mask),
+    MaskSet(MaskSet),
+    LabelMap(LabelMap),
+    ConfidenceMap(ConfidenceMap),
+    DepthMap(DepthMap),
+    RegionSet(RegionSet),
     SpatialData(Vec<u8>),
 }
 
@@ -111,6 +116,11 @@ impl CheckpointPayload {
         match self {
             Self::Image(image) => Value::Image(image.clone()),
             Self::Mask(mask) => Value::Mask(mask.clone()),
+            Self::MaskSet(set) => Value::MaskSet(set.clone()),
+            Self::LabelMap(map) => Value::LabelMap(map.clone()),
+            Self::ConfidenceMap(map) => Value::ConfidenceMap(map.clone()),
+            Self::DepthMap(map) => Value::DepthMap(map.clone()),
+            Self::RegionSet(set) => Value::RegionSet(set.clone()),
             Self::SpatialData(bytes) => Value::Bytes(bytes.clone()),
         }
     }
@@ -240,6 +250,72 @@ impl CheckpointPayload {
                     return Err(CheckpointError::InvalidPayload(
                         "mask contains an invalid value".into(),
                     ));
+                }
+            }
+            Self::MaskSet(set) => {
+                let mut pixels = 0_usize;
+                for mask in set.masks() {
+                    CheckpointPayload::Mask(mask.clone()).validate(limits)?;
+                    pixels =
+                        pixels.saturating_add(mask.dimensions().pixel_count().map_err(|_| {
+                            CheckpointError::InvalidPayload("mask dimensions overflow".into())
+                        })?);
+                }
+                if pixels > limits.max_pixels {
+                    return Err(CheckpointError::ImportLimitExceeded {
+                        resource: "pixels",
+                        limit: limits.max_pixels,
+                    });
+                }
+            }
+            Self::LabelMap(map) => {
+                validate_spatial_region(map.global_region())?;
+                let pixels = map.dimensions().pixel_count().map_err(|_| {
+                    CheckpointError::InvalidPayload("label map dimensions overflow".into())
+                })?;
+                if map.values().len() != pixels {
+                    return Err(CheckpointError::InvalidPayload(
+                        "label map value count does not match dimensions".into(),
+                    ));
+                }
+                if pixels > limits.max_pixels {
+                    return Err(CheckpointError::ImportLimitExceeded {
+                        resource: "pixels",
+                        limit: limits.max_pixels,
+                    });
+                }
+            }
+            Self::ConfidenceMap(map) => {
+                CheckpointPayload::Mask(map.mask().clone()).validate(limits)?;
+            }
+            Self::DepthMap(map) => {
+                validate_spatial_region(map.global_region())?;
+                let pixels = map.dimensions().pixel_count().map_err(|_| {
+                    CheckpointError::InvalidPayload("depth map dimensions overflow".into())
+                })?;
+                if map.values().len() != pixels
+                    || map.values().iter().any(|value| !value.is_finite())
+                {
+                    return Err(CheckpointError::InvalidPayload(
+                        "depth map contains invalid values".into(),
+                    ));
+                }
+                if pixels > limits.max_pixels {
+                    return Err(CheckpointError::ImportLimitExceeded {
+                        resource: "pixels",
+                        limit: limits.max_pixels,
+                    });
+                }
+            }
+            Self::RegionSet(set) => {
+                for region in set.regions() {
+                    validate_spatial_region(*region)?;
+                }
+                if set.regions().len() > limits.max_pixels {
+                    return Err(CheckpointError::ImportLimitExceeded {
+                        resource: "regions",
+                        limit: limits.max_pixels,
+                    });
                 }
             }
             Self::SpatialData(bytes) if bytes.len() > limits.max_spatial_bytes => {
@@ -455,6 +531,15 @@ impl CheckpointArtifact {
     }
 }
 
+fn validate_spatial_region(region: Region) -> Result<(), CheckpointError> {
+    if region.end_x().is_none() || region.end_y().is_none() {
+        return Err(CheckpointError::InvalidPayload(
+            "spatial region overflows dimensions".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct ArtifactContent<'a> {
     schema_version: u32,
@@ -472,7 +557,27 @@ struct ArtifactContent<'a> {
 enum CanonicalPayload<'a> {
     Image(CanonicalImage<'a>),
     Mask(CanonicalMask<'a>),
-    SpatialData { bytes: &'a [u8] },
+    MaskSet {
+        masks: Vec<CanonicalMask<'a>>,
+    },
+    LabelMap {
+        dimensions: rawweave_image::Dimensions,
+        origin: (u32, u32),
+        labels: &'a BTreeMap<String, u16>,
+        values: &'a [u16],
+    },
+    ConfidenceMap(CanonicalMask<'a>),
+    DepthMap {
+        dimensions: rawweave_image::Dimensions,
+        origin: (u32, u32),
+        values: &'a [f32],
+    },
+    RegionSet {
+        regions: &'a [Region],
+    },
+    SpatialData {
+        bytes: &'a [u8],
+    },
 }
 
 #[derive(Serialize)]
@@ -508,6 +613,40 @@ impl<'a> From<&'a CheckpointPayload> for CanonicalPayload<'a> {
                 tile_size: mask.tile_size(),
                 tiles: mask.tiles(),
             }),
+            CheckpointPayload::MaskSet(set) => Self::MaskSet {
+                masks: set
+                    .iter()
+                    .map(|mask| CanonicalMask {
+                        dimensions: mask.dimensions(),
+                        origin: mask.origin(),
+                        tile_size: mask.tile_size(),
+                        tiles: mask.tiles(),
+                    })
+                    .collect(),
+            },
+            CheckpointPayload::LabelMap(map) => Self::LabelMap {
+                dimensions: map.dimensions(),
+                origin: map.origin(),
+                labels: map.labels(),
+                values: map.values(),
+            },
+            CheckpointPayload::ConfidenceMap(map) => {
+                let mask = map.mask();
+                Self::ConfidenceMap(CanonicalMask {
+                    dimensions: mask.dimensions(),
+                    origin: mask.origin(),
+                    tile_size: mask.tile_size(),
+                    tiles: mask.tiles(),
+                })
+            }
+            CheckpointPayload::DepthMap(map) => Self::DepthMap {
+                dimensions: map.dimensions(),
+                origin: map.origin(),
+                values: map.values(),
+            },
+            CheckpointPayload::RegionSet(set) => Self::RegionSet {
+                regions: set.regions(),
+            },
             CheckpointPayload::SpatialData(bytes) => Self::SpatialData { bytes },
         }
     }

@@ -242,6 +242,23 @@ fn mask_image_source_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
     descriptor
 }
 
+fn select_label_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
+    let mut descriptor = mask_output_descriptor(type_id, name);
+    descriptor.inputs.push(PortDescriptor::input(
+        "label_map",
+        "Label Map",
+        "core.LabelMap",
+        true,
+    ));
+    descriptor
+        .parameters
+        .push(ParameterDescriptor::string("label", "Label", ""));
+    descriptor
+        .parameters
+        .push(ParameterDescriptor::integer("label_id", "Label ID", 0));
+    descriptor
+}
+
 fn mask_unary_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
     let mut descriptor = mask_output_descriptor(type_id, name);
     descriptor
@@ -579,7 +596,11 @@ impl NodeInstance for RadialGradient {
         let values = region_values(region, |x, y| {
             let distance = ((x as f32 - center_x).powi(2) + (y as f32 - center_y).powi(2)).sqrt();
             if radius == inner_radius {
-                if distance <= radius { 1.0 } else { 0.0 }
+                if distance <= radius {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
                 ((radius - distance) / (radius - inner_radius)).clamp(0.0, 1.0)
             }
@@ -643,10 +664,50 @@ impl NodeInstance for ColorQualifier {
                 + (blue - target[2]).powi(2))
             .sqrt();
             if softness == 0.0 {
-                if distance <= tolerance { 1.0 } else { 0.0 }
+                if distance <= tolerance {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
                 ((tolerance + softness - distance) / softness).clamp(0.0, 1.0)
             }
+        });
+        Ok(NodeResult::single(
+            "mask",
+            Value::Mask(mask_from_region(region, values)?),
+        ))
+    }
+}
+
+struct SelectLabel;
+
+impl NodeInstance for SelectLabel {
+    fn evaluate(
+        &self,
+        inputs: &Inputs,
+        parameters: &Parameters,
+        context: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        let label_map = match inputs.get("label_map") {
+            Some(Value::LabelMap(label_map)) => label_map,
+            Some(_) => return Err(NodeError::InvalidParameter("label_map".to_owned())),
+            None => return Err(NodeError::MissingInput("label_map".to_owned())),
+        };
+        let label_id = match parameters.get("label") {
+            Some(ParameterValue::String(label)) if !label.trim().is_empty() => label_map
+                .label_value(label)
+                .ok_or_else(|| NodeError::InvalidParameter("label".to_owned()))?,
+            Some(ParameterValue::String(_)) | None => parameters
+                .get("label_id")
+                .and_then(ParameterValue::as_integer)
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| NodeError::InvalidParameter("label_id".to_owned()))?,
+            Some(_) => return Err(NodeError::InvalidParameter("label".to_owned())),
+        };
+        let region = requested_region(label_map.global_region(), context);
+        let values = region_values(region, |x, y| {
+            (label_map.pixel_global(x, y) == Some(label_id)) as u8 as f32
         });
         Ok(NodeResult::single(
             "mask",
@@ -715,7 +776,11 @@ impl NodeInstance for MaskThreshold {
         }
         let output = map_mask_region(&mask, context, |value| {
             if softness == 0.0 {
-                if value >= threshold { 1.0 } else { 0.0 }
+                if value >= threshold {
+                    1.0
+                } else {
+                    0.0
+                }
             } else {
                 ((value - (threshold - softness)) / (2.0 * softness)).clamp(0.0, 1.0)
             }
@@ -1566,6 +1631,10 @@ fn color_qualifier_factory() -> Box<dyn NodeInstance> {
     Box::new(ColorQualifier)
 }
 
+fn select_label_factory() -> Box<dyn NodeInstance> {
+    Box::new(SelectLabel)
+}
+
 fn mask_invert_factory() -> Box<dyn NodeInstance> {
     Box::new(MaskInvert)
 }
@@ -1650,6 +1719,14 @@ pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_a
         luminance_mask_factory,
     )?;
     registry.register(color_qualifier_descriptor(), color_qualifier_factory)?;
+    registry.register(
+        select_label_descriptor("core.select-label", "Select Label"),
+        select_label_factory,
+    )?;
+    registry.register(
+        select_label_descriptor("core.label-map-select", "Label Map Select"),
+        select_label_factory,
+    )?;
     registry.register(
         mask_unary_descriptor("core.mask-invert", "Mask Invert"),
         mask_invert_factory,
