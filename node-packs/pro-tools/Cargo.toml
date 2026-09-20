@@ -1,0 +1,11 @@
+[package]
+name = "rawweave-pro-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rawweave-image.workspace = true
+rawweave-node-api.workspace = true
+
+[dev-dependencies]

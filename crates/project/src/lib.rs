@@ -39,6 +39,8 @@ pub fn default_registry() -> NodeRegistry {
         .expect("the built-in AI node pack must register once");
     rawweave_raw_nodes::register_nodes(&mut registry)
         .expect("the built-in RAW node pack must register once");
+    rawweave_pro_tools::register_nodes(&mut registry)
+        .expect("the built-in professional node pack must register once");
     registry
 }
 
@@ -67,11 +69,15 @@ pub fn built_in_node_pack_manifests() -> Vec<NodePackManifest> {
     let mut raw_registry = NodeRegistry::default();
     rawweave_raw_nodes::register_nodes(&mut raw_registry)
         .expect("the built-in RAW node pack must register once");
+    let mut pro_tools_registry = NodeRegistry::default();
+    rawweave_pro_tools::register_nodes(&mut pro_tools_registry)
+        .expect("the built-in professional node pack must register once");
     vec![
         manifest_for_registry("core-image", &image_registry),
         manifest_for_registry("core-values", &values_registry),
         manifest_for_registry("ai", &ai_registry),
         manifest_for_registry("raw", &raw_registry),
+        manifest_for_registry("pro-tools", &pro_tools_registry),
     ]
 }
 
@@ -109,6 +115,8 @@ impl EditorCore {
         rawweave_raw_nodes::RawNodePack::with_decoder(decoder)
             .register(&mut registry)
             .expect("the built-in RAW node pack must register once");
+        rawweave_pro_tools::register_nodes(&mut registry)
+            .expect("the built-in professional node pack must register once");
         Self {
             graph: Graph::new(registry),
         }

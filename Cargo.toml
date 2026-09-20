@@ -14,6 +14,7 @@ members = [
   "crates/external-host",
   "crates/ai-provider",
   "node-packs/ai",
+  "node-packs/pro-tools",
   "node-packs/core-values",
   "node-packs/core-image",
   "node-packs/raw",
@@ -41,6 +42,7 @@ rawweave-batch = { path = "crates/batch" }
 rawweave-external-protocol = { path = "crates/external-protocol" }
 rawweave-external-host = { path = "crates/external-host" }
 rawweave-ai-nodes = { path = "node-packs/ai" }
+rawweave-pro-tools = { path = "node-packs/pro-tools" }
 rawweave-core-values = { path = "node-packs/core-values" }
 rawweave-core-image = { path = "node-packs/core-image" }
 rawweave-raw-nodes = { path = "node-packs/raw" }

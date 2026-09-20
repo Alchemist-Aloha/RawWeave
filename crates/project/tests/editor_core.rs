@@ -84,6 +84,7 @@ fn editor_core_registers_the_backbone_node_packs() {
         "raw.camera-transform",
         "raw.lens-correction",
         "raw.display-transform",
+        "pro.advanced-denoise",
     ] {
         assert!(types.iter().any(|registered| registered == type_id));
     }
