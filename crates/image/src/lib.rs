@@ -146,6 +146,18 @@ pub enum MaskError {
     NonFiniteValue,
     #[error("mask value must be between zero and one")]
     ValueOutOfRange,
+    #[error("mask requires {expected} tiles, got {actual}")]
+    TileCountMismatch { expected: usize, actual: usize },
+    #[error("mask tile {index} has invalid geometry")]
+    InvalidTileGeometry { index: usize },
+    #[error("mask tile {index} requires {expected} values, got {actual}")]
+    TileValueCountMismatch {
+        index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("mask cache identity {actual} does not match content identity {expected}")]
+    CacheIdentityMismatch { expected: u64, actual: u64 },
     #[error("paint stroke must contain at least one point")]
     EmptyStroke,
     #[error("paint stroke parameter '{0}' is invalid")]
@@ -168,7 +180,7 @@ pub struct MaskTile {
 /// Values are stored in row-major tiles while `origin` identifies the tile
 /// collection in global image space.  The content hash is stable across
 /// processes and is deliberately independent of the runtime revision.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Mask {
     dimensions: Dimensions,
     origin: (u32, u32),
@@ -176,6 +188,34 @@ pub struct Mask {
     tiles: Arc<Vec<MaskTile>>,
     revision: u64,
     cache_identity: u64,
+}
+
+#[derive(Deserialize)]
+struct MaskWire {
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    tile_size: u32,
+    tiles: Vec<MaskTile>,
+    revision: u64,
+    cache_identity: u64,
+}
+
+impl<'de> Deserialize<'de> for Mask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MaskWire::deserialize(deserializer)?;
+        Self::from_serialized(
+            wire.dimensions,
+            wire.origin,
+            wire.tile_size,
+            wire.tiles,
+            wire.revision,
+            wire.cache_identity,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl PartialEq for Mask {
@@ -240,6 +280,16 @@ impl Mask {
         values: Vec<f32>,
         tile_size: u32,
     ) -> Result<Self, MaskError> {
+        Self::from_values_with_tile_size_and_revision(dimensions, origin, values, tile_size, None)
+    }
+
+    fn from_values_with_tile_size_and_revision(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        values: Vec<f32>,
+        tile_size: u32,
+        revision: Option<u64>,
+    ) -> Result<Self, MaskError> {
         if tile_size == 0 {
             return Err(MaskError::InvalidTileSize);
         }
@@ -270,9 +320,109 @@ impl Mask {
             origin,
             tile_size,
             tiles: Arc::new(tiles),
-            revision: next_revision(),
+            revision: revision.unwrap_or_else(next_revision),
             cache_identity,
         })
+    }
+
+    fn from_serialized(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        tile_size: u32,
+        tiles: Vec<MaskTile>,
+        revision: u64,
+        cache_identity: u64,
+    ) -> Result<Self, MaskError> {
+        if tile_size == 0 {
+            return Err(MaskError::InvalidTileSize);
+        }
+        validate_spatial_origin(origin, dimensions)?;
+        let tiles_per_row = dimensions.width.div_ceil(tile_size);
+        let tiles_per_column = dimensions.height.div_ceil(tile_size);
+        let expected_tiles = (tiles_per_row as usize)
+            .checked_mul(tiles_per_column as usize)
+            .ok_or(MaskError::TileCountMismatch {
+                expected: usize::MAX,
+                actual: tiles.len(),
+            })?;
+        if tiles.len() != expected_tiles {
+            return Err(MaskError::TileCountMismatch {
+                expected: expected_tiles,
+                actual: tiles.len(),
+            });
+        }
+        let expected_pixels =
+            dimensions
+                .pixel_count()
+                .map_err(|_| MaskError::ValueCountMismatch {
+                    expected: usize::MAX,
+                    actual: 0,
+                })?;
+        let mut values = vec![0.0; expected_pixels];
+        for (index, tile) in tiles.iter().enumerate() {
+            let index_u32 =
+                u32::try_from(index).map_err(|_| MaskError::InvalidTileGeometry { index })?;
+            let tile_x = index_u32 % tiles_per_row;
+            let tile_y = index_u32 / tiles_per_row;
+            let x = tile_x
+                .checked_mul(tile_size)
+                .ok_or(MaskError::InvalidTileGeometry { index })?;
+            let y = tile_y
+                .checked_mul(tile_size)
+                .ok_or(MaskError::InvalidTileGeometry { index })?;
+            let width = tile_size.min(dimensions.width.saturating_sub(x));
+            let height = tile_size.min(dimensions.height.saturating_sub(y));
+            let expected_origin = (
+                origin
+                    .0
+                    .checked_add(x)
+                    .ok_or(MaskError::InvalidTileGeometry { index })?,
+                origin
+                    .1
+                    .checked_add(y)
+                    .ok_or(MaskError::InvalidTileGeometry { index })?,
+            );
+            if tile.origin != expected_origin || tile.dimensions != Dimensions::new(width, height) {
+                return Err(MaskError::InvalidTileGeometry { index });
+            }
+            let expected_values = (width as usize)
+                .checked_mul(height as usize)
+                .ok_or(MaskError::InvalidTileGeometry { index })?;
+            if tile.values.len() != expected_values {
+                return Err(MaskError::TileValueCountMismatch {
+                    index,
+                    expected: expected_values,
+                    actual: tile.values.len(),
+                });
+            }
+            for value in &tile.values {
+                validate_mask_value(*value)?;
+            }
+            for local_y in 0..height {
+                let source_start = local_y as usize * width as usize;
+                let destination_start =
+                    (y + local_y) as usize * dimensions.width as usize + x as usize;
+                values[destination_start..destination_start + width as usize]
+                    .copy_from_slice(&tile.values[source_start..source_start + width as usize]);
+            }
+        }
+        let canonical = Self::from_values_with_tile_size_and_revision(
+            dimensions,
+            origin,
+            values,
+            tile_size,
+            Some(revision),
+        )?;
+        if canonical.tiles.as_ref() != &tiles {
+            return Err(MaskError::InvalidTileGeometry { index: tiles.len() });
+        }
+        if canonical.cache_identity != cache_identity {
+            return Err(MaskError::CacheIdentityMismatch {
+                expected: canonical.cache_identity,
+                actual: cache_identity,
+            });
+        }
+        Ok(canonical)
     }
 
     pub fn dimensions(&self) -> Dimensions {
@@ -419,13 +569,45 @@ impl PaintPoint {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PaintStroke {
     pub points: Vec<PaintPoint>,
     pub size: f32,
     pub hardness: f32,
     pub opacity: f32,
     pub mode: PaintMode,
+}
+
+#[derive(Deserialize)]
+struct PaintStrokeWire {
+    points: Vec<PaintPoint>,
+    size: f32,
+    hardness: f32,
+    opacity: f32,
+    mode: PaintMode,
+}
+
+impl PaintStrokeWire {
+    fn into_stroke(self) -> Result<PaintStroke, MaskError> {
+        PaintStroke::new(
+            self.points,
+            self.size,
+            self.hardness,
+            self.opacity,
+            self.mode,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for PaintStroke {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        PaintStrokeWire::deserialize(deserializer)?
+            .into_stroke()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl PaintStroke {
@@ -486,7 +668,7 @@ impl PaintStroke {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PaintedMask {
     dimensions: Dimensions,
     origin: (u32, u32),
@@ -495,8 +677,54 @@ pub struct PaintedMask {
     redo: Vec<PaintStroke>,
 }
 
+#[derive(Deserialize)]
+struct PaintedMaskWire {
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    tile_size: u32,
+    strokes: Vec<PaintStrokeWire>,
+    redo: Vec<PaintStrokeWire>,
+}
+
+impl<'de> Deserialize<'de> for PaintedMask {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PaintedMaskWire::deserialize(deserializer)?;
+        if wire.tile_size == 0 {
+            return Err(serde::de::Error::custom(MaskError::InvalidTileSize));
+        }
+        let strokes = wire
+            .strokes
+            .into_iter()
+            .map(PaintStrokeWire::into_stroke)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        let redo = wire
+            .redo
+            .into_iter()
+            .map(PaintStrokeWire::into_stroke)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(serde::de::Error::custom)?;
+        let mut painted =
+            Self::new(wire.dimensions, wire.origin).map_err(serde::de::Error::custom)?;
+        painted.tile_size = wire.tile_size;
+        painted.strokes = strokes;
+        painted.redo = redo;
+        Ok(painted)
+    }
+}
+
 impl PaintedMask {
     pub fn new(dimensions: Dimensions, origin: (u32, u32)) -> Result<Self, MaskError> {
+        dimensions
+            .pixel_count()
+            .map_err(|_| MaskError::ValueCountMismatch {
+                expected: usize::MAX,
+                actual: 0,
+            })?;
+        validate_spatial_origin(origin, dimensions)?;
         Ok(Self {
             dimensions,
             origin,
@@ -581,7 +809,7 @@ impl MaskSet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LabelMap {
     dimensions: Dimensions,
     origin: (u32, u32),
@@ -590,6 +818,41 @@ pub struct LabelMap {
     labels: BTreeMap<String, u16>,
     revision: u64,
     cache_identity: u64,
+}
+
+#[derive(Deserialize)]
+struct LabelMapWire {
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    values: Vec<u16>,
+    #[serde(default)]
+    labels: BTreeMap<String, u16>,
+    revision: u64,
+    cache_identity: u64,
+}
+
+impl<'de> Deserialize<'de> for LabelMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = LabelMapWire::deserialize(deserializer)?;
+        let map = Self::from_values_with_labels_and_revision(
+            wire.dimensions,
+            wire.origin,
+            wire.values,
+            wire.labels,
+            wire.revision,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if map.cache_identity != wire.cache_identity {
+            return Err(serde::de::Error::custom(MaskError::CacheIdentityMismatch {
+                expected: map.cache_identity,
+                actual: wire.cache_identity,
+            }));
+        }
+        Ok(map)
+    }
 }
 
 impl LabelMap {
@@ -606,6 +869,22 @@ impl LabelMap {
         origin: (u32, u32),
         values: Vec<u16>,
         labels: BTreeMap<String, u16>,
+    ) -> Result<Self, MaskError> {
+        Self::from_values_with_labels_and_revision(
+            dimensions,
+            origin,
+            values,
+            labels,
+            next_revision(),
+        )
+    }
+
+    fn from_values_with_labels_and_revision(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        values: Vec<u16>,
+        labels: BTreeMap<String, u16>,
+        revision: u64,
     ) -> Result<Self, MaskError> {
         let expected = dimensions
             .pixel_count()
@@ -626,7 +905,7 @@ impl LabelMap {
             origin,
             values,
             labels,
-            revision: next_revision(),
+            revision,
             cache_identity,
         })
     }
@@ -726,7 +1005,7 @@ impl ConfidenceMap {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DepthMap {
     dimensions: Dimensions,
     origin: (u32, u32),
@@ -735,11 +1014,52 @@ pub struct DepthMap {
     cache_identity: u64,
 }
 
+#[derive(Deserialize)]
+struct DepthMapWire {
+    dimensions: Dimensions,
+    origin: (u32, u32),
+    values: Vec<f32>,
+    revision: u64,
+    cache_identity: u64,
+}
+
+impl<'de> Deserialize<'de> for DepthMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = DepthMapWire::deserialize(deserializer)?;
+        let map = Self::from_values_with_revision(
+            wire.dimensions,
+            wire.origin,
+            wire.values,
+            wire.revision,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if map.cache_identity != wire.cache_identity {
+            return Err(serde::de::Error::custom(MaskError::CacheIdentityMismatch {
+                expected: map.cache_identity,
+                actual: wire.cache_identity,
+            }));
+        }
+        Ok(map)
+    }
+}
+
 impl DepthMap {
     pub fn from_values(
         dimensions: Dimensions,
         origin: (u32, u32),
         values: Vec<f32>,
+    ) -> Result<Self, MaskError> {
+        Self::from_values_with_revision(dimensions, origin, values, next_revision())
+    }
+
+    fn from_values_with_revision(
+        dimensions: Dimensions,
+        origin: (u32, u32),
+        values: Vec<f32>,
+        revision: u64,
     ) -> Result<Self, MaskError> {
         let expected = dimensions
             .pixel_count()
@@ -762,7 +1082,7 @@ impl DepthMap {
             dimensions,
             origin,
             values,
-            revision: next_revision(),
+            revision,
             cache_identity,
         })
     }
@@ -956,7 +1276,7 @@ fn point_segment_distance(x: f32, y: f32, start: PaintPoint, end: PaintPoint) ->
     ((x - closest_x).powi(2) + (y - closest_y).powi(2)).sqrt()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Image {
     width: u32,
     height: u32,
@@ -971,6 +1291,41 @@ pub struct Image {
     pixels: Arc<Vec<Pixel>>,
     #[serde(default)]
     revision: u64,
+}
+
+#[derive(Deserialize)]
+struct ImageWire {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    origin_x: u32,
+    #[serde(default)]
+    origin_y: u32,
+    #[serde(default)]
+    pixel_format: PixelFormat,
+    #[serde(default)]
+    color_metadata: ColorMetadata,
+    pixels: Vec<Pixel>,
+    #[serde(default)]
+    revision: u64,
+}
+
+impl<'de> Deserialize<'de> for Image {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ImageWire::deserialize(deserializer)?;
+        Self::from_pixels_with_origin_and_revision(
+            Dimensions::new(wire.width, wire.height),
+            (wire.origin_x, wire.origin_y),
+            wire.pixels,
+            wire.pixel_format,
+            wire.color_metadata,
+            wire.revision,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl PartialEq for Image {

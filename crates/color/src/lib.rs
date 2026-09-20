@@ -88,11 +88,29 @@ fn validate_pixels(dimensions: Dimensions, pixels: &[[f32; 3]]) -> Result<(), Co
 }
 
 /// Scene-referred linear RGB pixels. Values are intentionally not clipped to 0..1.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneLinearRGB {
     dimensions: Dimensions,
     pixels: Vec<[f32; 3]>,
     working_space: WorkingSpace,
+}
+
+#[derive(Deserialize)]
+struct SceneLinearRGBWire {
+    dimensions: Dimensions,
+    pixels: Vec<[f32; 3]>,
+    working_space: WorkingSpace,
+}
+
+impl<'de> Deserialize<'de> for SceneLinearRGB {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SceneLinearRGBWire::deserialize(deserializer)?;
+        Self::new(wire.dimensions, wire.pixels, wire.working_space)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl SceneLinearRGB {
@@ -163,11 +181,29 @@ impl SceneLinearRGB {
 }
 
 /// Display-referred RGB pixels. Display values are normally clipped to 0..1.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DisplayRGB {
     dimensions: Dimensions,
     pixels: Vec<[f32; 3]>,
     working_space: WorkingSpace,
+}
+
+#[derive(Deserialize)]
+struct DisplayRGBWire {
+    dimensions: Dimensions,
+    pixels: Vec<[f32; 3]>,
+    working_space: WorkingSpace,
+}
+
+impl<'de> Deserialize<'de> for DisplayRGB {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = DisplayRGBWire::deserialize(deserializer)?;
+        Self::new(wire.dimensions, wire.pixels, wire.working_space)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl DisplayRGB {

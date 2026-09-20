@@ -120,3 +120,61 @@ fn native_color_backends_expose_handles_and_fail_clearly_when_unavailable() {
         })
     ));
 }
+
+#[test]
+fn color_serialization_preserves_working_space_and_pixels() {
+    let scene = SceneLinearRGB::new(
+        Dimensions::new(1, 1),
+        vec![[2.0, 0.5, 0.25]],
+        WorkingSpace::Custom("camera-linear".to_owned()),
+    )
+    .unwrap();
+    let display = DisplayRGB::new(
+        Dimensions::new(1, 1),
+        vec![[0.8, 0.5, 0.25]],
+        WorkingSpace::DisplayP3,
+    )
+    .unwrap();
+
+    let scene_json = serde_json::to_string(&scene).unwrap();
+    let display_json = serde_json::to_string(&display).unwrap();
+    let restored_scene: SceneLinearRGB = serde_json::from_str(&scene_json).unwrap();
+    let restored_display: DisplayRGB = serde_json::from_str(&display_json).unwrap();
+
+    assert_eq!(restored_scene, scene);
+    assert_eq!(restored_display, display);
+}
+
+#[test]
+fn scene_linear_deserialization_rejects_mismatched_and_non_finite_samples() {
+    let mismatched = r#"{
+        "dimensions": {"width": 2, "height": 1},
+        "pixels": [[1.0, 0.0, 0.0]],
+        "working_space": "Srgb"
+    }"#;
+    let non_finite = r#"{
+        "dimensions": {"width": 1, "height": 1},
+        "pixels": [[1e39, 0.0, 0.0]],
+        "working_space": "Srgb"
+    }"#;
+
+    assert!(serde_json::from_str::<SceneLinearRGB>(mismatched).is_err());
+    assert!(serde_json::from_str::<SceneLinearRGB>(non_finite).is_err());
+}
+
+#[test]
+fn display_rgb_deserialization_rejects_mismatched_and_non_finite_samples() {
+    let mismatched = r#"{
+        "dimensions": {"width": 2, "height": 1},
+        "pixels": [[1.0, 0.0, 0.0]],
+        "working_space": "Srgb"
+    }"#;
+    let non_finite = r#"{
+        "dimensions": {"width": 1, "height": 1},
+        "pixels": [[1e39, 0.0, 0.0]],
+        "working_space": "Srgb"
+    }"#;
+
+    assert!(serde_json::from_str::<DisplayRGB>(mismatched).is_err());
+    assert!(serde_json::from_str::<DisplayRGB>(non_finite).is_err());
+}
