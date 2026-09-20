@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use exif::{In, Reader as ExifReader, Tag, Value};
@@ -18,6 +20,9 @@ const MAX_SESSION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_THUMBNAIL_EDGE: u32 = 512;
 const MAX_IMAGE_EDGE: u32 = 16_384;
 const MAX_IMAGE_ALLOC: u64 = 128 * 1024 * 1024;
+
+static SESSION_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static SESSION_TARGET_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -547,6 +552,47 @@ fn trash_with_os(path: &Path) -> Result<(), String> {
     }
 }
 
+fn session_temporary_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("browser-session.json");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = SESSION_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        timestamp,
+        sequence
+    ))
+}
+
+fn session_target_lock(path: &Path) -> Arc<Mutex<()>> {
+    let locks = SESSION_TARGET_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) {
+    if let Ok(directory) = File::open(path) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) {}
+
 fn save_session_at(path: &Path, session: &str) -> Result<(), String> {
     if session.len() > MAX_SESSION_BYTES {
         return Err(format!(
@@ -558,20 +604,30 @@ fn save_session_at(path: &Path, session: &str) -> Result<(), String> {
         .ok_or_else(|| "session path has no parent directory".to_owned())?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("could not create session directory: {error}"))?;
-    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temp)
-        .map_err(|error| format!("could not create temporary session file: {error}"))?;
-    file.write_all(session.as_bytes())
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("could not write session: {error}"))?;
-    fs::rename(&temp, path).map_err(|error| {
-        let _ = fs::remove_file(&temp);
-        format!("could not install session: {error}")
-    })
+    let target_lock = session_target_lock(path);
+    let _target_guard = target_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temporary = session_temporary_path(path);
+    let result: Result<(), String> = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not create temporary session file: {error}"))?;
+        file.write_all(session.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("could not write session: {error}"))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("could not install session: {error}"))?;
+        sync_parent_directory(parent);
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn load_session_at(path: &Path) -> Result<Option<String>, String> {
@@ -679,6 +735,12 @@ pub fn load_session(app: AppHandle) -> Result<Option<String>, String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc, Barrier,
+    };
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn rejects_parent_components_in_user_supplied_names() {
@@ -726,6 +788,114 @@ mod tests {
             Some("{\"version\":1}")
         );
         assert!(save_session_at(&path, &"x".repeat(MAX_SESSION_BYTES + 1)).is_err());
+        remove_fixture(&root);
+    }
+
+    #[test]
+    fn session_writers_for_same_target_are_serialized() {
+        let root = temp_fixture("session-serialized");
+        let path = root.join("session.json");
+        let target_lock = session_target_lock(&path);
+        let target_guard = target_lock.lock().unwrap();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let writer_path = path.clone();
+        let handle = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            finished_sender
+                .send(save_session_at(&writer_path, "{\"writer\":1}"))
+                .unwrap();
+        });
+
+        started_receiver.recv().unwrap();
+        assert!(finished_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        drop(target_guard);
+        assert!(finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok());
+        handle.join().unwrap();
+        remove_fixture(&root);
+    }
+
+    #[test]
+    fn concurrent_session_writers_install_complete_payloads() {
+        let root = temp_fixture("session-concurrent");
+        let path = root.join("session.json");
+        let writer_count = 16;
+        let payloads = (0..writer_count)
+            .map(|writer| {
+                format!(
+                    "{{\"writer\":{writer},\"payload\":\"{}\"}}",
+                    "x".repeat(512 * 1024)
+                )
+            })
+            .collect::<Vec<_>>();
+        save_session_at(&path, &payloads[0]).unwrap();
+        let reading = Arc::new(AtomicBool::new(true));
+        let readers = (0..4)
+            .map(|_| {
+                let reading = Arc::clone(&reading);
+                let path = path.clone();
+                thread::spawn(move || {
+                    while reading.load(AtomicOrdering::Acquire) {
+                        let saved = load_session_at(&path).unwrap().unwrap();
+                        let document: serde_json::Value = serde_json::from_str(&saved).unwrap();
+                        assert_eq!(
+                            document
+                                .get("payload")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::len),
+                            Some(512 * 1024)
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(writer_count));
+        let handles = payloads
+            .into_iter()
+            .map(|payload| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    save_session_at(&path, &payload)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert!(result.is_ok(), "concurrent session save failed: {result:?}");
+        }
+        reading.store(false, AtomicOrdering::Release);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        let saved = load_session_at(&path).unwrap().unwrap();
+        let document: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(document
+            .get("writer")
+            .and_then(serde_json::Value::as_u64)
+            .is_some());
+        assert_eq!(
+            document
+                .get("payload")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(512 * 1024)
+        );
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
         remove_fixture(&root);
     }
 
