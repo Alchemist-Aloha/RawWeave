@@ -24,7 +24,7 @@ use rawweave_graph::{
     ExternalToolMetadata, GenerationMetadata, GenerationToken, Graph, NodePackManifest, Provenance,
     SubgraphDependency, WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
 };
-use rawweave_image::Image;
+use rawweave_image::{Dimensions, Image, Mask};
 use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value};
 use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
@@ -461,10 +461,18 @@ struct CheckpointRecord {
     progress: Option<f32>,
 }
 
+#[derive(Clone, Debug)]
+struct RemoteAiTask {
+    generation: GenerationToken,
+    provider_id: String,
+    task_id: String,
+}
+
 struct CheckpointManager {
     checkpoints: Mutex<BTreeMap<String, CheckpointRecord>>,
     store: ArtifactStore,
     cancellation_requests: Mutex<BTreeMap<String, GenerationToken>>,
+    remote_ai_tasks: Mutex<BTreeMap<String, RemoteAiTask>>,
     state_path: Option<PathBuf>,
 }
 
@@ -486,6 +494,10 @@ impl CheckpointManager {
             .lock()
             .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
             .clear();
+        self.remote_ai_tasks
+            .lock()
+            .map_err(|_| "checkpoint remote task state is unavailable".to_owned())?
+            .clear();
         self.persist()
     }
 
@@ -494,6 +506,7 @@ impl CheckpointManager {
             checkpoints: Mutex::new(BTreeMap::new()),
             store: ArtifactStore::memory(),
             cancellation_requests: Mutex::new(BTreeMap::new()),
+            remote_ai_tasks: Mutex::new(BTreeMap::new()),
             state_path: None,
         }
     }
@@ -506,6 +519,7 @@ impl CheckpointManager {
             checkpoints: Mutex::new(checkpoints),
             store: ArtifactStore::new(root.join("artifacts")),
             cancellation_requests: Mutex::new(BTreeMap::new()),
+            remote_ai_tasks: Mutex::new(BTreeMap::new()),
             state_path: Some(state_path),
         })
     }
@@ -551,7 +565,66 @@ impl CheckpointManager {
             .lock()
             .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
             .clear();
+        self.remote_ai_tasks
+            .lock()
+            .map_err(|_| "checkpoint remote task state is unavailable".to_owned())?
+            .clear();
         self.persist()
+    }
+
+    fn register_remote_ai_task(
+        &self,
+        node_id: &str,
+        generation: GenerationToken,
+        provider_id: String,
+        task_id: String,
+    ) -> Result<bool, String> {
+        let cancellation_requested = self
+            .cancellation_requests
+            .lock()
+            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+            .get(node_id)
+            .is_some_and(|requested| *requested == generation);
+        self.remote_ai_tasks
+            .lock()
+            .map_err(|_| "checkpoint remote task state is unavailable".to_owned())?
+            .insert(
+                node_id.to_owned(),
+                RemoteAiTask {
+                    generation,
+                    provider_id,
+                    task_id,
+                },
+            );
+        Ok(cancellation_requested)
+    }
+
+    fn take_remote_ai_task(
+        &self,
+        node_id: &str,
+        generation: GenerationToken,
+    ) -> Result<Option<RemoteAiTask>, String> {
+        let mut tasks = self
+            .remote_ai_tasks
+            .lock()
+            .map_err(|_| "checkpoint remote task state is unavailable".to_owned())?;
+        if tasks
+            .get(node_id)
+            .is_some_and(|task| task.generation == generation)
+        {
+            Ok(tasks.remove(node_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn clear_remote_ai_task(
+        &self,
+        node_id: &str,
+        generation: GenerationToken,
+    ) -> Result<(), String> {
+        let _ = self.take_remote_ai_task(node_id, generation)?;
+        Ok(())
     }
 }
 
@@ -963,24 +1036,82 @@ fn ai_operation_for_type(type_id: &str) -> Result<AiOperation, String> {
     }
 }
 
-fn source_ai_image(source: Option<&SourceAsset>) -> Result<AiImage, String> {
-    let Some(SourceAsset::Ordinary(image)) = source else {
+fn source_ai_image(context: &EvaluationContext) -> Result<AiImage, String> {
+    let Some(image) = context.source_image.as_ref() else {
         return Err("AI checkpoint generation requires an ordinary image source".to_owned());
     };
-    let bytes = preview::encode_png(image)?;
+    ai_image_from_image(image)
+}
+
+fn ai_image_from_image(image: &Image) -> Result<AiImage, String> {
     AiImage::new(
-        bytes,
+        preview::encode_png(image)?,
         [image.width(), image.height()],
         ColorInterchange::png_srgb(),
     )
     .map_err(|error| error.to_string())
 }
 
+fn ai_mask_from_mask(mask: &Mask) -> Result<AiImage, String> {
+    let image = Image::from_pixels(
+        mask.width(),
+        mask.height(),
+        mask.values()
+            .into_iter()
+            .map(|value| [value, value, value, 1.0])
+            .collect(),
+    )
+    .map_err(|error| format!("could not create AI mask image: {error}"))?;
+    AiImage::new(
+        preview::encode_png(&image)?,
+        [mask.width(), mask.height()],
+        ColorInterchange::png_srgb(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn ai_input_from_value(value: Value, data_type: &str) -> Result<AiInput, String> {
+    match (data_type, value) {
+        ("core.Image", Value::Image(image)) => Ok(AiInput::Image(ai_image_from_image(&image)?)),
+        ("core.Mask", Value::Mask(mask)) => Ok(AiInput::Mask(ai_mask_from_mask(&mask)?)),
+        (expected, value) => Err(format!(
+            "AI input expected '{expected}', got '{}'",
+            value.data_type()
+        )),
+    }
+}
+
+fn connected_ai_input(
+    editor: &EditorCore,
+    node_id: &NodeId,
+    port_id: &str,
+    context: &EvaluationContext,
+) -> Result<Option<Value>, String> {
+    let Some(edge) = editor
+        .graph()
+        .edges()
+        .iter()
+        .find(|edge| edge.to_node == *node_id && edge.to_port == port_id)
+    else {
+        return Ok(None);
+    };
+    editor
+        .graph()
+        .evaluate(&edge.from_node, &edge.from_port, context)
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "could not evaluate connected AI input '{}:{}': {error}",
+                edge.from_node, edge.from_port
+            )
+        })
+}
+
 fn build_ai_submit_request(
     editor: &EditorCore,
     node_id: &str,
     input_port: &str,
-    source: Option<&SourceAsset>,
+    context: &EvaluationContext,
     dependency_hash: &str,
 ) -> Result<SubmitRequest, String> {
     let node = editor
@@ -1006,6 +1137,20 @@ fn build_ai_submit_request(
         .transpose()
         .map_err(|error| format!("AI workflow bindings are invalid: {error}"))?
         .unwrap_or_else(WorkflowBindings::default);
+    let model = node
+        .parameters
+        .get("model")
+        .and_then(|value| match value {
+            ParameterValue::String(value) if !value.trim().is_empty() => Some(value.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            workflow_definition
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .filter(|model| !model.trim().is_empty())
+                .map(str::to_owned)
+        });
     let workflow = AiWorkflow::new(workflow_id, workflow_version, workflow_definition, bindings);
     let provenance = TaskProvenance::new(node_id, node.descriptor.version, dependency_hash)
         .with_provider(provider_id.clone())
@@ -1015,8 +1160,26 @@ fn build_ai_submit_request(
                 .map_err(|error| format!("could not hash AI workflow: {error}"))?,
         );
     let mut request = SubmitRequest::new(workflow, provenance)
-        .with_input(input_port, AiInput::Image(source_ai_image(source)?))
         .with_parameter("operation", serde_json::to_value(operation).unwrap());
+    for port in &node.descriptor.inputs {
+        let connected = connected_ai_input(editor, &NodeId::from(node_id), &port.id, context)?;
+        let input = match connected {
+            Some(value) => Some(ai_input_from_value(value, &port.data_type)?),
+            None if port.required => {
+                return Err(format!("required AI input '{}' is not connected", port.id));
+            }
+            None if port.data_type == "core.Image" => {
+                Some(AiInput::Image(source_ai_image(context)?))
+            }
+            None => None,
+        };
+        if let Some(input) = input {
+            request = request.with_input(port.id.clone(), input);
+        }
+    }
+    if !request.inputs.contains_key(input_port) {
+        return Err(format!("AI input '{input_port}' is not available"));
+    }
     for (parameter, value) in &node.parameters {
         if matches!(
             parameter.as_str(),
@@ -1026,9 +1189,8 @@ fn build_ai_submit_request(
         }
         request = request.with_parameter(parameter, parameter_json(value));
     }
-    if input_port != "image" {
-        let image = source_ai_image(source)?;
-        request = request.with_input("image", AiInput::Image(image));
+    if let Some(model) = model {
+        request = request.with_parameter("model", serde_json::Value::String(model));
     }
     if let Some(ParameterValue::String(prompt)) = node.parameters.get("prompt") {
         request = request.with_input("prompt", AiInput::Text(prompt.clone()));
@@ -1036,20 +1198,73 @@ fn build_ai_submit_request(
     Ok(request)
 }
 
-fn provider_result_payload(result: &AiResult) -> Result<CheckpointPayload, String> {
+fn ai_mask_node_ids(editor: &EditorCore, node_id: &str) -> Vec<String> {
+    let node_id = NodeId::from(node_id);
+    editor
+        .graph()
+        .edges()
+        .iter()
+        .filter(|edge| edge.to_node == node_id && edge.to_port == "mask")
+        .filter_map(|edge| {
+            let node = editor.graph().node(&edge.from_node)?;
+            node.type_id
+                .starts_with("ai.")
+                .then(|| edge.from_node.as_str().to_owned())
+        })
+        .collect()
+}
+
+fn provider_result_payload(
+    result: &AiResult,
+    output_type: &str,
+) -> Result<CheckpointPayload, String> {
+    if !matches!(output_type, "core.Image" | "core.Mask") {
+        return Err(format!(
+            "unsupported AI checkpoint output type '{output_type}'"
+        ));
+    }
     let bytes = result
         .bytes()
         .ok_or_else(|| "AI provider returned no image bytes".to_owned())?;
     let decoded = image::load_from_memory(bytes)
         .map_err(|error| format!("could not decode AI provider image: {error}"))?
         .to_rgba32f();
-    let image = Image::from_pixels(
-        decoded.width(),
-        decoded.height(),
-        decoded.pixels().map(|pixel| pixel.0).collect(),
-    )
-    .map_err(|error| format!("could not create AI checkpoint image: {error}"))?;
-    Ok(CheckpointPayload::Image(image))
+    match output_type {
+        "core.Image" => {
+            let image = Image::from_pixels(
+                decoded.width(),
+                decoded.height(),
+                decoded.pixels().map(|pixel| pixel.0).collect(),
+            )
+            .map_err(|error| format!("could not create AI checkpoint image: {error}"))?;
+            Ok(CheckpointPayload::Image(image))
+        }
+        "core.Mask" => {
+            let mask = Mask::from_values(
+                Dimensions::new(decoded.width(), decoded.height()),
+                decoded
+                    .pixels()
+                    .map(|pixel| {
+                        let [red, green, blue, alpha] = pixel.0;
+                        if alpha < 1.0 {
+                            alpha
+                        } else {
+                            0.2126 * red + 0.7152 * green + 0.0722 * blue
+                        }
+                    })
+                    .collect(),
+            )
+            .map_err(|error| format!("could not create AI checkpoint mask: {error}"))?;
+            Ok(CheckpointPayload::Mask(mask))
+        }
+        _ => unreachable!("output type checked above"),
+    }
+}
+
+struct ProviderArtifactContext<'a> {
+    output_type: &'a str,
+    mask_node_ids: &'a [String],
+    model: Option<&'a str>,
 }
 
 fn provider_checkpoint_artifact(
@@ -1058,6 +1273,7 @@ fn provider_checkpoint_artifact(
     upstream_hashes: BTreeMap<String, String>,
     node_version: u32,
     generation_revision: u64,
+    context: &ProviderArtifactContext<'_>,
 ) -> Result<CheckpointArtifact, String> {
     let provider_id = result
         .provenance
@@ -1072,18 +1288,29 @@ fn provider_checkpoint_artifact(
             result.provenance.workflow_id.clone(),
         );
     }
+    if !result.provenance.workflow_version.is_empty() {
+        parameters.insert(
+            "workflow_version".to_owned(),
+            result.provenance.workflow_version.clone(),
+        );
+    }
+    if let Some(workflow_hash) = result.provenance.workflow_hash.as_ref() {
+        parameters.insert("workflow_hash".to_owned(), workflow_hash.clone());
+    }
+    if !context.mask_node_ids.is_empty() {
+        parameters.insert(
+            "mask_node_ids".to_owned(),
+            serde_json::to_string(context.mask_node_ids).unwrap_or_else(|_| "[]".to_owned()),
+        );
+    }
     let external_tool = ExternalToolMetadata {
         id: provider_id,
-        version: if result.provenance.workflow_version.is_empty() {
-            "unknown".to_owned()
-        } else {
-            result.provenance.workflow_version.clone()
-        },
-        model: None,
+        version: "unknown".to_owned(),
+        model: context.model.map(str::to_owned),
         parameters,
     };
     CheckpointArtifact::new(
-        provider_result_payload(result)?,
+        provider_result_payload(result, context.output_type)?,
         dependency_hash,
         Provenance {
             dependency_hash: dependency_hash.to_owned(),
@@ -2616,19 +2843,36 @@ async fn generate_checkpoint(
                 .map(|port| port.id.clone())
         })
         .unwrap_or_else(|| "image".to_owned());
+    let evaluation_context = checkpoint_context(source.as_ref());
     let ai_request = is_ai_node.then(|| {
         build_ai_submit_request(
             &evaluation_editor,
             &node_id,
             &ai_input_port,
-            source.as_ref(),
+            &evaluation_context,
             &dependency_hash,
         )
+    });
+    let requested_output_type = evaluation_editor
+        .graph()
+        .node(&evaluation_node_id)
+        .and_then(|node| node.descriptor.output(&output_port))
+        .map(|port| port.data_type.clone())
+        .unwrap_or_default();
+    let mask_node_ids = ai_mask_node_ids(&evaluation_editor, &node_id);
+    let model = ai_request.as_ref().and_then(|request| {
+        request
+            .as_ref()
+            .ok()
+            .and_then(|request| request.parameters.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
     });
     let ai_providers = is_ai_node.then(|| app.state::<ai::AiProviderManager>().inner().clone());
     let evaluation_source = source.clone();
     let evaluation_node = node_id.clone();
     let evaluation_output = output_port.clone();
+    let worker_manager = Arc::clone(&manager);
     let evaluated = match tauri::async_runtime::spawn_blocking(move || {
         if let Some(request) = ai_request {
             let request = request?;
@@ -2640,8 +2884,18 @@ async fn generate_checkpoint(
             let providers =
                 ai_providers.ok_or_else(|| "AI provider manager is unavailable".to_owned())?;
             let task = providers.submit(&provider_id, request)?;
-            let result = providers.wait(&provider_id, &task.task_id, PollPolicy::default())?;
-            Ok(CheckpointGeneration::Provider(result))
+            let cancellation_requested = worker_manager.register_remote_ai_task(
+                &evaluation_node,
+                token,
+                provider_id.clone(),
+                task.task_id.clone(),
+            )?;
+            if cancellation_requested {
+                let _ = providers.cancel(&provider_id, &task.task_id);
+            }
+            let result = providers.wait(&provider_id, &task.task_id, PollPolicy::default());
+            worker_manager.clear_remote_ai_task(&evaluation_node, token)?;
+            Ok(CheckpointGeneration::Provider(result?))
         } else {
             evaluation_editor
                 .graph()
@@ -2766,13 +3020,21 @@ async fn generate_checkpoint(
             generation,
         )
         .map_err(|error| error.to_string()),
-        CheckpointGeneration::Provider(result) => provider_checkpoint_artifact(
-            &result,
-            &dependency_hash,
-            upstream_hashes,
-            node_version,
-            token.generation_id(),
-        ),
+        CheckpointGeneration::Provider(result) => {
+            let context = ProviderArtifactContext {
+                output_type: &requested_output_type,
+                mask_node_ids: &mask_node_ids,
+                model: model.as_deref(),
+            };
+            provider_checkpoint_artifact(
+                &result,
+                &dependency_hash,
+                upstream_hashes,
+                node_version,
+                token.generation_id(),
+                &context,
+            )
+        }
     };
     let artifact = match artifact_result {
         Ok(artifact) => artifact,
@@ -2839,14 +3101,14 @@ fn cancel_checkpoint(
         .map_err(|_| "source image state is unavailable".to_owned())?
         .clone();
     let manager = Arc::clone(&state.checkpoint);
-    let (checkpoint, status, output_port, was_generating) = {
+    let (checkpoint, status, output_port, was_generating, remote_task) = {
         let mut records = manager
             .checkpoints
             .lock()
             .map_err(|_| "checkpoint state is unavailable".to_owned())?;
         let record = ensure_checkpoint_record(&mut records, &editor, &node_id, None)?;
         let was_generating = record.checkpoint.state() == CheckpointState::Generating;
-        if was_generating {
+        let remote_task = if was_generating {
             let token = record
                 .checkpoint
                 .active_generation_token()
@@ -2861,6 +3123,7 @@ fn cancel_checkpoint(
                 .cancel_generation(&token)
                 .map_err(|error| error.to_string())?;
             record.progress = None;
+            manager.take_remote_ai_task(&node_id, token)?
         } else {
             let (dependency_hash, _) = checkpoint_dependencies(
                 &editor,
@@ -2870,16 +3133,21 @@ fn cancel_checkpoint(
                 source.as_ref(),
             )?;
             record.checkpoint.set_dependency_hash(dependency_hash);
-        }
+            None
+        };
         let checkpoint = record.checkpoint.clone();
         let status = checkpoint_record_status_dto(record, &manager.store)?;
         let output_port = record.output_port.clone();
-        (checkpoint, status, output_port, was_generating)
+        (checkpoint, status, output_port, was_generating, remote_task)
     };
     editor
         .register_checkpoint(checkpoint)
         .map_err(|error| error.to_string())?;
     manager.persist()?;
+    if let Some(remote_task) = remote_task {
+        let providers = app.state::<ai::AiProviderManager>();
+        let _ = providers.cancel(&remote_task.provider_id, &remote_task.task_id);
+    }
     if was_generating {
         emit_checkpoint_progress(&app, &node_id, &output_port, 0.0, "cancelled", None);
     }
@@ -3633,12 +3901,18 @@ mod tests {
                     .with_provider("fixture-provider"),
             );
 
+        let context = ProviderArtifactContext {
+            output_type: "core.Image",
+            mask_node_ids: &[],
+            model: None,
+        };
         let artifact = provider_checkpoint_artifact(
             &result,
             "snapshot-hash",
             BTreeMap::from([("source".to_owned(), "source-hash".to_owned())]),
             1,
             7,
+            &context,
         )
         .unwrap();
 
@@ -3693,11 +3967,11 @@ mod tests {
                 ParameterValue::String("make it blue".to_owned()),
             )
             .unwrap();
-        let source = SourceAsset::Ordinary(Image::new(1, 1).unwrap());
+        let source = Image::new(1, 1).unwrap();
 
+        let context = EvaluationContext::with_source_image(source.clone());
         let request =
-            build_ai_submit_request(&editor, "ai", "image", Some(&source), "dependency-hash")
-                .unwrap();
+            build_ai_submit_request(&editor, "ai", "image", &context, "dependency-hash").unwrap();
 
         assert_eq!(request.provenance.provider_id.as_deref(), Some("fixture"));
         assert_eq!(request.workflow.id, "edit-v1");
@@ -3709,5 +3983,156 @@ mod tests {
             request.inputs.get("image"),
             Some(rawweave_ai_provider::AiInput::Image(_))
         ));
+    }
+
+    fn configured_ai_editor(type_id: &str) -> EditorCore {
+        let mut editor = EditorCore::default();
+        editor.add_node("input", "core.image-input").unwrap();
+        editor.add_node("invert", "core.invert").unwrap();
+        editor
+            .add_node("mask", "core.mask-linear-gradient")
+            .unwrap();
+        editor.add_node("ai", type_id).unwrap();
+        editor.connect("input", "image", "invert", "image").unwrap();
+        editor.connect("invert", "image", "ai", "image").unwrap();
+        editor.connect("input", "image", "mask", "image").unwrap();
+        editor.connect("mask", "mask", "ai", "mask").unwrap();
+        for (parameter, value) in [
+            ("provider_id", ParameterValue::String("fixture".to_owned())),
+            (
+                "workflow_id",
+                ParameterValue::String("workflow-id".to_owned()),
+            ),
+            (
+                "workflow_definition",
+                ParameterValue::String(
+                    r#"{"version":"7","model":"model-a","nodes":{}}"#.to_owned(),
+                ),
+            ),
+        ] {
+            editor.set_node_parameter("ai", parameter, value).unwrap();
+        }
+        editor
+    }
+
+    #[test]
+    fn ai_checkpoint_request_evaluates_connected_image_and_mask_under_context() {
+        let editor = configured_ai_editor("ai.inpaint");
+        let source =
+            Image::from_pixels(2, 1, vec![[0.2, 0.3, 0.4, 1.0], [0.4, 0.5, 0.6, 1.0]]).unwrap();
+        let context = EvaluationContext::with_source_image(source.clone());
+
+        let request =
+            build_ai_submit_request(&editor, "ai", "image", &context, "dependency").unwrap();
+        let rawweave_ai_provider::AiInput::Image(image) = request.inputs.get("image").unwrap()
+        else {
+            panic!("connected image input must be sent as an image");
+        };
+        let decoded = image::load_from_memory(&image.bytes).unwrap().to_rgba32f();
+        assert_eq!(decoded.get_pixel(0, 0).0[0], 0.8);
+        assert_ne!(image.bytes, preview::encode_png(&source).unwrap());
+
+        let rawweave_ai_provider::AiInput::Mask(mask) = request.inputs.get("mask").unwrap() else {
+            panic!("connected mask input must be sent as a mask");
+        };
+        let decoded_mask = image::load_from_memory(&mask.bytes).unwrap().to_rgba32f();
+        assert_eq!(decoded_mask.get_pixel(0, 0).0, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(decoded_mask.get_pixel(1, 0).0, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn ai_checkpoint_request_does_not_fall_back_to_source_for_unconnected_required_image() {
+        let mut editor = EditorCore::default();
+        editor.add_node("ai", "ai.img2img").unwrap();
+        for (parameter, value) in [
+            ("provider_id", ParameterValue::String("fixture".to_owned())),
+            (
+                "workflow_id",
+                ParameterValue::String("workflow-id".to_owned()),
+            ),
+            (
+                "workflow_definition",
+                ParameterValue::String(r#"{"version":"1","nodes":{}}"#.to_owned()),
+            ),
+        ] {
+            editor.set_node_parameter("ai", parameter, value).unwrap();
+        }
+        let source = SourceAsset::Ordinary(Image::new(1, 1).unwrap());
+        let context = checkpoint_context(Some(&source));
+
+        let error =
+            build_ai_submit_request(&editor, "ai", "image", &context, "dependency").unwrap_err();
+        assert!(error.contains("required AI input 'image' is not connected"));
+    }
+
+    fn rgba_png(width: u32, height: u32, bytes: &[u8]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        let mut encoder = Encoder::new(Cursor::new(&mut encoded), width, height);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(bytes).unwrap();
+        writer.finish().unwrap();
+        encoded
+    }
+
+    #[test]
+    fn provider_result_payload_uses_requested_mask_type_and_deterministic_alpha_or_grayscale() {
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-mask",
+            rgba_png(2, 1, &[255, 255, 255, 128, 0, 0, 0, 255]),
+            "image/png",
+        );
+
+        let payload = provider_result_payload(&result, "core.Mask").unwrap();
+        let CheckpointPayload::Mask(mask) = payload else {
+            panic!("core.Mask output must become a mask checkpoint payload");
+        };
+        assert_eq!(mask.values(), vec![128.0 / 255.0, 0.0]);
+    }
+
+    #[test]
+    fn provider_result_payload_rejects_incompatible_requested_output_type() {
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-incompatible",
+            rgba_png(1, 1, &[0, 0, 0, 255]),
+            "image/png",
+        );
+
+        let error = provider_result_payload(&result, "core.DepthMap").unwrap_err();
+        assert!(error.contains("unsupported AI checkpoint output type 'core.DepthMap'"));
+    }
+
+    #[test]
+    fn provider_checkpoint_provenance_preserves_workflow_identity_hash_model_and_mask_nodes() {
+        let mut provenance = rawweave_ai_provider::TaskProvenance::new("ai", 1, "dependency")
+            .with_provider("provider-a")
+            .with_workflow_hash("workflow-content-hash");
+        provenance.workflow_id = "workflow-id".to_owned();
+        provenance.workflow_version = "workflow-version".to_owned();
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-provenance",
+            rgba_png(1, 1, &[1, 2, 3, 255]),
+            "image/png",
+        )
+        .with_provenance(provenance);
+
+        let context = ProviderArtifactContext {
+            output_type: "core.Image",
+            mask_node_ids: &["mask-node".to_owned()],
+            model: Some("model-a"),
+        };
+        let artifact =
+            provider_checkpoint_artifact(&result, "dependency", BTreeMap::new(), 1, 2, &context)
+                .unwrap();
+        let tool = artifact.provenance.external_tool.unwrap();
+        assert_eq!(tool.id, "provider-a");
+        assert_eq!(tool.version, "unknown");
+        assert_eq!(tool.model.as_deref(), Some("model-a"));
+        assert_eq!(tool.parameters["task_id"], "task-provenance");
+        assert_eq!(tool.parameters["workflow_id"], "workflow-id");
+        assert_eq!(tool.parameters["workflow_version"], "workflow-version");
+        assert_eq!(tool.parameters["workflow_hash"], "workflow-content-hash");
+        assert_eq!(tool.parameters["mask_node_ids"], "[\"mask-node\"]");
     }
 }

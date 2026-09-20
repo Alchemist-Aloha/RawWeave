@@ -630,6 +630,19 @@ impl AiProviderManager {
         if !configs.contains_key(provider_id) {
             return Err(format!("AI provider '{provider_id}' does not exist"));
         }
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| "AI provider task state is unavailable".to_owned())?;
+        if let Some(active) = tasks
+            .values()
+            .find(|task| task.task.provider_id == provider_id && !task.task.state.is_terminal())
+        {
+            return Err(format!(
+                "AI provider '{provider_id}' has active task '{}'",
+                active.task.task_id
+            ));
+        }
         let mut next = configs.clone();
         next.remove(provider_id);
         self.persist(&next)?;
@@ -642,10 +655,7 @@ impl AiProviderManager {
             .lock()
             .map_err(|_| "AI provider runtime state is unavailable".to_owned())?
             .remove(provider_id);
-        self.tasks
-            .lock()
-            .map_err(|_| "AI provider task state is unavailable".to_owned())?
-            .retain(|_, task| task.task.provider_id != provider_id);
+        tasks.retain(|_, task| task.task.provider_id != provider_id);
         Ok(())
     }
 
@@ -1022,6 +1032,38 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingCancelProvider {
+        cancels: Arc<AtomicUsize>,
+    }
+
+    impl AiProvider for RecordingCancelProvider {
+        fn id(&self) -> &str {
+            "fixture"
+        }
+
+        fn capabilities(&self) -> AiCapabilities {
+            AiCapabilities::default()
+        }
+
+        fn submit(&self, _request: &SubmitRequest) -> Result<SubmitResponse, ProviderError> {
+            Err(ProviderError::Transport("submit not used in this test".to_owned()))
+        }
+
+        fn status(&self, _task_id: &str) -> Result<TaskStatus, ProviderError> {
+            Err(ProviderError::Transport("status not used in this test".to_owned()))
+        }
+
+        fn result(&self, _task_id: &str) -> Result<AiResult, ProviderError> {
+            Err(ProviderError::Transport("result not used in this test".to_owned()))
+        }
+
+        fn cancel(&self, _task_id: &str) -> Result<(), ProviderError> {
+            self.cancels.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn comfy(id: &str) -> AiProviderConfigDto {
         AiProviderConfigDto {
@@ -1128,5 +1170,78 @@ mod tests {
         let body = read_bounded_response(Cursor::new(vec![1, 2, 3, 4]), 4).unwrap();
         assert_eq!(body, vec![1, 2, 3, 4]);
         assert!(body.capacity() <= 4);
+    }
+
+    #[test]
+    fn cancelling_an_active_task_calls_the_remote_provider() {
+        let manager = AiProviderManager::memory();
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn AiProvider> = Arc::new(RecordingCancelProvider {
+            cancels: Arc::clone(&cancels),
+        });
+        manager
+            .providers
+            .lock()
+            .unwrap()
+            .insert("fixture".to_owned(), Arc::clone(&provider));
+        let token = CancellationToken::new();
+        manager.tasks.lock().unwrap().insert(
+            AiProviderManager::task_key("fixture", "task-1"),
+            ActiveProviderTask {
+                provider,
+                token: token.clone(),
+                task: AiTask {
+                    task_id: "task-1".to_owned(),
+                    provider_id: "fixture".to_owned(),
+                    state: TaskState::Running,
+                    provenance: Default::default(),
+                },
+            },
+        );
+
+        let task = manager.cancel("fixture", "task-1").unwrap();
+
+        assert_eq!(cancels.load(Ordering::SeqCst), 1);
+        assert!(token.is_cancelled());
+        assert_eq!(task.state, TaskState::Cancelled);
+    }
+
+    #[test]
+    fn removing_a_provider_rejects_active_tasks_and_releases_only_after_completion() {
+        let manager = AiProviderManager::memory();
+        manager.add(comfy("active")).unwrap();
+        let provider = manager.provider("active").unwrap();
+        manager.tasks.lock().unwrap().insert(
+            AiProviderManager::task_key("active", "task-1"),
+            ActiveProviderTask {
+                provider: Arc::clone(&provider),
+                token: CancellationToken::new(),
+                task: AiTask {
+                    task_id: "task-1".to_owned(),
+                    provider_id: "active".to_owned(),
+                    state: TaskState::Running,
+                    provenance: Default::default(),
+                },
+            },
+        );
+
+        let error = manager.remove("active").unwrap_err();
+        assert!(error.contains("active task"));
+        assert!(manager.configs.lock().unwrap().contains_key("active"));
+        assert!(manager.providers.lock().unwrap().contains_key("active"));
+        assert!(manager.tasks.lock().unwrap().contains_key("active:task-1"));
+
+        manager
+            .tasks
+            .lock()
+            .unwrap()
+            .get_mut("active:task-1")
+            .unwrap()
+            .task
+            .state = TaskState::Succeeded;
+        manager.remove("active").unwrap();
+        assert!(!manager.configs.lock().unwrap().contains_key("active"));
+        assert!(!manager.providers.lock().unwrap().contains_key("active"));
+        assert!(!manager.tasks.lock().unwrap().contains_key("active:task-1"));
     }
 }
