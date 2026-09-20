@@ -1,4 +1,5 @@
 import type { BrowserSession, BrowserViewSettings } from './types';
+import type { ImageSetCollection } from '../imageset/model';
 
 export const SESSION_VERSION = 1 as const;
 
@@ -23,6 +24,8 @@ export function defaultSession(currentFolder = ''): BrowserSession {
     workflow: { selected: null, unsavedWorkingCopy: null },
     viewer: { targets: { A: null, B: null } },
     batch: { jobId: null, statePath: null },
+    imageSets: [],
+    activeImageSetId: null,
     panelLayout: 'default',
   };
 }
@@ -58,6 +61,29 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isImageSetCollection(value: unknown): value is ImageSetCollection {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.name !== 'string') return false;
+  if (value.order !== 'ordered' && value.order !== 'unordered') return false;
+  if (!Array.isArray(value.members) || value.members.length === 0) return false;
+  if (!isRecord(value.sharedMetadata) || !isRecord(value.alignment)) return false;
+  if (value.alignment.state === 'aligned' && typeof value.alignment.referenceMember !== 'string') return false;
+  if (value.alignment.state !== 'aligned' && value.alignment.state !== 'unaligned') return false;
+  return value.members.every((member) => {
+    if (!isRecord(member)) return false;
+    return typeof member.id === 'string'
+      && typeof member.path === 'string'
+      && typeof member.name === 'string'
+      && typeof member.order === 'number'
+      && (member.metadata === null || isRecord(member.metadata))
+      && (member.thumbnail === null || typeof member.thumbnail === 'string')
+      && (member.error === null || typeof member.error === 'string');
+  });
+}
+
+function imageSetCollections(value: unknown): value is ImageSetCollection[] {
+  return Array.isArray(value) && value.every(isImageSetCollection);
+}
+
 export function parseSession(serialized: string): BrowserSession | null {
   try {
     const parsed: unknown = JSON.parse(serialized);
@@ -71,6 +97,13 @@ export function parseSession(serialized: string): BrowserSession | null {
     if (!isRecord(parsed.viewer) || !isRecord(parsed.viewer.targets)) return null;
     if (parsed.batch !== undefined && !isBatchReference(parsed.batch)) return null;
     if (parsed.batch === undefined) parsed.batch = { jobId: null, statePath: null };
+    const imageSets = parsed.imageSets === undefined ? [] : parsed.imageSets;
+    if (!imageSetCollections(imageSets)) return null;
+    parsed.imageSets = imageSets;
+    const activeImageSetId = parsed.activeImageSetId === undefined ? null : parsed.activeImageSetId;
+    if (!isNullableString(activeImageSetId)) return null;
+    parsed.activeImageSetId = activeImageSetId;
+    if (activeImageSetId !== null && !imageSets.some((collection) => collection.id === activeImageSetId)) return null;
     if (typeof parsed.panelLayout !== 'string') return null;
     return parsed as unknown as BrowserSession;
   } catch {

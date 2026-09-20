@@ -1,3 +1,7 @@
+import type { ImageSetAlignment, ImageSetOrder } from '../imageset/model';
+
+export type { ImageSetAlignment, ImageSetOrder } from '../imageset/model';
+
 export type ParameterType = 'Float' | 'Integer' | 'Boolean' | 'String';
 export type ParameterValue = number | boolean | string;
 
@@ -188,11 +192,32 @@ export interface OpenImageResult {
   metadata: RawMetadataSummary | null;
 }
 
+export interface OpenImageSetMemberResult {
+  id: string;
+  path: string;
+  name: string;
+  width: number;
+  height: number;
+  metadata: RawMetadataSummary | null;
+}
+
+export interface OpenImageSetResult {
+  kind: 'imageset';
+  order: ImageSetOrder;
+  revision: number;
+  members: OpenImageSetMemberResult[];
+  sharedMetadata: RawMetadataSummary | null;
+  alignment: ImageSetAlignment;
+}
+
+export type SourceResult = OpenImageResult | OpenImageSetResult;
+
 export interface EditorPlatform {
   nodeDescriptors(): Promise<NodeDescriptor[]>;
   snapshot(): Promise<PlatformSnapshot>;
   chooseImagePath(): Promise<string | null>;
   openImage(path: string): Promise<OpenImageResult>;
+  openImageSet(paths: string[], order: ImageSetOrder): Promise<OpenImageSetResult>;
   addNode(nodeId: string, typeId: string): Promise<void>;
   removeNode(nodeId: string): Promise<void>;
   connect(fromNode: string, fromPort: string, toNode: string, toPort: string): Promise<void>;
@@ -240,7 +265,7 @@ export interface EditorState {
   nodes: EditorNode[];
   edges: EditorEdge[];
   revision: number;
-  source: OpenImageResult | null;
+  source: SourceResult | null;
   selectedNodeId: string | null;
   selectedNodeIds: string[];
   scopePath: ScopeBreadcrumb[];

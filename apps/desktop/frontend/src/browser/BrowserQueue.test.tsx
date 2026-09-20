@@ -168,6 +168,55 @@ describe('BrowserQueue', () => {
     expect(view.textContent).toContain('Test Set · 1');
   });
 
+  it('creates an ImageSet from browser selections and opens it in the workflow', async () => {
+    const changes: Array<{ collections: import('../imageset/model').ImageSetCollection[]; activeId: string | null }> = [];
+    const onImageSetsChange = vi.fn((collections: import('../imageset/model').ImageSetCollection[], activeId: string | null) => {
+      changes.push({ collections, activeId });
+    });
+    const onOpenImageSet = vi.fn(async () => undefined);
+    const view = await renderQueue(fakePlatform(), { onImageSetsChange, onOpenImageSet });
+
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Select one.jpg"]')?.click();
+      view.querySelector<HTMLButtonElement>('[aria-label="Select two.jpg"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Create ordered ImageSet from browser selection"]')?.click();
+    });
+
+    expect(onImageSetsChange).toHaveBeenCalledTimes(1);
+    expect(changes[0]?.collections[0]?.members.map((member) => member.name)).toEqual(['one.jpg', 'two.jpg']);
+    expect(changes[0]?.activeId).toBe(changes[0]?.collections[0]?.id);
+    expect(onOpenImageSet).toHaveBeenCalledWith(['/photos/one.jpg', '/photos/two.jpg'], 'ordered');
+    expect(view.textContent).toContain('1 collection');
+  });
+
+  it('creates an ImageSet from queue selections independently of the browser selection', async () => {
+    const changes: Array<{ collections: import('../imageset/model').ImageSetCollection[]; activeId: string | null }> = [];
+    const onImageSetsChange = vi.fn((collections: import('../imageset/model').ImageSetCollection[], activeId: string | null) => {
+      changes.push({ collections, activeId });
+    });
+    const view = await renderQueue(fakePlatform(), { onImageSetsChange });
+
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Select one.jpg"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Add selected to queue"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Create ordered ImageSet from queue selection"]')?.click();
+    });
+
+    expect(changes[0]?.collections[0]?.members.map((member) => member.path)).toEqual(['/photos/one.jpg']);
+  });
+
   it('edits current workflow parameters per image and exposes override actions', async () => {
     const promoted: Record<string, unknown>[] = [];
     const workflowParameters: WorkflowParameter[] = [{

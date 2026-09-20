@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { EditorController } from './controller';
 import { createMemoryPlatform } from '../platform/editor';
-import type { EditorPlatform, OpenImageResult } from './types';
+import type { EditorPlatform, ImageSetOrder, OpenImageResult, OpenImageSetResult } from './types';
 
 async function controller() {
   const editor = new EditorController(createMemoryPlatform());
@@ -247,6 +247,37 @@ describe('editor controller', () => {
     ]) {
       expect(typeIds).toContain(typeId);
     }
+  });
+
+  it('opens an ImageSet source without serializing member image data into the workflow', async () => {
+    const base = createMemoryPlatform();
+    const result: OpenImageSetResult = {
+      kind: 'imageset',
+      order: 'ordered',
+      revision: 9,
+      members: [
+        { id: '/photos/a.jpg', path: '/photos/a.jpg', name: 'a.jpg', width: 10, height: 10, metadata: null },
+        { id: '/photos/b.jpg', path: '/photos/b.jpg', name: 'b.jpg', width: 10, height: 10, metadata: null },
+      ],
+      sharedMetadata: null,
+      alignment: { state: 'unaligned' },
+    };
+    const platform: EditorPlatform = {
+      ...base,
+      async openImageSet(_paths: string[], _order: ImageSetOrder) {
+        await base.addNode('imageset-input', 'core.imageset-input');
+        await base.addNode('imageset-select', 'core.imageset-select');
+        await base.connect('imageset-input', 'images', 'imageset-select', 'images');
+        return result;
+      },
+    };
+    const editor = new EditorController(platform);
+    await editor.initialize();
+
+    await expect(editor.openImageSet(['/photos/a.jpg', '/photos/b.jpg'], 'ordered')).resolves.toEqual(result);
+    expect(editor.state.source).toEqual(result);
+    expect(editor.state.nodes.map((node) => node.typeId)).toEqual(['core.imageset-input', 'core.imageset-select']);
+    expect(await editor.saveWorkflow()).not.toContain('pixels');
   });
 
   it('opening an ordinary image resets the graph to the standard image workflow', async () => {

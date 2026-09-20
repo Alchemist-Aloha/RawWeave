@@ -8,6 +8,7 @@ import type {
   LazyInputGate,
   NodeDescriptor,
   OpenImageResult,
+  OpenImageSetResult,
   ParameterType,
   ParameterValue,
   PlatformSnapshot,
@@ -53,6 +54,15 @@ interface RustOpenImageResult {
   height: number;
   revision: number;
   metadata: OpenImageResult['metadata'];
+}
+
+interface RustOpenImageSetResult {
+  kind: 'imageset';
+  order: OpenImageSetResult['order'];
+  revision: number;
+  members: OpenImageSetResult['members'];
+  sharedMetadata: OpenImageSetResult['sharedMetadata'];
+  alignment: OpenImageSetResult['alignment'];
 }
 
 interface RustGraphNode {
@@ -197,6 +207,17 @@ function mapOpenImageResult(result: RustOpenImageResult): OpenImageResult {
     height: result.height,
     revision: result.revision,
     metadata: result.metadata,
+  };
+}
+
+function mapOpenImageSetResult(result: RustOpenImageSetResult): OpenImageSetResult {
+  return {
+    kind: 'imageset',
+    order: result.order,
+    revision: result.revision,
+    members: result.members,
+    sharedMetadata: result.sharedMetadata,
+    alignment: result.alignment,
   };
 }
 
@@ -479,6 +500,16 @@ export function createTauriPlatform(): EditorPlatform {
         activeDefinition = null;
         scopePath = [{ id: 'root', name: 'Workflow', version: '1.0.0' }];
         return mapOpenImageResult(result);
+      } catch (error) {
+        throw message(error);
+      }
+    },
+    async openImageSet(paths, order) {
+      try {
+        const result = await invoke<RustOpenImageSetResult>('open_image_set', { paths, order });
+        activeDefinition = null;
+        scopePath = [{ id: 'root', name: 'Workflow', version: '1.0.0' }];
+        return mapOpenImageSetResult(result);
       } catch (error) {
         throw message(error);
       }

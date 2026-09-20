@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { EditorNode, OpenImageResult, ParameterValue } from '../editor/types';
+import type { EditorNode, ParameterValue, SourceResult } from '../editor/types';
 import { MaskPainter } from '../mask/MaskPainter';
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerId, ViewerPaneState } from '../viewer/types';
@@ -8,7 +8,7 @@ interface ViewerProps {
   controller: ViewerController;
   nodes: EditorNode[];
   revision: number;
-  source: OpenImageResult | null;
+  source: SourceResult | null;
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
 }

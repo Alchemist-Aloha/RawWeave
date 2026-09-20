@@ -5,6 +5,8 @@ import {
   type CheckpointOutputPort,
   type CheckpointPreviewActions,
 } from './CheckpointPanel';
+import { ImageSetInspector } from './ImageSetInspector';
+import type { ImageSetCollection } from '../imageset/model';
 
 interface InspectorProps {
   node: EditorNode | undefined;
@@ -21,6 +23,9 @@ interface InspectorProps {
   onCancelCheckpoint?: () => void | Promise<void>;
   checkpointOutputPorts?: CheckpointOutputPort[];
   checkpointPreviewActions?: CheckpointPreviewActions;
+  imageSet?: ImageSetCollection | null;
+  onImageSetReorder?: (memberId: string, targetIndex: number) => void;
+  onImageSetAlignmentChange?: (referenceMember: string | null) => void;
 }
 
 export function Inspector({
@@ -38,10 +43,21 @@ export function Inspector({
   onCancelCheckpoint,
   checkpointOutputPorts = [],
   checkpointPreviewActions,
+  imageSet = null,
+  onImageSetReorder,
+  onImageSetAlignmentChange,
 }: InspectorProps) {
+  const imageSetPanel = imageSet && onImageSetReorder && onImageSetAlignmentChange ? (
+    <ImageSetInspector
+      collection={imageSet}
+      onAlignmentChange={onImageSetAlignmentChange}
+      onReorder={onImageSetReorder}
+    />
+  ) : null;
   if (selectedNodeIds.length > 1) {
     return (
       <aside className="panel panel--inspector">
+        {imageSetPanel}
         <div className="panel__heading">
           <div>
             <span className="eyebrow">Inspector</span>
@@ -58,6 +74,7 @@ export function Inspector({
   if (!node) {
     return (
       <aside className="panel panel--inspector inspector-empty">
+        {imageSetPanel}
         <span className="eyebrow">Inspector</span>
         <p>Select a node to edit its parameters.</p>
       </aside>
@@ -87,6 +104,7 @@ export function Inspector({
 
   return (
     <aside className="panel panel--inspector">
+      {imageSetPanel}
       <div className="panel__heading">
         <div>
           <span className="eyebrow">Inspector</span>

@@ -425,6 +425,57 @@ function compareDescriptor(typeId: string, name: string): NodeDescriptor {
   );
 }
 
+function imageSetInputDescriptor(): NodeDescriptor {
+  return {
+    typeId: 'core.imageset-input',
+    name: 'ImageSet Input',
+    version: 1,
+    inputs: [],
+    outputs: [outputPort('images', 'Image Set', 'core.ImageSet'), outputPort('set', 'Image Set (alias)', 'core.ImageSet')],
+    parameters: [],
+    capabilities: fullFrameCapabilities,
+  };
+}
+
+function imageSetCollectionDescriptor(typeId: string, name: string): NodeDescriptor {
+  return {
+    typeId,
+    name,
+    version: 1,
+    inputs: [input('images', 'Image Set', 'core.ImageSet', true), input('set', 'Image Set (alias)', 'core.ImageSet', false)],
+    outputs: [outputPort('images', 'Image Set', 'core.ImageSet'), outputPort('set', 'Image Set (alias)', 'core.ImageSet')],
+    parameters: [],
+    capabilities: fullFrameCapabilities,
+  };
+}
+
+function imageSetResultDescriptor(typeId: string, name: string): NodeDescriptor {
+  return {
+    typeId,
+    name,
+    version: 1,
+    inputs: [input('images', 'Image Set', 'core.ImageSet', true), input('set', 'Image Set (alias)', 'core.ImageSet', false)],
+    outputs: [outputPort('image', 'Image', 'core.Image'), outputPort('member_id', 'Member ID', 'value.String')],
+    parameters: [integerParameter('index', 'Member Index', 0), stringParameter('member_id', 'Member ID', '')],
+    capabilities: fullFrameCapabilities,
+  };
+}
+
+const imageSetDescriptors: NodeDescriptor[] = [
+  imageSetInputDescriptor(),
+  { ...imageSetCollectionDescriptor('core.imageset-collect', 'Collect Images'), inputs: [input('image_0', 'Image 0', 'core.Image', false), input('image_1', 'Image 1', 'core.Image', false)], parameters: [stringParameter('id_prefix', 'Member ID Prefix', 'member'), booleanParameter('ordered', 'Preserve Input Order', true)] },
+  imageSetCollectionDescriptor('core.alignment', 'Alignment'),
+  { ...imageSetCollectionDescriptor('core.exposure-set', 'Exposure Set'), parameters: [booleanParameter('sort_by_exposure', 'Sort by Exposure', true)] },
+  imageSetResultDescriptor('core.hdr-merge', 'HDR Merge'),
+  imageSetResultDescriptor('core.focus-stack', 'Focus Stack'),
+  imageSetResultDescriptor('core.panorama', 'Panorama'),
+  imageSetResultDescriptor('core.panorama-stitch', 'Panorama Stitch'),
+  imageSetResultDescriptor('core.imageset-select', 'Select'),
+  { ...imageSetCollectionDescriptor('core.imageset-filter', 'Filter'), parameters: [stringParameter('tag', 'Tag', ''), stringParameter('value', 'Value', '')] },
+  { ...imageSetCollectionDescriptor('core.imageset-map', 'Map'), parameters: [parameter('exposure', 'Exposure', 0)] },
+  { ...imageSetCollectionDescriptor('core.imageset-group', 'Group'), parameters: [stringParameter('tag', 'Tag', ''), stringParameter('value', 'Value', '')], outputs: [outputPort('images', 'Image Set', 'core.ImageSet'), outputPort('set', 'Image Set (alias)', 'core.ImageSet'), outputPort('group', 'Group', 'value.String')] },
+];
+
 export const builtInDescriptors: NodeDescriptor[] = [
   imageInput,
   constantFloat,
@@ -438,6 +489,7 @@ export const builtInDescriptors: NodeDescriptor[] = [
   colorMatrix,
   output,
   ...logicDescriptors,
+  ...imageSetDescriptors,
   ...rawDescriptors,
   ...aiNodeDescriptors,
 ];
@@ -977,6 +1029,31 @@ export function createMemoryPlatform(): EditorPlatform {
         height: 1,
         revision,
         metadata: null,
+      };
+    },
+    async openImageSet(paths, order) {
+      if (paths.length === 0) throw new Error('image set must contain at least one file');
+      scopeStack.splice(1);
+      rootDefinition.nestedSubgraphs = {};
+      rootDefinition.inputs = [];
+      rootDefinition.outputs = [];
+      rootDefinition.parameters = [];
+      rootDefinition.nodePackDependencies = [];
+      rootDefinition.subgraphDependencies = [];
+      nodes.clear();
+      edges = [];
+      revision = 0;
+      nodes.set('imageset-input', { id: 'imageset-input', typeId: 'core.imageset-input', parameters: {}, exposedParameters: [] });
+      nodes.set('imageset-select', { id: 'imageset-select', typeId: 'core.imageset-select', parameters: { index: 0, member_id: '' }, exposedParameters: [] });
+      edges = [{ fromNode: 'imageset-input', fromPort: 'images', toNode: 'imageset-select', toPort: 'images' }];
+      revision = 3;
+      return {
+        kind: 'imageset' as const,
+        order,
+        revision,
+        members: paths.map((path) => ({ id: path, path, name: path.split(/[\\\\/]/).at(-1) ?? path, width: 1, height: 1, metadata: null })),
+        sharedMetadata: null,
+        alignment: { state: 'unaligned' as const },
       };
     },
     async addNode(nodeId, typeId) {

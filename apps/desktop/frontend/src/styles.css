@@ -146,7 +146,7 @@ button { cursor: pointer; }
 .browser-tile__marks button.is-reject { color: #f09aa3; }
 .browser-error, .browser-queue__error { margin: 0; color: #f0c7cc; font-size: 9px; }
 .browser-error { position: absolute; z-index: 1; margin: 5px 10px; }
-.queue-panel { display: grid; grid-template-rows: 39px minmax(0, 1fr) auto auto minmax(76px, 32%); }
+.queue-panel { display: grid; grid-template-rows: 39px minmax(0, 1fr) auto auto auto minmax(76px, 32%); }
 .queue-panel__heading, .queue-panel__testset { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid #1c2430; padding: 6px 10px; }
 .queue-panel__heading strong, .queue-panel__testset strong { display: block; margin-top: 2px; overflow: hidden; color: #cdd8e3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .queue-panel__heading .button { padding: 3px 6px; font-size: 8px; }
@@ -164,6 +164,21 @@ button { cursor: pointer; }
 .queue-item__test { display: flex; align-items: center; gap: 2px; color: #738397; font-family: 'DM Mono', monospace; font-size: 7px; white-space: nowrap; }
 .queue-item__test input { width: 12px; height: 12px; accent-color: #6ee7c7; }
 .queue-item > .icon-button { width: 19px; height: 19px; font-size: 14px; }
+.imageset-panel { min-height: 0; overflow: auto; border-bottom: 1px solid #1c2430; padding: 7px 10px; background: #0e151c; }
+.imageset-panel__heading, .imageset-card, .imageset-card__actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.imageset-panel__heading strong { display: block; margin-top: 2px; color: #cdd8e3; font-size: 9px; }
+.imageset-panel__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
+.imageset-panel__actions .button, .imageset-card__actions .button { padding: 3px 5px; font-size: 7px; }
+.imageset-list { display: grid; gap: 4px; margin-top: 6px; }
+.imageset-card { align-items: stretch; border: 1px solid #263241; border-radius: 5px; padding: 4px; background: #111a22; }
+.imageset-card.is-active { border-color: #58c6aa; background: #13231f; }
+.imageset-card__select { display: grid; min-width: 0; flex: 1; border: 0; padding: 2px; color: #becbd7; background: transparent; text-align: left; }
+.imageset-card__select:hover { color: #8cebd3; }
+.imageset-card__select strong, .imageset-card__select small, .imageset-card__select span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imageset-card__select strong { font-size: 8px; }
+.imageset-card__select small, .imageset-card__select span { margin-top: 2px; color: #708195; font-family: 'DM Mono', monospace; font-size: 7px; }
+.imageset-card__actions { flex: 0 0 auto; }
+.imageset-card__actions .icon-button { width: 19px; height: 19px; font-size: 13px; }
 .queue-overrides { border-bottom: 1px solid #1c2430; padding: 8px 10px; background: #111821; }
 .queue-overrides__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .queue-overrides__heading strong { display: block; max-width: 18ch; margin-top: 2px; overflow: hidden; color: #cdd8e3; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -263,6 +278,29 @@ button { cursor: pointer; }
 
 .inspector-empty { padding-top: 22px; }
 .inspector-empty p { max-width: 180px; margin-top: 22px; color: #687688; font-size: 11px; line-height: 1.6; }
+.imageset-inspector { display: grid; gap: 10px; margin-bottom: 18px; border-bottom: 1px solid #202a36; padding-bottom: 14px; }
+.imageset-inspector--empty { margin-bottom: 18px; border-bottom: 1px solid #202a36; padding-bottom: 14px; }
+.imageset-inspector--empty p { margin: 8px 0 0; color: #687688; font-size: 10px; line-height: 1.5; }
+.imageset-inspector__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 7px; }
+.imageset-inspector__heading h3 { margin: 4px 0 0; color: #e4edf2; font-size: 13px; }
+.imageset-inspector__count { color: #738397; font-family: 'DM Mono', monospace; font-size: 8px; white-space: nowrap; }
+.imageset-inspector__summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 0; }
+.imageset-inspector__summary dt { color: #68798c; font-family: 'DM Mono', monospace; font-size: 7px; text-transform: uppercase; }
+.imageset-inspector__summary dd { overflow: hidden; margin: 2px 0 0; color: #c3d0dc; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.imageset-inspector__alignment { display: grid; gap: 4px; color: #8f9eae; font-size: 9px; }
+.imageset-inspector__alignment select { width: 100%; border: 1px solid #293543; border-radius: 5px; outline: none; padding: 6px; color: #dce6ed; background: #0c1016; font-size: 9px; }
+.imageset-inspector__alignment select:focus { border-color: #58c6aa; }
+.imageset-member-list { display: grid; gap: 5px; }
+.imageset-member { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 6px; min-width: 0; border: 1px solid #263241; border-radius: 5px; padding: 4px; background: #111821; }
+.imageset-member img, .imageset-member__placeholder { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 3px; color: #68798c; background: #0b1016; font-size: 11px; object-fit: cover; }
+.imageset-member__body { display: grid; min-width: 0; }
+.imageset-member__body strong, .imageset-member__body code, .imageset-member__body small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imageset-member__body strong { color: #d8e4eb; font-size: 9px; }
+.imageset-member__body code, .imageset-member__body small { margin-top: 2px; color: #708195; font-family: 'DM Mono', monospace; font-size: 7px; }
+.imageset-member__error { margin: 3px 0 0; overflow: hidden; color: #f39ba4; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.imageset-member__actions { display: grid; gap: 3px; }
+.imageset-member__actions .icon-button { width: 20px; height: 18px; font-size: 11px; }
+.imageset-member__actions .icon-button:disabled { cursor: not-allowed; opacity: .35; }
 .icon-button { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid #2b3645; border-radius: 6px; color: #98a7b8; background: transparent; font-size: 18px; line-height: 1; }
 .icon-button:hover { color: #fff; background: #242d38; }
 .icon-button--danger:hover { border-color: #c56b76; color: #f39ba4; }

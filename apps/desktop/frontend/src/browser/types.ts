@@ -1,5 +1,6 @@
 import type { BatchSessionReference } from '../batch/types';
 import type { ParameterValue, WorkflowSummary } from '../editor/types';
+import type { ImageSetCollection } from '../imageset/model';
 
 export type BrowserEntryKind = 'file' | 'directory';
 export type BrowserFlag = 'none' | 'pick' | 'reject';
@@ -128,5 +129,7 @@ export interface BrowserSession {
     targets: Record<'A' | 'B', { nodeId: string; outputPort: string } | null>;
   };
   batch: BatchSessionReference;
+  imageSets: ImageSetCollection[];
+  activeImageSetId: string | null;
   panelLayout: string;
 }

@@ -169,6 +169,22 @@ export class EditorController {
     }
   }
 
+  public async openImageSet(paths: string[], order: import('../imageset/model').ImageSetOrder): Promise<import('./types').OpenImageSetResult> {
+    try {
+      const result = await this.platform.openImageSet(paths, order);
+      await this.refresh();
+      this.setState({
+        source: result,
+        error: null,
+        notification: `ImageSet loaded (${result.members.length} members)`,
+      });
+      return result;
+    } catch (error) {
+      this.setState({ error: errorMessage(error), notification: null });
+      throw error;
+    }
+  }
+
   public async createNode(typeId: string, requestedId?: string): Promise<string> {
     const descriptor = this.state.descriptors.find((candidate) => candidate.typeId === typeId);
     if (!descriptor) {

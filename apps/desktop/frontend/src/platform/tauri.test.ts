@@ -73,4 +73,20 @@ describe('tauri platform nested blueprint synchronization', () => {
     expect(snapshot.workflowParameters?.[0]?.default).toBe(2);
     expect(mockedInvoke).toHaveBeenCalledWith('save_blueprint');
   });
+
+  it('opens an ordered ImageSet through the native adapter without sending image bytes', async () => {
+    mockedInvoke.mockResolvedValue({
+      kind: 'imageset',
+      order: 'ordered',
+      revision: 4,
+      members: [{ id: '/photos/a.jpg', path: '/photos/a.jpg', name: 'a.jpg', width: 10, height: 10, metadata: null }],
+      sharedMetadata: null,
+      alignment: { state: 'unaligned' },
+    });
+    const platform = createTauriPlatform();
+    const result = await platform.openImageSet(['/photos/a.jpg'], 'ordered');
+
+    expect(result.members[0]?.id).toBe('/photos/a.jpg');
+    expect(mockedInvoke).toHaveBeenCalledWith('open_image_set', { paths: ['/photos/a.jpg'], order: 'ordered' });
+  });
 });

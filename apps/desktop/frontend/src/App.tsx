@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
-import type { OpenImageResult, ParameterValue, WorkflowMetadata } from './editor/types';
+import type { ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
@@ -24,6 +24,8 @@ import { ViewerController } from './viewer/controller';
 import { createPreviewTransport } from './platform/preview';
 import { BrowserQueue } from './browser/BrowserQueue';
 import type { BrowserSession } from './browser/types';
+import type { ImageSetCollection, ImageSetOrder } from './imageset/model';
+import { reorderImageSetMembers, setImageSetAlignment } from './imageset/model';
 import type { BatchWorkflowContext } from './batch/model';
 import { createBatchPlatform } from './platform/batch';
 import { HostManager } from './components/HostManager';
@@ -71,8 +73,37 @@ function unavailable(value: unknown): string {
   return value === null || value === undefined || value === '' ? 'Unavailable' : String(value);
 }
 
-function SourceMetadata({ source }: { source: OpenImageResult | null }) {
+function SourceMetadata({ source }: { source: SourceResult | null }) {
   if (!source) return null;
+  if (source.kind === 'imageset') {
+    const metadata = source.sharedMetadata;
+    const rows = [
+      ['Members', source.members.length],
+      ['Order', source.order],
+      ['Alignment', source.alignment.state === 'aligned' ? 'Aligned' : 'Unaligned'],
+      ['Camera', metadata?.camera],
+      ['Lens', metadata?.lens],
+      ['ISO', metadata?.iso],
+      ['Capture time', metadata?.captureTime],
+      ['Dimensions', metadata ? `${metadata.dimensions.width} × ${metadata.dimensions.height}` : null],
+    ];
+    return (
+      <section aria-label="Source metadata" className="source-metadata">
+        <div>
+          <span className="eyebrow">Source</span>
+          <strong>ImageSet</strong>
+        </div>
+        <dl>
+          {rows.map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{unavailable(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+    );
+  }
   const metadata = source.metadata;
   const rows = metadata
     ? [
@@ -184,6 +215,8 @@ export default function App() {
   const [, setViewerRevision] = useState(0);
   const [, setCheckpointRevision] = useState(0);
   const [restoredSession, setRestoredSession] = useState<BrowserSession | null>(null);
+  const [imageSets, setImageSets] = useState<ImageSetCollection[]>([]);
+  const [activeImageSetId, setActiveImageSetId] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -425,10 +458,36 @@ export default function App() {
 
   const onBrowserSessionLoaded = useCallback((session: BrowserSession) => {
     setRestoredSession(session);
+    setImageSets(session.imageSets);
+    setActiveImageSetId(session.activeImageSetId);
     if (session.panelLayout === 'side-by-side' || session.panelLayout === 'split') {
       viewerController.setLayout(session.panelLayout);
     }
   }, [viewerController]);
+
+  const onImageSetsChange = useCallback((collections: ImageSetCollection[], activeId: string | null) => {
+    setImageSets(collections);
+    setActiveImageSetId(activeId);
+  }, []);
+
+  const activeImageSet = imageSets.find((collection) => collection.id === activeImageSetId) ?? null;
+
+  const reorderActiveImageSetMember = useCallback((memberId: string, targetIndex: number) => {
+    if (!activeImageSet) return;
+    onImageSetsChange(imageSets.map((collection) => collection.id === activeImageSet.id
+      ? reorderImageSetMembers(collection, memberId, targetIndex)
+      : collection), activeImageSet.id);
+  }, [activeImageSet, imageSets, onImageSetsChange]);
+
+  const setActiveImageSetReference = useCallback((referenceMember: string | null) => {
+    if (!activeImageSet) return;
+    try {
+      const updated = setImageSetAlignment(activeImageSet, referenceMember);
+      onImageSetsChange(imageSets.map((collection) => collection.id === updated.id ? updated : collection), updated.id);
+    } catch (error) {
+      setImageError(error instanceof Error ? error.message : String(error));
+    }
+  }, [activeImageSet, imageSets, onImageSetsChange]);
 
   useEffect(() => {
     if (!restoredSession || !controller.state.source) return;
@@ -548,6 +607,21 @@ export default function App() {
     [controller, viewerController],
   );
 
+  const openImageSetPaths = useCallback(
+    async (paths: string[], order: ImageSetOrder) => {
+      try {
+        const imageSet = await controller.openImageSet(paths, order);
+        const firstMember = imageSet.members[0];
+        if (firstMember) viewerController.setSourceDimensions({ width: firstMember.width, height: firstMember.height });
+        setImageError(null);
+      } catch (error) {
+        setImageError(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    },
+    [controller, viewerController],
+  );
+
   const chooseImage = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -655,8 +729,12 @@ export default function App() {
 
       <SourceMetadata source={controller.state.source} />
       <BrowserQueue
+        activeImageSetId={activeImageSetId}
         batchPlatform={batchPlatform}
         batchWorkflow={batchWorkflow}
+        imageSets={imageSets}
+        onImageSetsChange={onImageSetsChange}
+        onOpenImageSet={openImageSetPaths}
         onOpenImage={openImagePath}
         onOpenFailedItem={(item) => openImagePath(item.sourcePath)}
         onPromoteOverrides={promoteOverrides}
@@ -754,6 +832,9 @@ export default function App() {
           </div>
         </section>
         <Inspector
+          imageSet={activeImageSet}
+          onImageSetAlignmentChange={setActiveImageSetReference}
+          onImageSetReorder={reorderActiveImageSetMember}
           node={selectedNode}
           selectedNodeIds={controller.state.selectedNodeIds}
           workflowInputs={controller.state.workflowInputs}

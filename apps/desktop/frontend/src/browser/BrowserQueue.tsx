@@ -10,6 +10,8 @@ import type { BatchSessionReference } from '../batch/types';
 import type { BatchWorkflowContext } from '../batch/model';
 import { BatchPanel } from '../components/BatchPanel';
 import { createBatchPlatform } from '../platform/batch';
+import { createImageSet } from '../imageset/model';
+import type { ImageSetCollection, ImageSetOrder } from '../imageset/model';
 
 export interface BrowserQueueProps {
   platform?: BrowserPlatform;
@@ -22,6 +24,10 @@ export interface BrowserQueueProps {
   panelLayout?: string;
   onSessionLoaded?: (session: BrowserSession) => void;
   onOpenImage?: (path: string) => void | Promise<void>;
+  imageSets?: ImageSetCollection[];
+  activeImageSetId?: string | null;
+  onImageSetsChange?: (collections: ImageSetCollection[], activeId: string | null) => void;
+  onOpenImageSet?: (paths: string[], order: ImageSetOrder) => void | Promise<void>;
   batchPlatform?: import('../batch/types').BatchPlatform;
   batchWorkflow?: BatchWorkflowContext | null;
   onOpenFailedItem?: (item: import('../batch/types').BatchItem) => void | Promise<void>;
@@ -43,6 +49,8 @@ export function createBrowserSession(
     unsavedWorkflowWorkingCopy?: string | null;
     viewerTargets?: BrowserSession['viewer']['targets'];
     batchReference?: BatchSessionReference;
+    imageSets?: ImageSetCollection[];
+    activeImageSetId?: string | null;
     panelLayout?: string;
   },
 ): BrowserSession {
@@ -65,6 +73,8 @@ export function createBrowserSession(
     },
     viewer: { targets: options.viewerTargets ?? { A: null, B: null } },
     batch: options.batchReference ?? { jobId: null, statePath: null },
+    imageSets: options.imageSets ?? [],
+    activeImageSetId: options.activeImageSetId ?? null,
     panelLayout: options.panelLayout ?? 'default',
   };
 }
@@ -80,6 +90,10 @@ export function BrowserQueue({
   panelLayout = 'default',
   onSessionLoaded,
   onOpenImage,
+  imageSets: providedImageSets,
+  activeImageSetId: providedActiveImageSetId,
+  onImageSetsChange,
+  onOpenImageSet,
   batchPlatform: providedBatchPlatform,
   batchWorkflow = null,
   onOpenFailedItem,
@@ -92,9 +106,13 @@ export function BrowserQueue({
   const [queue, setQueue] = useState(queueController.state);
   const [, setBatchRevision] = useState(0);
   const [batchReference, setBatchReference] = useState<BatchSessionReference>(batchController.sessionReference);
+  const [localImageSets, setLocalImageSets] = useState<ImageSetCollection[]>([]);
+  const [localActiveImageSetId, setLocalActiveImageSetId] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const imageSets = providedImageSets ?? localImageSets;
+  const activeImageSetId = providedActiveImageSetId === undefined ? localActiveImageSetId : providedActiveImageSetId;
 
   useEffect(() => {
     const unsubscribeBrowser = browserController.subscribe(setBrowser);
@@ -121,6 +139,10 @@ export function BrowserQueue({
         const folder = saved?.browser.currentFolder || initialFolder;
         if (saved) {
           onSessionLoaded?.(saved);
+          if (providedImageSets === undefined) {
+            setLocalImageSets(saved.imageSets);
+            setLocalActiveImageSetId(saved.activeImageSetId);
+          }
           browserController.setView(saved.browser.view);
           queueController.restore({
             items: saved.queue.items,
@@ -147,7 +169,7 @@ export function BrowserQueue({
     return () => {
       cancelled = true;
     };
-  }, [batchController, browserController, initialFolder, onSessionLoaded, platform, queueController]);
+  }, [batchController, browserController, initialFolder, onSessionLoaded, platform, providedImageSets, queueController]);
 
   useEffect(() => {
     if (!ready) return;
@@ -157,13 +179,15 @@ export function BrowserQueue({
         unsavedWorkflowWorkingCopy,
         viewerTargets,
         batchReference,
+        imageSets,
+        activeImageSetId,
         panelLayout,
       })).catch((caught) => {
         setError(errorMessage(caught));
       });
     }, 150);
     return () => window.clearTimeout(timeout);
-  }, [batchReference, browser, panelLayout, platform, queue, ready, unsavedWorkflowWorkingCopy, viewerTargets, workflowBinding]);
+  }, [activeImageSetId, batchReference, browser, imageSets, panelLayout, platform, queue, ready, unsavedWorkflowWorkingCopy, viewerTargets, workflowBinding]);
 
   const visibleEntries = useMemo(
     () => sortBrowserEntries(
@@ -226,6 +250,43 @@ export function BrowserQueue({
     const selected = browser.entries.filter((entry) => browser.selectedPaths.includes(entry.path));
     queueController.addSelection(selected, workflowBinding);
   }, [browser.entries, browser.selectedPaths, queueController, workflowBinding]);
+
+  const commitImageSets = useCallback((collections: ImageSetCollection[], activeId: string | null) => {
+    if (onImageSetsChange) onImageSetsChange(collections, activeId);
+    if (providedImageSets === undefined) {
+      setLocalImageSets(collections);
+      setLocalActiveImageSetId(activeId);
+    }
+  }, [onImageSetsChange, providedImageSets]);
+
+  const openImageSetCollection = useCallback((collection: ImageSetCollection) => {
+    commitImageSets(imageSets, collection.id);
+    if (!onOpenImageSet) return;
+    void run(() => Promise.resolve(onOpenImageSet(collection.members.map((member) => member.path), collection.order)));
+  }, [commitImageSets, imageSets, onOpenImageSet, run]);
+
+  const createImageSetFromEntries = useCallback((entries: BrowserEntry[], order: ImageSetOrder) => {
+    void run(async () => {
+      const collection = createImageSet(entries, order, `Image Set ${imageSets.length + 1}`);
+      const next = [...imageSets.filter((candidate) => candidate.id !== collection.id), collection];
+      commitImageSets(next, collection.id);
+      await onOpenImageSet?.(collection.members.map((member) => member.path), collection.order);
+    });
+  }, [commitImageSets, imageSets, onOpenImageSet, run]);
+
+  const browserSelection = useMemo(
+    () => browser.entries.filter((entry) => browser.selectedPaths.includes(entry.path) && entry.kind === 'file'),
+    [browser.entries, browser.selectedPaths],
+  );
+  const queueSelection = useMemo(
+    () => queue.items.filter((item) => queue.selectedPaths.includes(item.path)).map((item) => item.source),
+    [queue.items, queue.selectedPaths],
+  );
+
+  const removeImageSet = useCallback((collection: ImageSetCollection) => {
+    const next = imageSets.filter((candidate) => candidate.id !== collection.id);
+    commitImageSets(next, activeImageSetId === collection.id ? next[0]?.id ?? null : activeImageSetId);
+  }, [activeImageSetId, commitImageSets, imageSets]);
 
   const mark = useCallback((path: string, rating: number | null, flag: BrowserFlag) => {
     void run(async () => {
@@ -324,6 +385,24 @@ export function BrowserQueue({
             <button aria-label="Add selected to queue" className="button button--primary" disabled={browser.selectedPaths.length === 0} onClick={addSelection} type="button">
               Add {browser.selectedPaths.length || ''} to queue
             </button>
+            <button
+              aria-label="Create ordered ImageSet from browser selection"
+              className="button button--quiet"
+              disabled={browserSelection.length === 0}
+              onClick={() => createImageSetFromEntries(browserSelection, 'ordered')}
+              type="button"
+            >
+              Set ordered
+            </button>
+            <button
+              aria-label="Create unordered ImageSet from browser selection"
+              className="button button--quiet"
+              disabled={browserSelection.length === 0}
+              onClick={() => createImageSetFromEntries(browserSelection, 'unordered')}
+              type="button"
+            >
+              Set unordered
+            </button>
           </div>
           {browser.error && <p className="browser-error">{browser.error}</p>}
           <div className="browser-grid">
@@ -394,6 +473,55 @@ export function BrowserQueue({
               );
             })}
           </div>
+          <section aria-label="Image Sets" className="imageset-panel">
+            <header className="imageset-panel__heading">
+              <div>
+                <span className="eyebrow">ImageSets</span>
+                <strong>{imageSets.length} collection{imageSets.length === 1 ? '' : 's'}</strong>
+              </div>
+              <div className="imageset-panel__actions">
+                <button
+                  aria-label="Create ordered ImageSet from queue selection"
+                  className="button button--quiet"
+                  disabled={queueSelection.length === 0}
+                  onClick={() => createImageSetFromEntries(queueSelection, 'ordered')}
+                  type="button"
+                >
+                  Queue → Set
+                </button>
+                <button
+                  aria-label="Create unordered ImageSet from queue selection"
+                  className="button button--quiet"
+                  disabled={queueSelection.length === 0}
+                  onClick={() => createImageSetFromEntries(queueSelection, 'unordered')}
+                  type="button"
+                >
+                  Unordered
+                </button>
+              </div>
+            </header>
+            <div className="imageset-list">
+              {imageSets.length === 0 && <p className="empty-state empty-state--compact">Select browser files or queue items to create a collection.</p>}
+              {imageSets.map((collection) => (
+                <article className={`imageset-card${collection.id === activeImageSetId ? ' is-active' : ''}`} key={collection.id}>
+                  <button
+                    aria-label={`Select Image Set ${collection.name}`}
+                    className="imageset-card__select"
+                    onClick={() => commitImageSets(imageSets, collection.id)}
+                    type="button"
+                  >
+                    <strong>{collection.name}</strong>
+                    <small>{collection.order} · {collection.members.length} members</small>
+                    <span>{collection.members.map((member) => member.name).join(' · ')}</span>
+                  </button>
+                  <div className="imageset-card__actions">
+                    <button aria-label={`Open Image Set ${collection.name}`} className="button button--quiet" onClick={() => openImageSetCollection(collection)} type="button">Open</button>
+                    <button aria-label={`Remove Image Set ${collection.name}`} className="icon-button" onClick={() => removeImageSet(collection)} type="button">×</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
           <section aria-label="Per-image workflow overrides" className="queue-overrides">
             <header className="queue-overrides__heading">
               <div>
