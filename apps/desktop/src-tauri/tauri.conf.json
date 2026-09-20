@@ -5,6 +5,10 @@
   "identifier": "com.rawweave.editor",
   "build": {
     "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../frontend"
+    },
     "devUrl": "http://localhost:5173",
     "frontendDist": "../frontend/dist"
   },
