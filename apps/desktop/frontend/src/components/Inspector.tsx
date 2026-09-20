@@ -212,6 +212,7 @@ export function Inspector({
           onGenerate={onGenerateCheckpoint}
           outputPorts={checkpointOutputPorts}
           previewActions={checkpointPreviewActions}
+          nodeLabel={node.descriptor.name}
           status={checkpointStatus}
         />
       )}

@@ -81,4 +81,23 @@ describe('NodeLibrary', () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  it('lets users turn off the compatible-only context filter', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(
+      <NodeLibrary descriptors={descriptors} onAdd={vi.fn()} compatibleDataTypes={['core.Image']} />,
+    ));
+
+    const filter = host.querySelector<HTMLInputElement>('[aria-label="Compatible nodes only"]');
+    expect(filter?.checked).toBe(true);
+    await act(async () => filter?.click());
+
+    expect(filter?.checked).toBe(false);
+    expect(host.textContent).toContain('Constant');
+    expect(host.textContent).toContain('Showing all nodes');
+    await act(async () => root.unmount());
+    host.remove();
+  });
 });

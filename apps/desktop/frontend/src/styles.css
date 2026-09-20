@@ -247,7 +247,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .search-field input:focus { border-color: #58c6aa; }
 .node-library__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 20px; margin: -7px 0 10px; color: #6e7c8e; font-family: 'DM Mono', monospace; font-size: 7px; line-height: 1.4; }
 .node-library__toolbar > span:first-child { min-width: 0; }
-.filter-chip { flex: 0 0 auto; border: 1px solid #3f8f7c; border-radius: 4px; padding: 2px 4px; color: #8cebd3; background: #13251f; text-transform: uppercase; }
+.filter-chip { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; border: 1px solid #3f8f7c; border-radius: 4px; padding: 2px 4px; color: #8cebd3; background: #13251f; text-transform: uppercase; }
+.filter-chip input { width: 11px; height: 11px; margin: 0; accent-color: #6ee7c7; }
 .node-library { display: grid; gap: 7px; }
 .node-library__item { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 9px; width: 100%; border: 1px solid #202a36; border-radius: 8px; padding: 9px; color: #dfe8f2; background: #141a23; text-align: left; }
 .node-library__item:hover { border-color: #58c6aa; background: #17242a; }
@@ -356,6 +357,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .checkpoint-state--stale { color: #f0cf82; background: #2d2719; }
 .checkpoint-state--failed { color: #f39ba4; background: #301c22; }
 .checkpoint-panel__notice, .checkpoint-panel__error { margin: 0; font-size: 9px; line-height: 1.5; }
+.checkpoint-panel__error { display: grid; gap: 4px; }
+.checkpoint-panel__error strong { color: #ff9da7; font-size: 9px; }
+.checkpoint-panel__error span { color: #f0c7cc; }
+.checkpoint-panel__error small { color: #d7a4ac; font-size: 8px; }
+.checkpoint-panel__error .button { justify-self: start; padding: 4px 6px; font-size: 8px; }
 .checkpoint-panel__notice { color: #e7c77c; }
 .checkpoint-panel__error { color: #f39ba4; }
 .checkpoint-panel__progress { display: grid; gap: 5px; color: #b7c8d9; font-family: 'DM Mono', monospace; font-size: 9px; }
@@ -404,7 +410,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-comparison__wipe { position: absolute; right: 10px; bottom: 10px; left: 10px; z-index: 5; display: flex; border: 1px solid rgba(68, 84, 100, .9); border-radius: 6px; padding: 5px 7px; background: rgba(10, 14, 20, .88); }
 .viewer-comparison__wipe input { width: 100%; accent-color: #6ee7c7; }
 .viewer-comparison__status { position: absolute; right: 10px; bottom: 10px; z-index: 5; border: 1px solid rgba(68, 84, 100, .9); border-radius: 5px; padding: 4px 6px; color: #b9c8d6; background: rgba(10, 14, 20, .88); font-family: 'DM Mono', monospace; font-size: 8px; }
-.viewer-pane__clipping-overlay { position: absolute; inset: 0; z-index: 1; pointer-events: none; background: linear-gradient(135deg, rgba(255, 80, 95, .5) 0 7%, transparent 7% 93%, rgba(90, 150, 255, .5) 93% 100%); mix-blend-mode: screen; opacity: .75; }
+.viewer-pane__clipping-overlay { position: absolute; z-index: 1; display: block; pointer-events: none; mix-blend-mode: screen; }
 .viewer-pane { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid #263241; border-radius: 8px; background: #111720; }
 .viewer-pane__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; border-bottom: 1px solid #202b38; padding: 7px 9px; }
 .viewer-pane__header strong { display: block; max-width: 40ch; overflow: hidden; margin-top: 3px; color: #cdd8e3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -427,7 +433,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-pane__empty { max-width: 260px; padding: 18px; color: #718093; font-family: 'DM Mono', monospace; font-size: 9px; line-height: 1.6; text-align: center; }
 .viewer-pane__progress { position: absolute; right: 10px; bottom: 10px; left: 10px; display: grid; gap: 5px; border: 1px solid #344454; border-radius: 6px; padding: 7px 8px; color: #b7c8d9; background: rgba(10, 14, 20, .9); font-family: 'DM Mono', monospace; font-size: 9px; }
 .viewer-pane__progress progress { width: 100%; height: 5px; accent-color: #6ee7c7; }
-.viewer-pane__error { position: absolute; right: 10px; bottom: 10px; left: 10px; border: 1px solid #884854; border-radius: 6px; padding: 8px; color: #f0c7cc; background: rgba(36, 23, 28, .95); font-size: 9px; line-height: 1.4; }
+.viewer-pane__error { position: absolute; right: 10px; bottom: 10px; left: 10px; display: grid; gap: 4px; border: 1px solid #884854; border-radius: 6px; padding: 8px; color: #f0c7cc; background: rgba(36, 23, 28, .95); font-size: 9px; line-height: 1.4; }
+.viewer-pane__error strong { color: #ff9da7; font-size: 9px; }
+.viewer-pane__error small { color: #d7a4ac; font-size: 8px; }
+.viewer-pane__error button { justify-self: start; border: 1px solid #884854; border-radius: 4px; padding: 4px 6px; color: #f0c7cc; background: #301c22; font-size: 8px; font-weight: 700; }
 .viewer-pane__controls { display: flex; align-items: center; justify-content: flex-end; gap: 4px; border-top: 1px solid #202b38; padding: 6px 8px; }
 .viewer-pane__controls button { padding: 4px 7px; }
 .viewer-pane__zoom { min-width: 44px; color: #8f9eae; font-family: 'DM Mono', monospace; font-size: 9px; text-align: center; }
@@ -461,6 +470,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .error-toast strong { color: #ff9da7; font-size: 10px; }
 .error-toast span { grid-column: 1; line-height: 1.4; }
 .error-toast small { grid-column: 1; color: #d7a4ac; font-size: 9px; line-height: 1.4; }
+.error-toast__retry { grid-column: 1 !important; grid-row: auto !important; justify-self: start; border: 1px solid #884854 !important; border-radius: 4px; padding: 4px 6px; color: #f0c7cc !important; background: #301c22 !important; font-size: 9px !important; }
 .error-toast button { grid-column: 2; grid-row: 1 / span 3; align-self: center; border: 0; color: #b9757e; background: transparent; font-size: 18px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 

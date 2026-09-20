@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import type { EditorNode, ParameterValue, SourceResult } from '../editor/types';
 import { MaskPainter } from '../mask/MaskPainter';
 import { Scopes } from './Scopes';
-import { analyzeImageElement, type ImageAnalysis } from '../viewer/analysis';
+import { analyzeImageElement, drawClippingOverlay, type ImageAnalysis } from '../viewer/analysis';
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerComparison, ViewerId, ViewerPaneState } from '../viewer/types';
+import { describeOperationError } from '../ui/errors';
 
 interface ViewerProps {
   controller: ViewerController;
@@ -45,6 +46,59 @@ function targetKey(target: PreviewTarget): string {
   return `${target.nodeId}:${target.outputPort}`;
 }
 
+export interface ClippingOverlayProps {
+  analysis: ImageAnalysis | null;
+  enabled: boolean;
+  imageRef: RefObject<HTMLImageElement | null>;
+  stageRef: RefObject<HTMLElement | null>;
+  viewer: ViewerId;
+}
+
+export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer }: ClippingOverlayProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useLayoutEffect(() => {
+    if (!enabled || !analysis) return;
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+    const stage = stageRef.current;
+    if (!canvas || !image || !stage) return;
+
+    const update = () => {
+      const stageBounds = stage.getBoundingClientRect();
+      const imageBounds = image.getBoundingClientRect();
+      canvas.style.left = `${imageBounds.left - stageBounds.left}px`;
+      canvas.style.top = `${imageBounds.top - stageBounds.top}px`;
+      canvas.style.width = `${imageBounds.width}px`;
+      canvas.style.height = `${imageBounds.height}px`;
+      drawClippingOverlay(analysis, canvas);
+    };
+
+    update();
+    window.addEventListener('resize', update);
+    if (typeof ResizeObserver === 'undefined') {
+      return () => window.removeEventListener('resize', update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    observer.observe(image);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  }, [analysis, enabled, imageRef, stageRef]);
+
+  if (!enabled || !analysis) return null;
+  return (
+    <canvas
+      aria-label={`Viewer ${viewer} clipping overlay`}
+      className="viewer-pane__clipping-overlay"
+      ref={canvasRef}
+      role="img"
+    />
+  );
+}
+
 function TargetSelect({ viewer, pane, options, controller }: {
   viewer: ViewerId;
   pane: ViewerPaneState;
@@ -72,7 +126,7 @@ function TargetSelect({ viewer, pane, options, controller }: {
   );
 }
 
-function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, surface = false, clippingOverlay = false, className = '', style }: {
+function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, analysis = null, surface = false, clippingOverlay = false, className = '', style }: {
   viewer: ViewerId;
   pane: ViewerPaneState;
   options: PreviewTarget[];
@@ -80,6 +134,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
   onAnalysis?: (analysis: ImageAnalysis | null) => void;
+  analysis?: ImageAnalysis | null;
   surface?: boolean;
   clippingOverlay?: boolean;
   className?: string;
@@ -88,6 +143,14 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
   const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const errorNotice = pane.status === 'error' && pane.error
+    ? describeOperationError(pane.error, {
+      nodeId: pane.target?.nodeId,
+      nodeLabel: pane.target?.nodeName,
+      operation: 'viewer-render',
+      outputPort: pane.target?.outputPort,
+    })
+    : null;
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -173,14 +236,35 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             {pane.status === 'loading' ? 'Rendering preview…' : 'Select an intermediate node output'}
           </div>
         )}
-        {clippingOverlay && <div aria-label={`Viewer ${viewer} clipping overlay`} className="viewer-pane__clipping-overlay" role="img" />}
+        <ClippingOverlay
+          analysis={analysis}
+          enabled={clippingOverlay}
+          imageRef={imageRef}
+          stageRef={stageRef}
+          viewer={viewer}
+        />
         {pane.status === 'loading' && (
           <div className="viewer-pane__progress" role="status">
             <span>Rendering {Math.round(pane.progress * 100)}%</span>
             <progress max="1" value={pane.progress} />
           </div>
         )}
-        {pane.status === 'error' && <div className="viewer-pane__error">{pane.error}</div>}
+        {errorNotice && (
+          <div className="viewer-pane__error" role="alert">
+            <strong>{errorNotice.title}</strong>
+            <span>{errorNotice.message}</span>
+            <small>{errorNotice.guidance}</small>
+            {pane.target && (
+              <button
+                aria-label={errorNotice.retryLabel}
+                onClick={() => controller.setTarget(viewer, pane.target)}
+                type="button"
+              >
+                Retry render
+              </button>
+            )}
+          </div>
+        )}
         {pane.target?.dataType === 'core.Mask' && paintedNode && (
           <MaskPainter
             imageOrigin={pane.imageOrigin}
@@ -227,6 +311,7 @@ function ComparisonSurface({
   comparison,
   controller,
   options,
+  analyses,
   clippingOverlay,
   onWipePositionChange,
   wipePosition,
@@ -238,6 +323,7 @@ function ComparisonSurface({
   comparison: Exclude<ViewerComparison, 'side-by-side'>;
   controller: ViewerController;
   options: PreviewTarget[];
+  analyses: Record<ViewerId, ImageAnalysis | null>;
   clippingOverlay: boolean;
   onWipePositionChange: (position: number) => void;
   wipePosition: number;
@@ -256,6 +342,7 @@ function ComparisonSurface({
         <label><span>Viewer B</span><TargetSelect controller={controller} options={options} pane={paneB} viewer="B" /></label>
       </div>
       <Pane
+        analysis={analyses.A}
         className="viewer-pane--comparison-a"
         clippingOverlay={clippingOverlay}
         controller={controller}
@@ -269,6 +356,7 @@ function ComparisonSurface({
         viewer="A"
       />
       <Pane
+        analysis={analyses.B}
         className="viewer-pane--comparison-b"
         clippingOverlay={clippingOverlay}
         controller={controller}
@@ -385,6 +473,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
       {controller.state.comparison === 'side-by-side' ? (
         <div className={`viewer-grid viewer-grid--${controller.state.layout}`}>
           <Pane
+            analysis={analyses.A}
             clippingOverlay={controller.state.clippingOverlay}
             controller={controller}
             onAnalysis={(analysis) => handleAnalysis('A', analysis)}
@@ -394,6 +483,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             pane={controller.state.panes.A}
             viewer="A" />
           <Pane
+            analysis={analyses.B}
             clippingOverlay={controller.state.clippingOverlay}
             controller={controller}
             onAnalysis={(analysis) => handleAnalysis('B', analysis)}
@@ -405,6 +495,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
         </div>
       ) : (
         <ComparisonSurface
+          analyses={analyses}
           blinkViewer={blinkViewer}
           clippingOverlay={controller.state.clippingOverlay}
           comparison={controller.state.comparison}

@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { targetsFor } from './Viewer';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ClippingOverlay, targetsFor } from './Viewer';
+import { analyzeImageData } from '../viewer/analysis';
 import type { EditorNode } from '../editor/types';
 
 function node(id: string, outputs: Array<{ id: string; name: string; dataType: string }>): EditorNode {
@@ -38,5 +41,62 @@ describe('Viewer', () => {
       'core.MaskSet',
       'core.DepthMap',
     ]);
+  });
+
+  it('draws an enabled clipping canvas over the displayed image bounds', async () => {
+    const context = {
+      createImageData: vi.fn((width: number, height: number) => ({
+        data: new Uint8ClampedArray(width * height * 4),
+        width,
+        height,
+      })),
+      putImageData: vi.fn(),
+    };
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockReturnValue(context as unknown as CanvasRenderingContext2D);
+    const stage = document.createElement('div');
+    const image = document.createElement('img');
+    document.body.append(stage);
+    stage.append(image);
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      x: 10, y: 20, top: 20, right: 210, bottom: 120, left: 10, width: 200, height: 100,
+      toJSON: () => undefined,
+    });
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({
+      x: 30, y: 35, top: 35, right: 190, bottom: 95, left: 30, width: 160, height: 60,
+      toJSON: () => undefined,
+    });
+    const analysis = analyzeImageData({
+      data: new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255]),
+      width: 2,
+      height: 1,
+    } as ImageData);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(
+      <ClippingOverlay
+        analysis={analysis}
+        enabled
+        imageRef={{ current: image }}
+        stageRef={{ current: stage }}
+        viewer="A"
+      />,
+    ));
+
+    const canvas = host.querySelector<HTMLCanvasElement>('canvas');
+    expect(canvas).not.toBeNull();
+    expect(canvas?.width).toBe(2);
+    expect(canvas?.height).toBe(1);
+    expect(canvas?.style.left).toBe('20px');
+    expect(canvas?.style.top).toBe('15px');
+    expect(canvas?.style.width).toBe('160px');
+    expect(canvas?.style.height).toBe('60px');
+    expect(context.putImageData).toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    host.remove();
+    stage.remove();
+    getContext.mockRestore();
   });
 });

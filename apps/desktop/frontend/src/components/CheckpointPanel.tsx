@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { CheckpointStatus } from '../checkpoint/types';
+import { describeOperationError } from '../ui/errors';
 
 export interface CheckpointOutputPort {
   id: string;
@@ -14,6 +15,8 @@ export interface CheckpointPanelProps {
   onCancel: () => void | Promise<void>;
   outputPorts?: CheckpointOutputPort[];
   previewActions?: CheckpointPreviewActions;
+  nodeLabel?: string;
+  dependencyIssue?: boolean;
 }
 
 export interface CheckpointPreviewAction {
@@ -43,6 +46,8 @@ export function CheckpointPanel({
   onCancel,
   outputPorts = [],
   previewActions,
+  nodeLabel,
+  dependencyIssue = false,
 }: CheckpointPanelProps) {
   const [selectedOutput, setSelectedOutput] = useState(
     () => outputPorts.find((port) => port.id === status?.outputPort)?.id ?? outputPorts[0]?.id ?? status?.outputPort ?? '',
@@ -69,6 +74,15 @@ export function CheckpointPanel({
 
   const generating = status.state === 'generating';
   const actionLabel = status.committedArtifactId ? 'Regenerate checkpoint' : 'Generate checkpoint';
+  const errorNotice = status.failure
+    ? describeOperationError(status.failure, {
+      dependencyIssue,
+      nodeId: status.nodeId,
+      nodeLabel: nodeLabel ?? 'Manual checkpoint',
+      operation: 'checkpoint-generate',
+      outputPort: status.outputPort,
+    })
+    : null;
   return (
     <section aria-label="Checkpoint" className={`checkpoint-panel checkpoint-panel--${status.state}`}>
       <div className="checkpoint-panel__heading">
@@ -107,7 +121,21 @@ export function CheckpointPanel({
           <progress max="100" value={status.progress ?? 0}>{status.progress ?? 0}%</progress>
         </div>
       )}
-      {status.failure && <p className="checkpoint-panel__error" role="alert">{status.failure}</p>}
+      {errorNotice && (
+        <div className="checkpoint-panel__error" role="alert">
+          <strong>{errorNotice.title}</strong>
+          <span>{errorNotice.message}</span>
+          <small>{errorNotice.guidance}</small>
+          <button
+            aria-label={errorNotice.retryLabel}
+            className="button button--quiet"
+            onClick={() => void onGenerate(selectedOutput || status.outputPort)}
+            type="button"
+          >
+            Retry checkpoint
+          </button>
+        </div>
+      )}
       <div className="checkpoint-panel__actions">
         <button
           aria-label={generating ? 'Cancel checkpoint' : actionLabel}

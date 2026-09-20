@@ -12,7 +12,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
-import type { ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
+import type { EditorNode, ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
 import { createPlatform } from './platform/editor';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
@@ -35,6 +35,7 @@ import { AiProviderManager } from './components/AiProviderManager';
 import { createTauriHostManager } from './platform/hosts';
 import { CheckpointController } from './checkpoint/controller';
 import { createCheckpointPlatform } from './platform/checkpoint';
+import { describeOperationError, redactErrorDetails } from './ui/errors';
 import { shortcutAction } from './ui/shortcuts';
 
 const nodeTypes = { rawweave: GraphNode };
@@ -88,12 +89,9 @@ export interface EditorErrorNotice {
   guidance: string;
 }
 
-function redactErrorDetails(message: string): string {
-  return message
-    .replace(/(api[_-]?key|token|secret|password|authorization|credential)\s*[:=]\s*["']?[^,;\s"']+/gi, '$1=[redacted]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
-    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, '[redacted-key]')
-    .replace(/\*{3,}/g, '[redacted]');
+export function compatibleDataTypesForNode(node: EditorNode | undefined): string[] {
+  if (!node) return [];
+  return [...new Set(node.descriptor.outputs.map((output) => output.dataType))];
 }
 
 export function describeEditorError(message: string, context: EditorErrorContext): EditorErrorNotice {
@@ -321,6 +319,7 @@ export default function App() {
   const selectedNode = controller.state.nodes.find(
     (node) => node.id === controller.state.selectedNodeId,
   );
+  const compatibleDataTypes = compatibleDataTypesForNode(selectedNode);
   const selectedCheckpointStatus = selectedNode
     ? checkpointController.state.statuses.find((status) => status.nodeId === selectedNode.id) ?? null
     : null;
@@ -740,6 +739,18 @@ export default function App() {
       nodeLabel: selectedNode?.descriptor.name,
     })
     : null;
+  const checkpointErrorNotice = checkpointController.state.error
+    ? describeOperationError(checkpointController.state.error, {
+      dependencyIssue: Boolean(controller.state.dependencyReport
+        && (controller.state.dependencyReport.missing.length
+          || controller.state.dependencyReport.mismatched.length
+          || controller.state.dependencyReport.disabledNodes.length)),
+      nodeId: selectedNode?.id,
+      nodeLabel: selectedNode?.descriptor.name,
+      operation: 'checkpoint-generate',
+      outputPort: selectedCheckpointStatus?.outputPort ?? selectedNode?.descriptor.outputs[0]?.id,
+    })
+    : null;
   const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
@@ -869,6 +880,7 @@ export default function App() {
 
       <section className="workspace">
         <NodeLibrary
+          compatibleDataTypes={compatibleDataTypes}
           descriptors={controller.state.descriptors}
           onAdd={(typeId) => void controller.createNode(typeId).catch(() => undefined)}
           onCreateSubgraph={() => setShowSubgraphForm(true)}
@@ -1016,10 +1028,21 @@ export default function App() {
           </button>
         </div>
       )}
-      {checkpointController.state.error && (
+      {checkpointErrorNotice && (
         <div className="error-toast" role="alert">
-          <strong>Checkpoint operation failed</strong>
-          <span>{checkpointController.state.error}</span>
+          <strong>{checkpointErrorNotice.title}</strong>
+          <span>{checkpointErrorNotice.message}</span>
+          <small>{checkpointErrorNotice.guidance}</small>
+          {selectedNode && (
+            <button
+              aria-label={checkpointErrorNotice.retryLabel}
+              className="error-toast__retry"
+              onClick={() => generateCheckpoint(selectedCheckpointStatus?.outputPort)}
+              type="button"
+            >
+              Retry checkpoint
+            </button>
+          )}
           <button aria-label="Dismiss checkpoint error" onClick={() => checkpointController.clearError()} type="button">
             ×
           </button>

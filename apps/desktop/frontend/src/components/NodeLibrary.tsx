@@ -30,9 +30,11 @@ export function NodeLibrary({
   compatibleDataTypes,
 }: NodeLibraryProps) {
   const [query, setQuery] = useState('');
+  const [compatibleOnly, setCompatibleOnly] = useState(true);
+  const hasCompatibleTypes = Boolean(compatibleDataTypes && compatibleDataTypes.length > 0);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    const compatible = compatibleDataTypes && compatibleDataTypes.length > 0
+    const compatible = hasCompatibleTypes && compatibleOnly && compatibleDataTypes
       ? new Set(compatibleDataTypes)
       : null;
     return descriptors.filter((descriptor) => {
@@ -41,7 +43,7 @@ export function NodeLibrary({
         [...compatible].some((outputType) => dataTypesCompatible(input.dataType, outputType)))) return false;
       return true;
     });
-  }, [compatibleDataTypes, descriptors, query]);
+  }, [compatibleDataTypes, compatibleOnly, descriptors, hasCompatibleTypes, query]);
 
   return (
     <aside className="panel panel--library">
@@ -71,8 +73,16 @@ export function NodeLibrary({
       </label>
       <div className="node-library__toolbar">
         <span id="node-library-hint">Enter adds the first result · ⌘K focuses search</span>
-        {compatibleDataTypes && compatibleDataTypes.length > 0 && (
-          <span aria-label="Compatible nodes only" className="filter-chip">Compatible inputs</span>
+        {hasCompatibleTypes && (
+          <label className="filter-chip">
+            <input
+              aria-label="Compatible nodes only"
+              checked={compatibleOnly}
+              onChange={(event) => setCompatibleOnly(event.target.checked)}
+              type="checkbox"
+            />
+            <span>{compatibleOnly ? 'Compatible inputs' : 'Showing all nodes'}</span>
+          </label>
         )}
       </div>
       <div className="node-library">
