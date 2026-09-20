@@ -3,11 +3,12 @@ mod browser;
 mod hosts;
 mod preview;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rawweave_ai_provider::{
@@ -514,6 +515,10 @@ struct CheckpointManager {
 
 const CHECKPOINT_STATE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+static CHECKPOINT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CHECKPOINT_TARGET_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    OnceLock::new();
+
 impl Default for CheckpointManager {
     fn default() -> Self {
         Self::memory()
@@ -710,6 +715,47 @@ fn load_checkpoint_records(path: &Path) -> Result<BTreeMap<String, CheckpointRec
     })
 }
 
+fn checkpoint_temporary_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("checkpoints.json");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let sequence = CHECKPOINT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        timestamp,
+        sequence
+    ))
+}
+
+fn checkpoint_target_lock(path: &Path) -> Arc<Mutex<()>> {
+    let locks = CHECKPOINT_TARGET_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_owned(), Arc::downgrade(&lock));
+    lock
+}
+
+#[cfg(unix)]
+fn sync_checkpoint_parent_directory(path: &Path) {
+    if let Ok(directory) = File::open(path) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_checkpoint_parent_directory(_path: &Path) {}
+
 fn write_checkpoint_state(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| {
@@ -718,14 +764,12 @@ fn write_checkpoint_state(path: &Path, bytes: &[u8]) -> Result<(), String> {
             parent.display()
         )
     })?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("checkpoints.json"),
-        std::process::id()
-    ));
-    let result = (|| {
+    let target_lock = checkpoint_target_lock(path);
+    let _target_guard = target_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temporary = checkpoint_temporary_path(path);
+    let result: Result<(), String> = (|| {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -737,13 +781,149 @@ fn write_checkpoint_state(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .map_err(|error| format!("could not write checkpoint state: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("could not sync checkpoint state: {error}"))?;
+        drop(file);
         std::fs::rename(&temporary, path)
-            .map_err(|error| format!("could not install checkpoint state: {error}"))
+            .map_err(|error| format!("could not install checkpoint state: {error}"))?;
+        sync_checkpoint_parent_directory(parent);
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod checkpoint_persistence_tests {
+    use super::{checkpoint_target_lock, write_checkpoint_state};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc, Barrier,
+    };
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn checkpoint_writers_for_same_target_are_serialized() {
+        let root = std::env::temp_dir().join(format!(
+            "rawweave-checkpoint-serialized-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("checkpoints.json");
+        let target_lock = checkpoint_target_lock(&path);
+        let target_guard = target_lock.lock().unwrap();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let writer_path = path.clone();
+        let handle = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            finished_sender
+                .send(write_checkpoint_state(&writer_path, b"{\"writer\":1}"))
+                .unwrap();
+        });
+
+        started_receiver.recv().unwrap();
+        assert!(finished_receiver
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
+        drop(target_guard);
+        assert!(finished_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_ok());
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_checkpoint_writers_install_complete_payloads() {
+        let root = std::env::temp_dir().join(format!(
+            "rawweave-checkpoint-concurrent-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("checkpoints.json");
+        let writer_count = 16;
+        let payloads = (0..writer_count)
+            .map(|writer| {
+                serde_json::to_vec(&serde_json::json!({
+                    "writer": writer,
+                    "payload": "x".repeat(512 * 1024),
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        write_checkpoint_state(&path, &payloads[0]).unwrap();
+        let reading = Arc::new(AtomicBool::new(true));
+        let readers = (0..4)
+            .map(|_| {
+                let reading = Arc::clone(&reading);
+                let path = path.clone();
+                thread::spawn(move || {
+                    while reading.load(AtomicOrdering::Acquire) {
+                        let saved = std::fs::read(&path).unwrap();
+                        let document: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+                        assert_eq!(
+                            document
+                                .get("payload")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::len),
+                            Some(512 * 1024)
+                        );
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(writer_count));
+        let handles = payloads
+            .into_iter()
+            .map(|payload| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    write_checkpoint_state(&path, &payload)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent checkpoint save failed: {result:?}"
+            );
+        }
+        reading.store(false, AtomicOrdering::Release);
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        let saved = std::fs::read(&path).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        assert!(document
+            .get("writer")
+            .and_then(serde_json::Value::as_u64)
+            .is_some());
+        assert_eq!(
+            document
+                .get("payload")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(512 * 1024)
+        );
+        assert_eq!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
