@@ -9,7 +9,8 @@ use rawweave_node_api::{
     NodeError, NodeRegistry, NodeResult, ParameterType, ParameterValue, Value,
 };
 use rawweave_rendering::{
-    CacheKey, GraphRevision, MaskRenderResult, MemoryRenderCache, RenderResult, TileCoord,
+    CacheKey, CancellationToken, CollectionError, CollectionScheduler, GraphRevision,
+    MaskRenderResult, MemberCacheKey, MemberWork, MemoryRenderCache, RenderResult, TileCoord,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -75,6 +76,8 @@ pub enum GraphError {
     MissingOutput { node: NodeId, port: String },
     #[error("node '{node}' failed: {source}")]
     Evaluation { node: NodeId, source: NodeError },
+    #[error("collection evaluation failed: {0}")]
+    Collection(#[from] CollectionError),
     #[error("invalid node id: {0}")]
     InvalidNodeId(#[from] CoreError),
     #[error("workflow serialization failed: {0}")]
@@ -90,6 +93,7 @@ pub struct Graph {
     revision: u64,
     registry: NodeRegistry,
     render_cache: Arc<Mutex<MemoryRenderCache>>,
+    collection_scheduler: CollectionScheduler,
     checkpoints: Arc<Mutex<BTreeMap<NodeId, Checkpoint>>>,
     artifact_store: ArtifactStore,
 }
@@ -141,6 +145,7 @@ impl<'de> Deserialize<'de> for Graph {
             revision: document.revision,
             registry: NodeRegistry::default(),
             render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            collection_scheduler: CollectionScheduler::default(),
             checkpoints: Arc::new(Mutex::new(document.checkpoints)),
             artifact_store: ArtifactStore::memory(),
         })
@@ -171,6 +176,22 @@ struct MemoKey {
     backend: BackendIdentity,
 }
 
+struct EvaluationState<'a> {
+    cancellation: &'a CancellationToken,
+    memo: HashMap<MemoKey, EvaluatedNode>,
+    visiting: BTreeSet<NodeId>,
+}
+
+impl<'a> EvaluationState<'a> {
+    fn new(cancellation: &'a CancellationToken) -> Self {
+        Self {
+            cancellation,
+            memo: HashMap::new(),
+            visiting: BTreeSet::new(),
+        }
+    }
+}
+
 impl Graph {
     pub fn new(registry: NodeRegistry) -> Self {
         Self {
@@ -179,6 +200,7 @@ impl Graph {
             revision: 0,
             registry,
             render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            collection_scheduler: CollectionScheduler::default(),
             checkpoints: Arc::new(Mutex::new(BTreeMap::new())),
             artifact_store: ArtifactStore::memory(),
         }
@@ -187,6 +209,21 @@ impl Graph {
     pub fn with_render_cache(mut self, cache: MemoryRenderCache) -> Self {
         self.render_cache = Arc::new(Mutex::new(cache));
         self
+    }
+
+    /// Configure bounded parallel work used by graph-owned ImageSet map nodes.
+    pub fn with_collection_scheduler(mut self, scheduler: CollectionScheduler) -> Self {
+        self.collection_scheduler = scheduler;
+        self
+    }
+
+    /// Configure the maximum number of ImageSet members evaluated at once.
+    pub fn with_collection_concurrency(self, concurrency: usize) -> Self {
+        self.with_collection_scheduler(CollectionScheduler::new(concurrency))
+    }
+
+    pub fn collection_scheduler(&self) -> &CollectionScheduler {
+        &self.collection_scheduler
     }
 
     /// Attach the durable store used by checkpoints during normal graph
@@ -325,6 +362,7 @@ impl Graph {
             revision: 0,
             registry: self.registry.clone(),
             render_cache: Arc::new(Mutex::new(MemoryRenderCache::default())),
+            collection_scheduler: self.collection_scheduler.clone(),
             checkpoints: Arc::new(Mutex::new(BTreeMap::new())),
             artifact_store: self.artifact_store.clone(),
         })
@@ -676,6 +714,19 @@ impl Graph {
         output_port: &str,
         context: &EvaluationContext,
     ) -> Result<Value, GraphError> {
+        let cancellation = CancellationToken::new();
+        self.evaluate_with_cancellation(node_id, output_port, context, &cancellation)
+    }
+
+    /// Evaluate a graph while allowing collection-level member work to be
+    /// cancelled before or during scheduling.
+    pub fn evaluate_with_cancellation(
+        &self,
+        node_id: &NodeId,
+        output_port: &str,
+        context: &EvaluationContext,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, GraphError> {
         let node = self
             .nodes
             .get(node_id)
@@ -686,16 +737,8 @@ impl Graph {
                 port: output_port.to_owned(),
             });
         }
-        let mut memo = HashMap::new();
-        let mut visiting = BTreeSet::new();
-        let result = self.evaluate_node(
-            node_id,
-            Some(output_port),
-            context,
-            None,
-            &mut memo,
-            &mut visiting,
-        )?;
+        let mut state = EvaluationState::new(cancellation);
+        let result = self.evaluate_node(node_id, Some(output_port), context, None, &mut state)?;
         result
             .result
             .outputs
@@ -817,15 +860,14 @@ impl Graph {
                 port: output_port.to_owned(),
             });
         }
-        let mut memo = HashMap::new();
-        let mut visiting = BTreeSet::new();
+        let cancellation = CancellationToken::new();
+        let mut state = EvaluationState::new(&cancellation);
         let result = self.evaluate_node(
             node_id,
             Some(output_port),
             context,
             Some(node_id),
-            &mut memo,
-            &mut visiting,
+            &mut state,
         )?;
         result
             .result
@@ -899,8 +941,7 @@ impl Graph {
         port: &str,
         context: &EvaluationContext,
         generation_target: Option<&NodeId>,
-        memo: &mut HashMap<MemoKey, EvaluatedNode>,
-        visiting: &mut BTreeSet<NodeId>,
+        state: &mut EvaluationState<'_>,
     ) -> Result<Option<Value>, GraphError> {
         let Some(edge) = self
             .edges
@@ -914,8 +955,7 @@ impl Graph {
             Some(&edge.from_port),
             context,
             generation_target,
-            memo,
-            visiting,
+            state,
         )?;
         upstream
             .result
@@ -935,9 +975,15 @@ impl Graph {
         requested_output: Option<&str>,
         context: &EvaluationContext,
         generation_target: Option<&NodeId>,
-        memo: &mut HashMap<MemoKey, EvaluatedNode>,
-        visiting: &mut BTreeSet<NodeId>,
+        state: &mut EvaluationState<'_>,
     ) -> Result<EvaluatedNode, GraphError> {
+        if state.cancellation.is_cancelled() {
+            return Err(CollectionError::Cancelled {
+                completed: 0,
+                total: 0,
+            }
+            .into());
+        }
         let node = self
             .nodes
             .get(node_id)
@@ -960,10 +1006,10 @@ impl Graph {
             quality: execution_context.quality(),
             backend: backend_identity(&execution_context),
         };
-        if let Some(result) = memo.get(&memo_key) {
+        if let Some(result) = state.memo.get(&memo_key) {
             return Ok(result.clone());
         }
-        if !visiting.insert(node_id.clone()) {
+        if !state.visiting.insert(node_id.clone()) {
             return Err(GraphError::CycleDetected);
         }
         let mut effective_parameters = node.parameters.clone();
@@ -984,8 +1030,7 @@ impl Graph {
                     &gate.selector,
                     &execution_context,
                     generation_target,
-                    memo,
-                    visiting,
+                    state,
                 )?;
                 selected.extend(gate_inputs(gate, selector.as_ref()));
             }
@@ -1008,8 +1053,7 @@ impl Graph {
                 Some(&edge.from_port),
                 &execution_context,
                 generation_target,
-                memo,
-                visiting,
+                state,
             )?;
             let value = upstream
                 .result
@@ -1107,8 +1151,8 @@ impl Graph {
                 output_hash: hash_node_result(&NodeResult::single(requested_output, value.clone())),
                 result: NodeResult::single(requested_output, value),
             };
-            visiting.remove(node_id);
-            memo.insert(memo_key, evaluated.clone());
+            state.visiting.remove(node_id);
+            state.memo.insert(memo_key, evaluated.clone());
             return Ok(evaluated);
         }
         let cache_key = CacheKey::new(
@@ -1141,28 +1185,42 @@ impl Graph {
                 output_hash: hash_node_result(&result),
                 result,
             };
-            visiting.remove(node_id);
-            memo.insert(memo_key.clone(), evaluated.clone());
+            state.visiting.remove(node_id);
+            state.memo.insert(memo_key.clone(), evaluated.clone());
             return Ok(evaluated);
         }
-        let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
-            GraphError::UnknownNodeType {
-                type_id: node.type_id.clone(),
-            }
-        })?;
-        let result = instance
-            .evaluate(&inputs, &effective_parameters, &execution_context)
-            .map_err(|source| GraphError::Evaluation {
-                node: node_id.clone(),
-                source,
+        let result = if node.type_id == "core.imageset-map"
+            && inputs
+                .values()
+                .any(|value| matches!(value, Value::ImageSet(_)))
+        {
+            self.evaluate_image_set_map(
+                node,
+                &inputs,
+                &effective_parameters,
+                &execution_context,
+                state.cancellation,
+            )?
+        } else {
+            let instance = self.registry.instantiate(&node.type_id).ok_or_else(|| {
+                GraphError::UnknownNodeType {
+                    type_id: node.type_id.clone(),
+                }
             })?;
+            instance
+                .evaluate(&inputs, &effective_parameters, &execution_context)
+                .map_err(|source| GraphError::Evaluation {
+                    node: node_id.clone(),
+                    source,
+                })?
+        };
         let evaluated = EvaluatedNode {
             output_hash: hash_node_result(&result),
             result,
         };
         if generation_target == Some(node_id) {
-            visiting.remove(node_id);
-            memo.insert(memo_key, evaluated.clone());
+            state.visiting.remove(node_id);
+            state.memo.insert(memo_key, evaluated.clone());
             return Ok(evaluated);
         }
         if let Some(image) = single_image(&evaluated.result) {
@@ -1176,9 +1234,143 @@ impl Graph {
                 cache.insert_mask_if_current(cache_key, render, current_revision);
             }
         }
-        visiting.remove(node_id);
-        memo.insert(memo_key, evaluated.clone());
+        state.visiting.remove(node_id);
+        state.memo.insert(memo_key, evaluated.clone());
         Ok(evaluated)
+    }
+
+    fn evaluate_image_set_map(
+        &self,
+        node: &GraphNode,
+        inputs: &Inputs,
+        parameters: &rawweave_node_api::Parameters,
+        context: &EvaluationContext,
+        cancellation: &CancellationToken,
+    ) -> Result<NodeResult, GraphError> {
+        let set = inputs
+            .values()
+            .find_map(|value| match value {
+                Value::ImageSet(set) => Some(set),
+                _ => None,
+            })
+            .ok_or_else(|| GraphError::Evaluation {
+                node: node.id.clone(),
+                source: NodeError::MissingInput("images".to_owned()),
+            })?;
+        set.validate().map_err(|error| GraphError::Evaluation {
+            node: node.id.clone(),
+            source: NodeError::Message(error.to_string()),
+        })?;
+
+        let works = set
+            .members()
+            .iter()
+            .map(|member| MemberWork::new(member.id.clone(), member.clone()))
+            .collect::<Vec<_>>();
+        let order = set.order();
+        let shared_metadata = set.shared_metadata().clone();
+        let member_shared_metadata = shared_metadata.clone();
+        let alignment = set.alignment();
+        let base_inputs = inputs.clone();
+        let base_context = context.clone();
+        let node_id = node.id.as_str().to_owned();
+        let node_type = node.type_id.clone();
+        let node_version = node.descriptor.version;
+        let parameter_hash = hash_parameters(parameters);
+        let registry = self.registry.clone();
+        let render_cache = Arc::clone(&self.render_cache);
+
+        let mapped_members = self
+            .collection_scheduler
+            .run(
+                "map",
+                &works,
+                cancellation,
+                move |member_id,
+                      member,
+                      worker_cancellation|
+                      -> Result<rawweave_node_api::ImageSetMember, String> {
+                    let singleton = rawweave_node_api::ImageSet::new(order, vec![member.clone()])
+                        .map_err(|error| error.to_string())?
+                        .with_shared_metadata(member_shared_metadata.clone());
+                    let mut member_inputs = base_inputs.clone();
+                    for value in member_inputs.values_mut() {
+                        if matches!(value, Value::ImageSet(_)) {
+                            *value = Value::ImageSet(singleton.clone());
+                        }
+                    }
+                    let mut member_context = base_context.clone();
+                    member_context.source_image_set = Some(singleton.clone());
+
+                    let mut upstream_hasher = StableHasher::default();
+                    for (port, value) in &member_inputs {
+                        if !matches!(value, Value::ImageSet(_)) {
+                            port.hash(&mut upstream_hasher);
+                            hash_value(value, &mut upstream_hasher);
+                        }
+                    }
+                    hash_stable_context(&member_context, &mut upstream_hasher);
+                    let cache_key = MemberCacheKey::new(
+                        node_id.clone(),
+                        node_version,
+                        member_id,
+                        upstream_hasher.finish(),
+                        parameter_hash,
+                    );
+
+                    if let Ok(cache) = render_cache.lock()
+                        && let Some(image) = cache.get_member(&cache_key)
+                    {
+                        let mut cached = member.clone();
+                        cached.image = image.as_ref().clone();
+                        return Ok(cached);
+                    }
+                    if worker_cancellation.is_cancelled() {
+                        return Ok(member.clone());
+                    }
+
+                    let instance = registry
+                        .instantiate(&node_type)
+                        .ok_or_else(|| format!("node type '{node_type}' is not registered"))?;
+                    let result = instance
+                        .evaluate(&member_inputs, parameters, &member_context)
+                        .map_err(|error| error.to_string())?;
+                    let output_set = result.outputs.values().find_map(|value| match value {
+                        Value::ImageSet(set) => Some(set),
+                        _ => None,
+                    });
+                    let output_member = output_set
+                        .and_then(|set| set.member_at(0))
+                        .ok_or_else(|| "map node did not produce an ImageSet member".to_owned())?;
+                    let mapped = output_member.clone();
+                    if let Ok(mut cache) = render_cache.lock() {
+                        cache.insert_member(cache_key, Arc::new(mapped.image.clone()));
+                    }
+                    Ok(mapped)
+                },
+            )
+            .map_err(GraphError::from)?;
+
+        let mapped_set = rawweave_node_api::ImageSet::new(order, mapped_members)
+            .map_err(|error| GraphError::Evaluation {
+                node: node.id.clone(),
+                source: NodeError::Message(error.to_string()),
+            })?
+            .with_shared_metadata(shared_metadata)
+            .with_alignment(alignment);
+        mapped_set
+            .validate()
+            .map_err(|error| GraphError::Evaluation {
+                node: node.id.clone(),
+                source: NodeError::Message(error.to_string()),
+            })?;
+        let outputs = node
+            .descriptor
+            .outputs
+            .iter()
+            .map(|output| (output.id.clone(), Value::ImageSet(mapped_set.clone())))
+            .collect();
+        Ok(NodeResult::new(outputs))
     }
 
     fn resolve_registered_checkpoint(

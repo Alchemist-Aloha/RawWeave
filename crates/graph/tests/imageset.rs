@@ -5,6 +5,7 @@ use rawweave_image::Image;
 use rawweave_node_api::{
     EvaluationContext, ImageSet, ImageSetMember, ImageSetOrder, Metadata, NodeRegistry, Value,
 };
+use rawweave_rendering::CancellationToken;
 
 fn registry() -> NodeRegistry {
     let mut registry = NodeRegistry::default();
@@ -41,4 +42,75 @@ fn imageset_graph_values_round_trip_and_input_evaluates_without_queue_state() {
         .unwrap();
     assert!(matches!(value, Value::ImageSet(_)));
     assert!(!json.contains("queue"));
+}
+
+#[test]
+fn image_set_map_uses_bounded_member_cache_during_graph_evaluation() {
+    let mut graph = Graph::new(registry()).with_collection_concurrency(2);
+    graph
+        .add_node(NodeId::from("set-input"), "core.imageset-input")
+        .unwrap();
+    graph
+        .add_node(NodeId::from("map"), "core.imageset-map")
+        .unwrap();
+    graph
+        .connect(
+            NodeId::from("set-input"),
+            "images",
+            NodeId::from("map"),
+            "images",
+        )
+        .unwrap();
+
+    let first = graph
+        .evaluate(
+            &NodeId::from("map"),
+            "images",
+            &EvaluationContext::default().with_source_image_set(set()),
+        )
+        .unwrap();
+    assert!(matches!(first, Value::ImageSet(_)));
+    assert_eq!(graph.render_cache().lock().unwrap().member_len(), 1);
+
+    let second = graph
+        .evaluate(
+            &NodeId::from("map"),
+            "images",
+            &EvaluationContext::default().with_source_image_set(set()),
+        )
+        .unwrap();
+    assert!(matches!(second, Value::ImageSet(_)));
+    assert_eq!(graph.render_cache().lock().unwrap().member_len(), 1);
+}
+
+#[test]
+fn image_set_evaluation_honors_cancellation_before_member_work_starts() {
+    let mut graph = Graph::new(registry());
+    graph
+        .add_node(NodeId::from("set-input"), "core.imageset-input")
+        .unwrap();
+    graph
+        .add_node(NodeId::from("map"), "core.imageset-map")
+        .unwrap();
+    graph
+        .connect(
+            NodeId::from("set-input"),
+            "images",
+            NodeId::from("map"),
+            "images",
+        )
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = graph
+        .evaluate_with_cancellation(
+            &NodeId::from("map"),
+            "images",
+            &EvaluationContext::default().with_source_image_set(set()),
+            &cancellation,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cancelled"));
 }
