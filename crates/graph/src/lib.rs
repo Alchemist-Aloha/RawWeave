@@ -1901,13 +1901,19 @@ fn hash_image_set(set: &rawweave_node_api::ImageSet, hasher: &mut impl Hasher) {
         member.id.hash(hasher);
         hash_image(&member.image, hasher);
         hash_metadata(&member.metadata, hasher);
+        hash_image_set_source(member.source(), hasher);
     }
     hash_metadata(set.shared_metadata(), hasher);
     match set.alignment() {
         rawweave_node_api::AlignmentState::Unaligned => 0_u8.hash(hasher),
-        rawweave_node_api::AlignmentState::Aligned { reference_member } => {
+        rawweave_node_api::AlignmentState::Aligned {
+            reference_member,
+            transforms,
+            provenance,
+        } => {
             1_u8.hash(hasher);
             reference_member.hash(hasher);
+            hash_alignment(&transforms, &provenance, hasher);
         }
     }
 }
@@ -1929,15 +1935,46 @@ fn hash_stable_image_set(set: &rawweave_node_api::ImageSet, hasher: &mut impl Ha
             }
         }
         hash_metadata(&member.metadata, hasher);
+        hash_image_set_source(member.source(), hasher);
     }
     hash_metadata(set.shared_metadata(), hasher);
     match set.alignment() {
         rawweave_node_api::AlignmentState::Unaligned => 0_u8.hash(hasher),
-        rawweave_node_api::AlignmentState::Aligned { reference_member } => {
+        rawweave_node_api::AlignmentState::Aligned {
+            reference_member,
+            transforms,
+            provenance,
+        } => {
             1_u8.hash(hasher);
             reference_member.hash(hasher);
+            hash_alignment(&transforms, &provenance, hasher);
         }
     }
+}
+
+fn hash_image_set_source(
+    source: Option<&rawweave_node_api::ImageSetSourceDescriptor>,
+    hasher: &mut impl Hasher,
+) {
+    source
+        .map(|source| (&source.path, &source.fingerprint))
+        .hash(hasher);
+}
+
+fn hash_alignment(
+    transforms: &BTreeMap<String, rawweave_node_api::AlignmentTransform>,
+    provenance: &rawweave_node_api::AlignmentProvenance,
+    hasher: &mut impl Hasher,
+) {
+    for (member_id, transform) in transforms {
+        member_id.hash(hasher);
+        transform.dx.hash(hasher);
+        transform.dy.hash(hasher);
+        transform.error.to_bits().hash(hasher);
+    }
+    provenance.algorithm.hash(hasher);
+    provenance.version.hash(hasher);
+    provenance.max_shift.hash(hasher);
 }
 
 fn hash_image(image: &rawweave_image::Image, hasher: &mut impl Hasher) {

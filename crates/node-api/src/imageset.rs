@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rawweave_image::Image;
 use serde::{Deserialize, Serialize, Serializer};
@@ -14,6 +14,12 @@ pub const MAX_IMAGE_SET_MEMBERS: usize = 256;
 pub const MAX_IMAGE_SET_PIXELS: usize = 64 * 1024 * 1024;
 /// Maximum serialized metadata text held by one graph value.
 pub const MAX_IMAGE_SET_METADATA_BYTES: usize = 1024 * 1024;
+/// Maximum bytes retained for one persisted source path.
+pub const MAX_IMAGE_SET_SOURCE_PATH_BYTES: usize = 4096;
+/// Maximum bytes retained for one persisted source fingerprint.
+pub const MAX_IMAGE_SET_SOURCE_FINGERPRINT_BYTES: usize = 256;
+/// Maximum bytes retained for alignment provenance text.
+pub const MAX_ALIGNMENT_PROVENANCE_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,18 +29,137 @@ pub enum ImageSetOrder {
     Unordered,
 }
 
+/// A deterministic integer-pixel translation from a member into the reference
+/// image. `dx` and `dy` are source sampling offsets: a destination pixel at
+/// `(x, y)` samples the member at `(x + dx, y + dy)`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AlignmentTransform {
+    pub dx: i32,
+    pub dy: i32,
+    #[serde(deserialize_with = "deserialize_finite_float")]
+    pub error: f32,
+}
+
+impl AlignmentTransform {
+    pub const fn identity() -> Self {
+        Self {
+            dx: 0,
+            dy: 0,
+            error: 0.0,
+        }
+    }
+
+    pub fn new(dx: i32, dy: i32, error: f32) -> Option<Self> {
+        error.is_finite().then_some(Self { dx, dy, error })
+    }
+
+    fn validate(&self) -> Result<(), ImageSetError> {
+        if self.error.is_finite() && self.error >= 0.0 {
+            Ok(())
+        } else {
+            Err(ImageSetError::InvalidAlignmentTransform)
+        }
+    }
+}
+
+/// The algorithm and bounded settings that produced an alignment result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlignmentProvenance {
+    pub algorithm: String,
+    pub version: u32,
+    pub max_shift: u32,
+}
+
+impl AlignmentProvenance {
+    pub fn new(algorithm: impl Into<String>, version: u32, max_shift: u32) -> Self {
+        Self {
+            algorithm: algorithm.into(),
+            version,
+            max_shift,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ImageSetError> {
+        if self.algorithm.trim().is_empty() || self.algorithm.len() > MAX_ALIGNMENT_PROVENANCE_BYTES
+        {
+            return Err(ImageSetError::InvalidAlignmentProvenance);
+        }
+        Ok(())
+    }
+}
+
 /// Alignment information shared by collection-level computational photography
-/// nodes. Transform matrices are intentionally left to the geometry layer; the
-/// graph still records whether an alignment pass has completed.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// nodes. An aligned value is only valid when every member has a validated
+/// transform and the provenance identifies the registration algorithm.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum AlignmentState {
     #[default]
     Unaligned,
     Aligned {
         reference_member: String,
+        #[serde(default)]
+        transforms: BTreeMap<String, AlignmentTransform>,
+        #[serde(default)]
+        provenance: AlignmentProvenance,
     },
 }
+
+impl Default for AlignmentProvenance {
+    fn default() -> Self {
+        Self::new("legacy", 0, 0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSetSourceDescriptor {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+impl ImageSetSourceDescriptor {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            fingerprint: None,
+        }
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn validate(&self) -> Result<(), ImageSetError> {
+        if self.path.trim().is_empty() {
+            return Err(ImageSetError::EmptySourcePath);
+        }
+        if self.path.len() > MAX_IMAGE_SET_SOURCE_PATH_BYTES {
+            return Err(ImageSetError::SourcePathTooLong {
+                actual: self.path.len(),
+                limit: MAX_IMAGE_SET_SOURCE_PATH_BYTES,
+            });
+        }
+        if self
+            .fingerprint
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_IMAGE_SET_SOURCE_FINGERPRINT_BYTES)
+        {
+            return Err(ImageSetError::SourceFingerprintTooLong {
+                limit: MAX_IMAGE_SET_SOURCE_FINGERPRINT_BYTES,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub type ImageSetSource = ImageSetSourceDescriptor;
+pub type ImageSetMemberSource = ImageSetSourceDescriptor;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ImageSetMember {
@@ -42,6 +167,8 @@ pub struct ImageSetMember {
     pub image: Image,
     #[serde(default)]
     pub metadata: Metadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ImageSetSourceDescriptor>,
 }
 
 impl ImageSetMember {
@@ -50,7 +177,17 @@ impl ImageSetMember {
             id: id.into(),
             image,
             metadata,
+            source: None,
         }
+    }
+
+    pub fn with_source(mut self, source: ImageSetSourceDescriptor) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    pub fn source(&self) -> Option<&ImageSetSourceDescriptor> {
+        self.source.as_ref()
     }
 }
 
@@ -104,6 +241,20 @@ pub enum ImageSetError {
     TooManyPixels { limit: usize },
     #[error("image set metadata exceeds the byte limit of {limit}")]
     MetadataTooLarge { limit: usize },
+    #[error("image set source path cannot be empty")]
+    EmptySourcePath,
+    #[error("image set source path exceeds {limit} bytes: {actual}")]
+    SourcePathTooLong { actual: usize, limit: usize },
+    #[error("image set source fingerprint exceeds {limit} bytes")]
+    SourceFingerprintTooLong { limit: usize },
+    #[error("image set contains an invalid alignment transform")]
+    InvalidAlignmentTransform,
+    #[error("image set contains invalid alignment provenance")]
+    InvalidAlignmentProvenance,
+    #[error("image set alignment is missing a transform for member '{0}'")]
+    MissingAlignmentTransform(String),
+    #[error("image set alignment contains a transform for unknown member '{0}'")]
+    UnknownAlignmentTransform(String),
     #[error("alignment reference member '{0}' is not in the image set")]
     MissingAlignmentReference(String),
 }
@@ -207,6 +358,9 @@ impl ImageSet {
             if !ids.insert(member.id.as_str()) {
                 return Err(ImageSetError::DuplicateMemberId(member.id.clone()));
             }
+            if let Some(source) = &member.source {
+                source.validate()?;
+            }
             let expected = member.image.dimensions().pixel_count().map_err(|_| {
                 ImageSetError::InvalidMemberPixels {
                     member: member.id.clone(),
@@ -237,14 +391,30 @@ impl ImageSet {
             }
         }
         match &self.alignment {
-            AlignmentState::Aligned { reference_member }
-                if !ids.contains(reference_member.as_str()) =>
-            {
+            AlignmentState::Aligned {
+                reference_member, ..
+            } if !ids.contains(reference_member.as_str()) => {
                 return Err(ImageSetError::MissingAlignmentReference(
                     reference_member.clone(),
                 ));
             }
-            AlignmentState::Unaligned | AlignmentState::Aligned { .. } => {}
+            AlignmentState::Aligned {
+                transforms,
+                provenance,
+                ..
+            } => {
+                provenance.validate()?;
+                for member_id in &ids {
+                    let transform = transforms.get(*member_id).ok_or_else(|| {
+                        ImageSetError::MissingAlignmentTransform((*member_id).to_owned())
+                    })?;
+                    transform.validate()?;
+                }
+                if let Some(member_id) = transforms.keys().find(|id| !ids.contains(id.as_str())) {
+                    return Err(ImageSetError::UnknownAlignmentTransform(member_id.clone()));
+                }
+            }
+            AlignmentState::Unaligned => {}
         }
         if metadata_size(&self.shared_metadata).saturating_add(
             self.members
@@ -301,4 +471,15 @@ fn metadata_size(metadata: &Metadata) -> usize {
                 .map(|(key, value)| key.len().saturating_add(value.len()))
                 .sum::<usize>(),
         )
+}
+
+fn deserialize_finite_float<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f32::deserialize(deserializer)?;
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| serde::de::Error::custom("alignment error must be finite"))
 }

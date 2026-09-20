@@ -453,6 +453,9 @@ fn channel_to_byte(value: f32) -> u8 {
 fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
     match source {
         crate::SourceAsset::Ordinary(image) => EvaluationContext::with_source_image(image.clone()),
+        crate::SourceAsset::ImageSet(set) => {
+            EvaluationContext::default().with_source_image_set(set.as_ref().clone())
+        }
         crate::SourceAsset::Raw { bytes, path } => EvaluationContext::default()
             .with_source_bytes(bytes.as_ref().clone())
             .with_source_path(path),

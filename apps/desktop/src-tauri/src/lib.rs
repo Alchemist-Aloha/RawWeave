@@ -27,7 +27,10 @@ use rawweave_graph::{
 use rawweave_image::{
     ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
 };
-use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value};
+use rawweave_node_api::{
+    AlignmentState, EvaluationContext, ImageSet, ImageSetMember, ImageSetOrder,
+    ImageSetSourceDescriptor, NodeDescriptor, ParameterValue, Value, MAX_IMAGE_SET_MEMBERS,
+};
 use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
 use serde::{Deserialize, Serialize};
@@ -36,6 +39,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone, Debug)]
 pub(crate) enum SourceAsset {
     Ordinary(Image),
+    ImageSet(Box<ImageSet>),
     Raw { bytes: Arc<Vec<u8>>, path: PathBuf },
 }
 
@@ -72,6 +76,35 @@ pub struct OpenMetadataSummary {
     pub orientation: String,
     pub dimensions: rawweave_image::Dimensions,
     pub exif: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenImageSetMemberDto {
+    id: String,
+    path: String,
+    name: String,
+    width: u32,
+    height: u32,
+    metadata: Option<OpenMetadataSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenImageSetDto {
+    kind: &'static str,
+    order: ImageSetOrder,
+    revision: u64,
+    members: Vec<OpenImageSetMemberDto>,
+    shared_metadata: Option<OpenMetadataSummary>,
+    alignment: OpenImageSetAlignmentDto,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+enum OpenImageSetAlignmentDto {
+    Unaligned,
+    Aligned { reference_member: String },
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -932,6 +965,11 @@ fn checkpoint_source_hash(source: Option<&SourceAsset>) -> String {
                     .collect(),
             );
         }
+        Some(SourceAsset::ImageSet(set)) => {
+            inputs.insert("kind".to_owned(), "imageset".to_owned());
+            let serialized = serde_json::to_vec(set).unwrap_or_default();
+            inputs.insert("value".to_owned(), hash_checkpoint_input(&serialized));
+        }
         Some(SourceAsset::Raw { bytes, path }) => {
             inputs.insert("kind".to_owned(), "raw".to_owned());
             inputs.insert("bytes".to_owned(), hash_checkpoint_input(bytes));
@@ -976,6 +1014,9 @@ fn checkpoint_dependencies(
 fn checkpoint_context(source: Option<&SourceAsset>) -> EvaluationContext {
     match source {
         Some(SourceAsset::Ordinary(image)) => EvaluationContext::with_source_image(image.clone()),
+        Some(SourceAsset::ImageSet(set)) => {
+            EvaluationContext::default().with_source_image_set(set.as_ref().clone())
+        }
         Some(SourceAsset::Raw { bytes, path }) => EvaluationContext::default()
             .with_source_bytes(bytes.as_ref().clone())
             .with_source_path(path),
@@ -986,6 +1027,7 @@ fn checkpoint_context(source: Option<&SourceAsset>) -> EvaluationContext {
 fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, String> {
     match value {
         Value::Image(image) => Ok(CheckpointPayload::Image(image)),
+        Value::ImageSet(set) => Ok(CheckpointPayload::ImageSet(set)),
         Value::Mask(mask) => Ok(CheckpointPayload::Mask(mask)),
         Value::MaskSet(set) => Ok(CheckpointPayload::MaskSet(set)),
         Value::LabelMap(map) => Ok(CheckpointPayload::LabelMap(map)),
@@ -2031,6 +2073,7 @@ fn rebuild_workflow_for_source(
     match source {
         SourceAsset::Raw { .. } => build_raw_workflow(editor),
         SourceAsset::Ordinary(_) => build_ordinary_workflow(editor),
+        SourceAsset::ImageSet(_) => build_image_set_workflow(editor),
     }
 }
 
@@ -2125,6 +2168,121 @@ fn open_image_state(
     Ok((metadata, source))
 }
 
+fn open_image_set_files_with_decoder(
+    paths: &[String],
+    order: ImageSetOrder,
+    decoder: &dyn RawDecoder,
+) -> Result<(ImageSet, Vec<OpenImageSetMemberDto>), String> {
+    if paths.is_empty() {
+        return Err("image set must contain at least one file".to_owned());
+    }
+    if paths.len() > MAX_IMAGE_SET_MEMBERS {
+        return Err(format!(
+            "image set cannot contain more than {MAX_IMAGE_SET_MEMBERS} files"
+        ));
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    let mut members = Vec::with_capacity(paths.len());
+    let mut metadata = BTreeMap::new();
+    for path in paths {
+        if path.trim().is_empty() {
+            return Err("image set member path cannot be empty".to_owned());
+        }
+        if !ids.insert(path.as_str()) {
+            return Err(format!("image set member path '{path}' is duplicated"));
+        }
+        let path_ref = Path::new(path);
+        let (source, summary) = open_image_file_with_decoder(path_ref, decoder)?;
+        let image = match source {
+            SourceAsset::Ordinary(image) => image,
+            SourceAsset::ImageSet(_) => {
+                return Err(format!(
+                    "image set member '{path}' decoded as another image set"
+                ));
+            }
+            SourceAsset::Raw { .. } => {
+                return Err(format!("RAW image set member '{path}' is not supported"));
+            }
+        };
+        metadata.insert(path.clone(), summary.metadata);
+        members.push(
+            ImageSetMember::new(path.clone(), image, rawweave_node_api::Metadata::default())
+                .with_source(ImageSetSourceDescriptor::new(path.clone())),
+        );
+    }
+
+    let set = ImageSet::new(order, members).map_err(|error| error.to_string())?;
+    let result_members = set
+        .members()
+        .iter()
+        .map(|member| {
+            let path = member
+                .source()
+                .map(|source| source.path().to_owned())
+                .unwrap_or_else(|| member.id.clone());
+            let name = Path::new(&path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&path)
+                .to_owned();
+            OpenImageSetMemberDto {
+                id: member.id.clone(),
+                path,
+                name,
+                width: member.image.width(),
+                height: member.image.height(),
+                metadata: metadata.get(&member.id).cloned().flatten(),
+            }
+        })
+        .collect();
+    Ok((set, result_members))
+}
+
+fn open_image_set_alignment(alignment: &AlignmentState) -> OpenImageSetAlignmentDto {
+    match alignment {
+        AlignmentState::Unaligned => OpenImageSetAlignmentDto::Unaligned,
+        AlignmentState::Aligned {
+            reference_member, ..
+        } => OpenImageSetAlignmentDto::Aligned {
+            reference_member: reference_member.clone(),
+        },
+    }
+}
+
+fn open_image_set_state(
+    state: &AppState,
+    paths: &[String],
+    order: ImageSetOrder,
+    decoder: &dyn RawDecoder,
+) -> Result<OpenImageSetDto, String> {
+    let (set, members) = open_image_set_files_with_decoder(paths, order, decoder)?;
+    let source = SourceAsset::ImageSet(Box::new(set.clone()));
+    let revision = {
+        let mut editor = lock_editor(&state.editor)?;
+        rebuild_workflow_for_source(&source, &mut editor)?;
+        editor.graph().revision()
+    };
+    clear_blueprint(state)?;
+    *state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())? = Some(source);
+    *state
+        .source_selection
+        .lock()
+        .map_err(|_| "source selection state is unavailable".to_owned())? =
+        SourceSelectionIntent::ReplaceWorkflow;
+    Ok(OpenImageSetDto {
+        kind: "imageset",
+        order: set.order(),
+        revision,
+        members,
+        shared_metadata: None,
+        alignment: open_image_set_alignment(&set.alignment()),
+    })
+}
+
 pub(crate) fn build_ordinary_workflow(editor: &mut EditorCore) -> Result<(), String> {
     let existing = editor
         .graph()
@@ -2145,6 +2303,36 @@ pub(crate) fn build_ordinary_workflow(editor: &mut EditorCore) -> Result<(), Str
         .map_err(|error| error.to_string())?;
     editor
         .connect("input", "image", "output", "image")
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn build_image_set_workflow(editor: &mut EditorCore) -> Result<(), String> {
+    let existing = editor
+        .graph()
+        .nodes()
+        .keys()
+        .map(|node_id| node_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    for node_id in existing {
+        editor
+            .remove_node(&node_id)
+            .map_err(|error| error.to_string())?;
+    }
+    editor
+        .add_node("imageset-input", "core.imageset-input")
+        .map_err(|error| error.to_string())?;
+    editor
+        .add_node("imageset-select", "core.imageset-select")
+        .map_err(|error| error.to_string())?;
+    editor
+        .add_node("output", "core.output")
+        .map_err(|error| error.to_string())?;
+    editor
+        .connect("imageset-input", "images", "imageset-select", "images")
+        .map_err(|error| error.to_string())?;
+    editor
+        .connect("imageset-select", "image", "output", "image")
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -2902,6 +3090,9 @@ fn open_image_file(path: &str) -> Result<(Image, preview::OpenImageMetadata), St
         open_image_file_with_decoder(Path::new(path), &RawloaderDecoder::default())?;
     match source {
         SourceAsset::Ordinary(image) => Ok((image, metadata)),
+        SourceAsset::ImageSet(_) => {
+            Err("image-set input must be opened through the image-set source path".to_owned())
+        }
         SourceAsset::Raw { .. } => {
             Err("RAW input must be opened through the RAW source path".to_owned())
         }
@@ -3087,6 +3278,15 @@ fn open_image(
 ) -> Result<preview::OpenImageMetadata, String> {
     let (metadata, _) = open_image_state(&state, Path::new(&path), &RawloaderDecoder::default())?;
     Ok(metadata)
+}
+
+#[tauri::command]
+fn open_image_set(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    order: ImageSetOrder,
+) -> Result<OpenImageSetDto, String> {
+    open_image_set_state(&state, &paths, order, &RawloaderDecoder::default())
 }
 
 #[tauri::command]
@@ -3645,6 +3845,7 @@ pub fn run() {
             batch_dry_run,
             open_failed_batch_item,
             open_image,
+            open_image_set,
             request_preview,
             cancel_preview,
             release_preview,
@@ -3890,6 +4091,95 @@ mod tests {
         assert!(matches!(
             report.statuses.get("core-image"),
             Some(DependencyStatusDto::Available)
+        ));
+    }
+
+    #[test]
+    fn image_set_loader_preserves_canonical_order_and_source_references() {
+        let first_path = std::env::temp_dir().join(format!(
+            "rawweave-open-imageset-first-{}.png",
+            std::process::id()
+        ));
+        let second_path = std::env::temp_dir().join(format!(
+            "rawweave-open-imageset-second-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(
+            &first_path,
+            rgba_png(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]),
+        )
+        .unwrap();
+        std::fs::write(
+            &second_path,
+            rgba_png(2, 1, &[0, 0, 255, 255, 255, 255, 255, 255]),
+        )
+        .unwrap();
+        let paths = vec![
+            second_path.to_string_lossy().into_owned(),
+            first_path.to_string_lossy().into_owned(),
+        ];
+
+        let result = open_image_set_files_with_decoder(
+            &paths,
+            rawweave_node_api::ImageSetOrder::Unordered,
+            &RawloaderDecoder::default(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&first_path);
+        let _ = std::fs::remove_file(&second_path);
+
+        let (set, members) = result;
+        let mut expected_ids = vec![
+            second_path.to_string_lossy().into_owned(),
+            first_path.to_string_lossy().into_owned(),
+        ];
+        expected_ids.sort();
+        assert_eq!(set.member_ids(), expected_ids);
+        assert_eq!(
+            set.members()[0].source().unwrap().path(),
+            set.members()[0].id
+        );
+        assert_eq!(members[0].id, set.members()[0].id);
+        assert_eq!(members[0].path, set.members()[0].source().unwrap().path);
+    }
+
+    #[test]
+    fn opening_an_image_set_replaces_the_graph_and_retains_the_loaded_set() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-open-imageset-state-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, rgba_png(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255])).unwrap();
+        let path_string = path.to_string_lossy().into_owned();
+        let state = AppState::default();
+
+        let result = open_image_set_state(
+            &state,
+            std::slice::from_ref(&path_string),
+            rawweave_node_api::ImageSetOrder::Ordered,
+            &RawloaderDecoder::default(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(result.kind, "imageset");
+        assert_eq!(result.members[0].path, path_string);
+        assert!(matches!(
+            result.alignment,
+            OpenImageSetAlignmentDto::Unaligned
+        ));
+        let editor = state.editor.lock().unwrap();
+        assert!(editor
+            .graph()
+            .nodes()
+            .contains_key(&NodeId::from("imageset-input")));
+        assert!(editor
+            .graph()
+            .nodes()
+            .contains_key(&NodeId::from("imageset-select")));
+        assert!(matches!(
+            state.source_image.lock().unwrap().as_ref(),
+            Some(SourceAsset::ImageSet(set)) if set.member_ids() == vec![path_string.clone()]
         ));
     }
 

@@ -13,9 +13,11 @@ use thiserror::Error;
 mod imageset;
 
 pub use imageset::{
-    AlignmentState, ImageSet, ImageSetError, ImageSetMember, ImageSetOrder,
-    MAX_IMAGE_SET_MEMBER_ID_BYTES, MAX_IMAGE_SET_MEMBERS, MAX_IMAGE_SET_METADATA_BYTES,
-    MAX_IMAGE_SET_PIXELS,
+    AlignmentProvenance, AlignmentState, AlignmentTransform, ImageSet, ImageSetError,
+    ImageSetMember, ImageSetMemberSource, ImageSetOrder, ImageSetSource, ImageSetSourceDescriptor,
+    MAX_ALIGNMENT_PROVENANCE_BYTES, MAX_IMAGE_SET_MEMBER_ID_BYTES, MAX_IMAGE_SET_MEMBERS,
+    MAX_IMAGE_SET_METADATA_BYTES, MAX_IMAGE_SET_PIXELS, MAX_IMAGE_SET_SOURCE_FINGERPRINT_BYTES,
+    MAX_IMAGE_SET_SOURCE_PATH_BYTES,
 };
 
 pub type TypeId = String;

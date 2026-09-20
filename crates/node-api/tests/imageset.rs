@@ -1,5 +1,8 @@
 use rawweave_image::Image;
-use rawweave_node_api::{AlignmentState, ImageSet, ImageSetMember, ImageSetOrder, Metadata, Value};
+use rawweave_node_api::{
+    AlignmentProvenance, AlignmentState, AlignmentTransform, ImageSet, ImageSetMember,
+    ImageSetOrder, ImageSetSourceDescriptor, Metadata, Value,
+};
 
 fn image(value: f32) -> Image {
     Image::from_pixels(2, 1, vec![[value, value, value, 1.0]; 2]).unwrap()
@@ -33,16 +36,27 @@ fn imageset_preserves_order_identity_and_metadata() {
 fn imageset_json_round_trip_keeps_alignment_and_members() {
     let set = ImageSet::new(
         ImageSetOrder::Unordered,
-        vec![ImageSetMember::new("a", image(1.0), Metadata::default())],
+        vec![
+            ImageSetMember::new("a", image(1.0), Metadata::default())
+                .with_source(ImageSetSourceDescriptor::new("/photos/a.jpg")),
+        ],
     )
     .unwrap()
     .with_alignment(AlignmentState::Aligned {
         reference_member: "a".into(),
+        transforms: [("a".into(), AlignmentTransform::identity())]
+            .into_iter()
+            .collect(),
+        provenance: AlignmentProvenance::new("translation-ssd", 1, 8),
     });
 
     let encoded = serde_json::to_vec(&set).unwrap();
     let decoded: ImageSet = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(decoded, set);
+    assert_eq!(
+        decoded.member("a").unwrap().source().unwrap().path(),
+        "/photos/a.jpg"
+    );
 }
 
 #[test]

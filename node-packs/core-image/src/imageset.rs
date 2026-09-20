@@ -1,15 +1,18 @@
-use rawweave_image::{Dimensions, Image};
+use std::collections::BTreeMap;
+
+use rawweave_image::Image;
 use rawweave_node_api::{
-    AlignmentState, EvaluationContext, ExecutionCapability, ImageSet, ImageSetMember,
-    ImageSetOrder, Inputs, MAX_IMAGE_SET_MEMBERS, Metadata, NodeDescriptor, NodeError,
-    NodeInstance, NodeRegistry, NodeResult, ParameterDescriptor, ParameterValue, Parameters,
-    PortDescriptor, Value,
+    AlignmentProvenance, AlignmentState, AlignmentTransform, EvaluationContext,
+    ExecutionCapability, ImageSet, ImageSetMember, ImageSetOrder, Inputs, MAX_IMAGE_SET_MEMBERS,
+    Metadata, NodeDescriptor, NodeError, NodeInstance, NodeRegistry, NodeResult,
+    ParameterDescriptor, ParameterValue, Parameters, PortDescriptor, Value,
 };
 
 const IMAGE_SET_PORT: &str = "images";
 const IMAGE_SET_ALIAS_PORT: &str = "set";
 const IMAGE_PORT: &str = "image";
 const MEMBER_ID_PORT: &str = "member_id";
+const MAX_ALIGNMENT_SHIFT: i64 = 64;
 
 fn collection_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
     let mut descriptor = NodeDescriptor::new(type_id, name);
@@ -17,7 +20,7 @@ fn collection_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
         IMAGE_SET_PORT,
         "Image Set",
         "core.ImageSet",
-        true,
+        false,
     ));
     descriptor.inputs.push(PortDescriptor::input(
         IMAGE_SET_ALIAS_PORT,
@@ -95,7 +98,7 @@ fn image_set_to_image_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
         IMAGE_SET_PORT,
         "Image Set",
         "core.ImageSet",
-        true,
+        false,
     ));
     descriptor.inputs.push(PortDescriptor::input(
         IMAGE_SET_ALIAS_PORT,
@@ -115,8 +118,19 @@ fn image_set_to_image_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
     descriptor
 }
 
-fn panorama_descriptor(type_id: &str, name: &str) -> NodeDescriptor {
-    image_set_to_image_descriptor(type_id, name)
+fn alignment_descriptor() -> NodeDescriptor {
+    let mut descriptor = collection_descriptor("core.alignment", "Alignment");
+    descriptor.parameters.push(ParameterDescriptor::string(
+        "reference",
+        "Reference Member",
+        "",
+    ));
+    descriptor.parameters.push(ParameterDescriptor::integer(
+        "max_shift",
+        "Maximum Translation",
+        8,
+    ));
+    descriptor
 }
 
 fn input_set(inputs: &Inputs) -> Result<ImageSet, NodeError> {
@@ -255,10 +269,110 @@ impl NodeInstance for Alignment {
                 set.member_ids().join(", ")
             )));
         }
-        Ok(set_result(set.with_alignment(AlignmentState::Aligned {
-            reference_member: reference,
-        })))
+        let max_shift = parameters
+            .get("max_shift")
+            .and_then(ParameterValue::as_integer)
+            .unwrap_or(8);
+        if !(0..=MAX_ALIGNMENT_SHIFT).contains(&max_shift) {
+            return Err(NodeError::InvalidParameter("max_shift".to_owned()));
+        }
+        let reference_image = &set.member(&reference).expect("validated reference").image;
+        let mut transforms = BTreeMap::new();
+        for member in set.members() {
+            if member.image.dimensions() != reference_image.dimensions() {
+                return Err(NodeError::Message(format!(
+                    "alignment member '{}' dimensions do not match reference '{}'",
+                    member.id, reference
+                )));
+            }
+            let transform = if member.id == reference {
+                AlignmentTransform::identity()
+            } else {
+                register_translation(reference_image, &member.image, max_shift as u32)?
+            };
+            transforms.insert(member.id.clone(), transform);
+        }
+        let aligned = set.with_alignment(AlignmentState::Aligned {
+            reference_member: reference.clone(),
+            transforms,
+            provenance: AlignmentProvenance::new(
+                "translation-ssd",
+                1,
+                u32::try_from(max_shift).unwrap_or(8),
+            ),
+        });
+        aligned
+            .validate()
+            .map_err(|error| NodeError::Message(error.to_string()))?;
+        Ok(set_result(aligned))
     }
+}
+
+fn register_translation(
+    reference: &Image,
+    member: &Image,
+    max_shift: u32,
+) -> Result<AlignmentTransform, NodeError> {
+    let width = reference.width();
+    let height = reference.height();
+    let limit = i32::try_from(max_shift)
+        .map_err(|_| NodeError::InvalidParameter("max_shift".to_owned()))?;
+    let mut best: Option<(f32, u32, i32, i32)> = None;
+    for dy in -limit..=limit {
+        for dx in -limit..=limit {
+            let mut error = 0.0_f32;
+            let mut samples = 0_usize;
+            for y in 0..height {
+                let source_y = y as i32 + dy;
+                if !(0..height as i32).contains(&source_y) {
+                    continue;
+                }
+                for x in 0..width {
+                    let source_x = x as i32 + dx;
+                    if !(0..width as i32).contains(&source_x) {
+                        continue;
+                    }
+                    let reference_pixel = reference.pixel(x, y).ok_or_else(|| {
+                        NodeError::Message("reference pixel is unavailable".to_owned())
+                    })?;
+                    let member_pixel =
+                        member
+                            .pixel(source_x as u32, source_y as u32)
+                            .ok_or_else(|| {
+                                NodeError::Message("member pixel is unavailable".to_owned())
+                            })?;
+                    for channel in 0..3 {
+                        let difference = reference_pixel[channel] - member_pixel[channel];
+                        error += difference * difference;
+                    }
+                    samples = samples.saturating_add(1);
+                }
+            }
+            if samples == 0 {
+                continue;
+            }
+            let mean_error = error / (samples as f32 * 3.0);
+            if !mean_error.is_finite() {
+                return Err(NodeError::Message(
+                    "alignment produced a non-finite registration error".to_owned(),
+                ));
+            }
+            let distance = dx.unsigned_abs().saturating_add(dy.unsigned_abs());
+            let replace = best.as_ref().is_none_or(|current| {
+                mean_error < current.0
+                    || (mean_error == current.0
+                        && (distance, dx, dy) < (current.1, current.2, current.3))
+            });
+            if replace {
+                best = Some((mean_error, distance, dx, dy));
+            }
+        }
+    }
+    let (error, _, dx, dy) = best.ok_or_else(|| {
+        NodeError::Message("alignment could not find an overlapping translation".to_owned())
+    })?;
+    AlignmentTransform::new(dx, dy, error)
+        .ok_or_else(|| NodeError::Message("alignment transform is invalid".to_owned()))
 }
 
 struct ExposureSet;
@@ -418,88 +532,6 @@ fn luminance(pixel: [f32; 4]) -> f32 {
     0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2]
 }
 
-struct PanoramaStitch;
-
-impl NodeInstance for PanoramaStitch {
-    fn evaluate(
-        &self,
-        inputs: &Inputs,
-        _parameters: &Parameters,
-        _context: &EvaluationContext,
-    ) -> Result<NodeResult, NodeError> {
-        let set = input_set(inputs)?;
-        let reference = &set.members()[0];
-        let reference_dimensions = reference.image.dimensions();
-        let reference_origin = reference.image.origin();
-        let reference_format = reference.image.pixel_format();
-        let reference_color = reference.image.color_metadata();
-        let width = set.members().iter().try_fold(0_u32, |total, member| {
-            if member.image.dimensions().height != reference_dimensions.height {
-                return Err(NodeError::Message(format!(
-                    "panorama member '{}' height {} does not match reference '{}' height {}",
-                    member.id,
-                    member.image.dimensions().height,
-                    reference.id,
-                    reference_dimensions.height
-                )));
-            }
-            if member.image.origin().1 != reference_origin.1 {
-                return Err(NodeError::Message(format!(
-                    "panorama member '{}' origin y does not match reference '{}'",
-                    member.id, reference.id
-                )));
-            }
-            if member.image.pixel_format() != reference_format {
-                return Err(NodeError::Message(format!(
-                    "panorama member '{}' pixel format does not match reference '{}'",
-                    member.id, reference.id
-                )));
-            }
-            if member.image.color_metadata() != reference_color {
-                return Err(NodeError::Message(format!(
-                    "panorama member '{}' color metadata does not match reference '{}'",
-                    member.id, reference.id
-                )));
-            }
-            total
-                .checked_add(member.image.dimensions().width)
-                .ok_or_else(|| NodeError::Message("panorama output width overflow".to_owned()))
-        })?;
-        let output_dimensions = Dimensions::new(width, reference_dimensions.height);
-        let output_pixels = output_dimensions
-            .pixel_count()
-            .map_err(|error| NodeError::Message(error.to_string()))?;
-        let mut pixels = Vec::with_capacity(output_pixels);
-        for row in 0..reference_dimensions.height as usize {
-            for member in set.members() {
-                let member_width = member.image.dimensions().width as usize;
-                let start = row
-                    .checked_mul(member_width)
-                    .ok_or_else(|| NodeError::Message("panorama row offset overflow".to_owned()))?;
-                let end = start
-                    .checked_add(member_width)
-                    .ok_or_else(|| NodeError::Message("panorama row end overflow".to_owned()))?;
-                let row_pixels = member.image.pixels().get(start..end).ok_or_else(|| {
-                    NodeError::Message(format!(
-                        "panorama member '{}' pixel storage does not match dimensions",
-                        member.id
-                    ))
-                })?;
-                pixels.extend_from_slice(row_pixels);
-            }
-        }
-        let image = Image::from_pixels_with_origin(
-            output_dimensions,
-            reference_origin,
-            pixels,
-            reference_format,
-            reference_color,
-        )
-        .map_err(|error| NodeError::Message(format!("panorama output is invalid: {error}")))?;
-        Ok(image_result(image, reference.id.clone()))
-    }
-}
-
 struct ImageSetSelect;
 
 impl NodeInstance for ImageSetSelect {
@@ -638,11 +670,11 @@ impl NodeInstance for ImageSetMap {
                 .map_err(|error| {
                     NodeError::Message(format!("image-set member '{}' failed: {error}", member.id))
                 })?;
-                Ok(ImageSetMember::new(
-                    member.id.clone(),
-                    image,
-                    member.metadata.clone(),
-                ))
+                let mapped = ImageSetMember::new(member.id.clone(), image, member.metadata.clone());
+                Ok(match member.source.clone() {
+                    Some(source) => mapped.with_source(source),
+                    None => mapped,
+                })
             })
             .collect::<Result<Vec<_>, NodeError>>()?;
         let mapped = ImageSet::new(set.order(), members)
@@ -723,9 +755,6 @@ fn hdr_factory() -> Box<dyn NodeInstance> {
 fn focus_factory() -> Box<dyn NodeInstance> {
     Box::new(FocusStack)
 }
-fn panorama_factory() -> Box<dyn NodeInstance> {
-    Box::new(PanoramaStitch)
-}
 fn select_factory() -> Box<dyn NodeInstance> {
     Box::new(ImageSetSelect)
 }
@@ -739,22 +768,13 @@ fn group_factory() -> Box<dyn NodeInstance> {
     Box::new(ImageSetGroup)
 }
 
-fn register_collection_node(
-    registry: &mut NodeRegistry,
-    type_id: &str,
-    name: &str,
-    factory: fn() -> Box<dyn NodeInstance>,
-) -> Result<(), rawweave_node_api::RegistryError> {
-    registry.register(collection_descriptor(type_id, name), factory)
-}
-
 pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_api::RegistryError> {
     registry.register(
         image_set_input_descriptor("core.imageset-input", "ImageSet Input"),
         input_factory,
     )?;
     registry.register(image_set_collector_descriptor(), collector_factory)?;
-    register_collection_node(registry, "core.alignment", "Alignment", alignment_factory)?;
+    registry.register(alignment_descriptor(), alignment_factory)?;
     let mut exposure = collection_descriptor("core.exposure-set", "Exposure Set");
     exposure.parameters.push(ParameterDescriptor::boolean(
         "sort_by_exposure",
@@ -770,14 +790,7 @@ pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_a
         image_set_to_image_descriptor("core.focus-stack", "Focus Stack"),
         focus_factory,
     )?;
-    registry.register(
-        panorama_descriptor("core.panorama", "Panorama"),
-        panorama_factory,
-    )?;
-    registry.register(
-        panorama_descriptor("core.panorama-stitch", "Panorama Stitch"),
-        panorama_factory,
-    )?;
+
     let mut select = image_set_to_image_descriptor("core.imageset-select", "Select");
     select
         .parameters
