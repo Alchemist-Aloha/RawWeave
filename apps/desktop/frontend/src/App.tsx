@@ -24,6 +24,7 @@ import type { BrowserSession } from './browser/types';
 import type { BatchWorkflowContext } from './batch/model';
 import { createBatchPlatform } from './platform/batch';
 import { HostManager } from './components/HostManager';
+import { AiProviderManager } from './components/AiProviderManager';
 import { createTauriHostManager } from './platform/hosts';
 import { CheckpointController } from './checkpoint/controller';
 import { createCheckpointPlatform } from './platform/checkpoint';
@@ -635,7 +636,10 @@ export default function App() {
         </div>
       </header>
 
-      <HostManager api={hostManager} onDiscovery={refreshEditorDescriptors} />
+      <section className="integration-strip">
+        <HostManager api={hostManager} onDiscovery={refreshEditorDescriptors} />
+        <AiProviderManager />
+      </section>
 
       <SourceMetadata source={controller.state.source} />
       <BrowserQueue

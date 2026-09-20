@@ -2906,6 +2906,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawweave-ai-provider"
+version = "0.1.0"
+dependencies = [
+ "rawweave-graph",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rawweave-batch"
 version = "0.1.0"
 dependencies = [
@@ -2966,6 +2977,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "png 0.17.16",
+ "rawweave-ai-provider",
  "rawweave-batch",
  "rawweave-color",
  "rawweave-core",

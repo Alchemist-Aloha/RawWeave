@@ -22,6 +22,8 @@ import type {
 } from '../editor/types';
 import { createTauriPlatform } from './tauri';
 
+import { aiNodeDescriptors } from './ai-nodes';
+
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 const imageCapabilities: ExecutionCapability[] = ['CPU', 'RegionAware'];
@@ -437,6 +439,7 @@ export const builtInDescriptors: NodeDescriptor[] = [
   output,
   ...logicDescriptors,
   ...rawDescriptors,
+  ...aiNodeDescriptors,
 ];
 
 function descriptorFor(descriptors: NodeDescriptor[], typeId: string): NodeDescriptor {

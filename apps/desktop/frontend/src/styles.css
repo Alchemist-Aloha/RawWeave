@@ -29,6 +29,41 @@ button { cursor: pointer; }
 .button--primary:hover { border-color: #8cebd3; background: #8cebd3; }
 .button--quiet { color: #a9b4c2; background: transparent; }
 
+.integration-strip { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(360px, .9fr); min-width: 0; min-height: 0; overflow: hidden; border-bottom: 1px solid #1c2430; background: #0e131a; }
+.integration-strip > .host-manager { border-bottom: 0; }
+.ai-provider-manager { display: grid; grid-template-areas: 'heading providers' 'form providers'; grid-template-columns: 160px minmax(0, 1fr); gap: 10px; min-width: 0; min-height: 0; overflow: hidden; border-left: 1px solid #1c2430; padding: 12px 14px; background: #0b1016; }
+.ai-provider-manager__heading { grid-area: heading; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+.ai-provider-manager__heading h2 { margin: 4px 0 2px; font-size: 14px; }
+.ai-provider-manager__heading small, .ai-provider-manager__form-heading small { color: #6f8092; font-family: 'DM Mono', monospace; font-size: 8px; }
+.ai-provider-manager__heading .button { padding: 5px 7px; font-size: 9px; }
+.ai-provider-manager__providers { grid-area: providers; display: flex; min-width: 0; min-height: 0; gap: 7px; overflow: auto; }
+.ai-provider-manager__providers > .empty-state { margin: 12px 0; }
+.ai-provider-card { display: grid; align-content: start; gap: 7px; min-width: 210px; max-width: 280px; border: 1px solid #263241; border-radius: 7px; padding: 9px; background: #111821; }
+.ai-provider-card__heading, .ai-provider-card__actions, .ai-provider-manager__form-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ai-provider-card__heading strong, .ai-provider-card__heading small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-provider-card__heading strong { color: #dce6ed; font-size: 10px; }
+.ai-provider-card__heading small, .ai-provider-card > code { margin-top: 3px; color: #6f8092; font-family: 'DM Mono', monospace; font-size: 8px; }
+.ai-provider-card > code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-provider-status { border-radius: 4px; padding: 3px 5px; color: #9baabd; background: #1c2632; font-family: 'DM Mono', monospace; font-size: 8px; text-transform: uppercase; }
+.ai-provider-status--ready { color: #8cebd3; background: #132a25; }
+.ai-provider-status--error { color: #f0aab2; background: #321c23; }
+.ai-provider-card__error, .ai-provider-manager__error { color: #f0c7cc; font-size: 8px; }
+.ai-provider-card__error { margin: 0; }
+.ai-provider-card__actions { justify-content: flex-start; }
+.ai-provider-card__actions .button { padding: 4px 6px; font-size: 8px; }
+.ai-provider-manager__form { grid-area: form; display: grid; align-content: start; gap: 7px; min-width: 0; }
+.ai-provider-manager__form-heading { align-items: flex-start; }
+.ai-provider-manager__form-heading strong { display: block; margin-top: 3px; color: #cdd8e3; font-size: 10px; }
+.ai-provider-manager__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.ai-provider-manager__fields label { display: grid; gap: 3px; color: #8291a2; font-size: 8px; }
+.ai-provider-manager__fields input, .ai-provider-manager__fields select, .ai-provider-manager__fields textarea { width: 100%; min-width: 0; border: 1px solid #293543; border-radius: 4px; outline: none; padding: 5px 6px; color: #dce6ed; background: #0b1016; font-family: 'DM Mono', monospace; font-size: 8px; }
+.ai-provider-manager__fields textarea { min-height: 28px; resize: vertical; }
+.ai-provider-manager__fields input:focus, .ai-provider-manager__fields select:focus, .ai-provider-manager__fields textarea:focus { border-color: #58c6aa; }
+.ai-provider-manager__form > .button { justify-self: start; padding: 5px 8px; font-size: 8px; }
+.ai-provider-manager__error { grid-area: 1 / 1 / 2 / -1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ai-provider-manager__error span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-provider-manager__error button { border: 0; color: #b9757e; background: transparent; font-size: 14px; }
+
 .host-manager { display: grid; grid-template-areas: 'heading hosts form'; grid-template-columns: 180px minmax(0, 1fr) minmax(300px, 34%); gap: 16px; min-width: 0; min-height: 0; overflow: hidden; border-bottom: 1px solid #1c2430; padding: 12px 18px; background: #0e131a; }
 .host-manager__heading { grid-area: heading; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
 .host-manager__heading h2 { margin: 4px 0 2px; font-size: 14px; }

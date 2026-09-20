@@ -1,3 +1,4 @@
+mod ai;
 mod browser;
 mod hosts;
 mod preview;
@@ -2668,6 +2669,14 @@ pub fn run() {
                     .map_err(std::io::Error::other)?,
             );
             app.manage(AppState::with_checkpoint_manager(checkpoint));
+            let ai_providers = ai::AiProviderManager::persistent(
+                app.path()
+                    .app_config_dir()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .join("ai-providers.json"),
+            )
+            .map_err(std::io::Error::other)?;
+            app.manage(ai_providers);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2728,6 +2737,10 @@ pub fn run() {
             checkpoint_status,
             generate_checkpoint,
             cancel_checkpoint,
+            ai::list_ai_providers,
+            ai::add_ai_provider,
+            ai::remove_ai_provider,
+            ai::test_ai_provider,
             browser::list_directory,
             browser::inspect_file,
             browser::set_file_marks,
