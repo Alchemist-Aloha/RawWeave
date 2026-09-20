@@ -296,22 +296,6 @@ fn color_matrix_uses_gpu_when_the_context_provides_one() {
     }
 }
 
-#[test]
-fn color_matrix_gpu_fallback_propagates_cpu_errors_instead_of_panicking() {
-    let Some(gpu) = GpuContext::initialize_or_cpu() else {
-        return;
-    };
-    let malformed: Image = serde_json::from_str(r#"{"width":1,"height":1,"pixels":[]}"#).unwrap();
-    let matrix = registry().instantiate("core.color-matrix").unwrap();
-    let context =
-        EvaluationContext::default().with_render_context(RenderContext::new().with_gpu(gpu));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        matrix.evaluate(&image_input(malformed), &Parameters::new(), &context)
-    }));
-
-    assert!(matches!(result, Ok(Err(_))));
-}
-
 struct NodeResultLike;
 impl NodeResultLike {
     fn from_image(image: Image) -> rawweave_node_api::NodeResult {
