@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use rawweave_image::{ConfidenceMap, DepthMap, Image, LabelMap, Mask, MaskSet, Region, RegionSet};
 use rawweave_node_api::Value;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 

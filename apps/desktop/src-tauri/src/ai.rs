@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use keyring::{Entry as KeyringEntry, Error as KeyringError};
 use rawweave_ai_provider::{
     poll_until_complete, AiCapabilities, AiOperation, AiProvider, AiResult, AiTask,
     CancellationToken, ComfyUiConfig, ComfyUiProvider, HttpProvider, HttpProviderManifest,
@@ -21,6 +23,174 @@ const MAX_AI_PROVIDER_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AI_PROVIDER_ID_BYTES: usize = 128;
 const MAX_AI_PROVIDER_NAME_BYTES: usize = 256;
 const MAX_AI_PROVIDER_URL_BYTES: usize = 4096;
+const CREDENTIAL_SERVICE: &str = "com.rawweave.desktop.ai";
+const MAX_CREDENTIAL_REFERENCE_BYTES: usize = 256;
+const MAX_CREDENTIAL_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+enum CredentialBackend {
+    Platform,
+    Memory(Arc<Mutex<BTreeMap<(String, String), String>>>),
+}
+
+/// Resolves provider secret references without putting secret values in config data.
+#[derive(Clone)]
+pub struct CredentialStore {
+    backend: CredentialBackend,
+}
+
+impl fmt::Debug for CredentialStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let backend = match &self.backend {
+            CredentialBackend::Platform => "platform",
+            CredentialBackend::Memory(values) => {
+                return formatter
+                    .debug_struct("CredentialStore")
+                    .field("backend", &"memory")
+                    .field(
+                        "entry_count",
+                        &values.lock().map(|entries| entries.len()).unwrap_or(0),
+                    )
+                    .finish();
+            }
+        };
+        formatter
+            .debug_struct("CredentialStore")
+            .field("backend", &backend)
+            .finish()
+    }
+}
+
+impl Default for CredentialStore {
+    fn default() -> Self {
+        Self::platform()
+    }
+}
+
+impl CredentialStore {
+    pub fn memory() -> Self {
+        Self {
+            backend: CredentialBackend::Memory(Arc::new(Mutex::new(BTreeMap::new()))),
+        }
+    }
+
+    pub fn platform() -> Self {
+        Self {
+            backend: CredentialBackend::Platform,
+        }
+    }
+
+    pub fn set(&self, provider_id: &str, reference: &str, secret: &str) -> Result<(), String> {
+        let provider_id =
+            normalize_credential_component(provider_id, "provider id", MAX_AI_PROVIDER_ID_BYTES)?;
+        let reference =
+            normalize_credential_component(reference, "reference", MAX_CREDENTIAL_REFERENCE_BYTES)?;
+        if secret.is_empty() {
+            return Err("credential secret cannot be empty".to_owned());
+        }
+        if secret.len() > MAX_CREDENTIAL_BYTES {
+            return Err(format!(
+                "credential secret exceeds {MAX_CREDENTIAL_BYTES} bytes"
+            ));
+        }
+        match &self.backend {
+            CredentialBackend::Memory(values) => values
+                .lock()
+                .map_err(|_| "credential memory store is unavailable".to_owned())?
+                .insert((provider_id, reference), secret.to_owned()),
+            CredentialBackend::Platform => {
+                let entry = keyring_entry(&provider_id, &reference)?;
+                entry
+                    .set_password(secret)
+                    .map_err(|error| format!("could not store credential: {error}"))?;
+                None
+            }
+        };
+        Ok(())
+    }
+
+    pub fn resolve(&self, provider_id: &str, reference: &str) -> Result<Option<String>, String> {
+        let provider_id =
+            normalize_credential_component(provider_id, "provider id", MAX_AI_PROVIDER_ID_BYTES)?;
+        let reference =
+            normalize_credential_component(reference, "reference", MAX_CREDENTIAL_REFERENCE_BYTES)?;
+        match &self.backend {
+            CredentialBackend::Memory(values) => values
+                .lock()
+                .map_err(|_| "credential memory store is unavailable".to_owned())
+                .map(|entries| entries.get(&(provider_id, reference)).cloned()),
+            CredentialBackend::Platform => {
+                let entry = keyring_entry(&provider_id, &reference)?;
+                match entry.get_password() {
+                    Ok(secret) => Ok(Some(secret)),
+                    Err(KeyringError::NoEntry) => Ok(None),
+                    Err(error) => Err(format!("could not resolve credential: {error}")),
+                }
+            }
+        }
+    }
+
+    pub fn delete(&self, provider_id: &str, reference: &str) -> Result<(), String> {
+        let provider_id =
+            normalize_credential_component(provider_id, "provider id", MAX_AI_PROVIDER_ID_BYTES)?;
+        let reference =
+            normalize_credential_component(reference, "reference", MAX_CREDENTIAL_REFERENCE_BYTES)?;
+        match &self.backend {
+            CredentialBackend::Memory(values) => {
+                values
+                    .lock()
+                    .map_err(|_| "credential memory store is unavailable".to_owned())?
+                    .remove(&(provider_id, reference));
+                Ok(())
+            }
+            CredentialBackend::Platform => {
+                let entry = keyring_entry(&provider_id, &reference)?;
+                match entry.delete_credential() {
+                    Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+                    Err(error) => Err(format!("could not delete credential: {error}")),
+                }
+            }
+        }
+    }
+}
+
+fn normalize_credential_component(
+    value: &str,
+    field: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("credential {field} cannot be empty"));
+    }
+    if value.len() > max_bytes {
+        return Err(format!("credential {field} exceeds {max_bytes} bytes"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!(
+            "credential {field} cannot contain control characters"
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn keyring_entry(provider_id: &str, reference: &str) -> Result<KeyringEntry, String> {
+    let account = format!(
+        "{}:{}",
+        keyring_component(provider_id),
+        keyring_component(reference)
+    );
+    KeyringEntry::new(CREDENTIAL_SERVICE, &account)
+        .map_err(|error| format!("could not initialize secure credential storage: {error}"))
+}
+
+fn keyring_component(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -204,6 +374,21 @@ fn read_bounded<R: Read>(reader: R, limit: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn read_bounded_response<R: Read>(reader: R, limit: usize) -> Result<Vec<u8>, ProviderError> {
+    let mut reader = reader.take(limit.saturating_add(1) as u64);
+    let mut bytes = Vec::with_capacity(limit.min(8192));
+    reader.read_to_end(&mut bytes).map_err(|error| {
+        ProviderError::Transport(format!("HTTP response body read failed: {error}"))
+    })?;
+    if bytes.len() > limit {
+        return Err(ProviderError::ResponseTooLarge {
+            limit,
+            actual: bytes.len(),
+        });
+    }
+    Ok(bytes)
+}
+
 fn sanitize_config(mut config: AiProviderConfigDto) -> Result<AiProviderConfigDto, String> {
     config.id = config.id.trim().to_owned();
     config.name = config.name.trim().to_owned();
@@ -297,6 +482,7 @@ impl ReqwestTransport {
 
 impl HttpTransport for ReqwestTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+        let max_response_bytes = request.max_response_bytes;
         let method = match request.method {
             rawweave_ai_provider::HttpMethod::Get => reqwest::Method::GET,
             rawweave_ai_provider::HttpMethod::Post => reqwest::Method::POST,
@@ -307,7 +493,7 @@ impl HttpTransport for ReqwestTransport {
         for (name, value) in request.headers {
             builder = builder.header(name, value);
         }
-        let response = builder
+        let mut response = builder
             .body(request.body)
             .send()
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
@@ -319,10 +505,15 @@ impl HttpTransport for ReqwestTransport {
                 Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
             })
             .collect();
-        let body = response
-            .bytes()
-            .map_err(|error| ProviderError::Transport(error.to_string()))?
-            .to_vec();
+        if let Some(content_length) = response.content_length() {
+            if content_length > u64::try_from(max_response_bytes).unwrap_or(u64::MAX) {
+                return Err(ProviderError::ResponseTooLarge {
+                    limit: max_response_bytes,
+                    actual: usize::try_from(content_length).unwrap_or(usize::MAX),
+                });
+            }
+        }
+        let body = read_bounded_response(&mut response, max_response_bytes)?;
         Ok(HttpResponse {
             status,
             headers,
@@ -360,6 +551,7 @@ pub struct AiProviderManager {
     providers: Arc<Mutex<BTreeMap<String, Arc<dyn AiProvider>>>>,
     tasks: Arc<Mutex<BTreeMap<String, ActiveProviderTask>>>,
     store: Arc<AiProviderStore>,
+    credentials: Arc<CredentialStore>,
 }
 
 impl AiProviderManager {
@@ -371,6 +563,7 @@ impl AiProviderManager {
             providers: Arc::new(Mutex::new(BTreeMap::new())),
             tasks: Arc::new(Mutex::new(BTreeMap::new())),
             store: Arc::new(AiProviderStore { path: None }),
+            credentials: Arc::new(CredentialStore::memory()),
         }
     }
 
@@ -387,7 +580,21 @@ impl AiProviderManager {
             providers: Arc::new(Mutex::new(BTreeMap::new())),
             tasks: Arc::new(Mutex::new(BTreeMap::new())),
             store: Arc::new(store),
+            credentials: Arc::new(CredentialStore::platform()),
         })
+    }
+
+    pub fn set_credential(
+        &self,
+        provider_id: &str,
+        reference: &str,
+        secret: &str,
+    ) -> Result<(), String> {
+        self.credentials.set(provider_id, reference, secret)
+    }
+
+    pub fn delete_credential(&self, provider_id: &str, reference: &str) -> Result<(), String> {
+        self.credentials.delete(provider_id, reference)
     }
 
     pub fn add(&self, config: AiProviderConfigDto) -> Result<AiProviderDto, String> {
@@ -511,8 +718,14 @@ impl AiProviderManager {
                     .ok_or_else(|| "HTTP AI providers require a manifest".to_owned())?;
                 let manifest: HttpProviderManifest = serde_json::from_value(manifest)
                     .map_err(|error| format!("invalid HTTP AI provider manifest: {error}"))?;
-                let provider = HttpProvider::new(manifest, transport, |_reference| Ok(None))
-                    .map_err(|error| error.to_string())?;
+                let provider_id = config.id.clone();
+                let credentials = Arc::clone(&self.credentials);
+                let provider = HttpProvider::new(manifest, transport, move |reference| {
+                    credentials
+                        .resolve(&provider_id, reference)
+                        .map_err(|error| ProviderError::Transport(error.to_string()))
+                })
+                .map_err(|error| error.to_string())?;
                 Ok(Arc::new(provider))
             }
         }
@@ -732,6 +945,25 @@ pub fn remove_ai_provider(
 }
 
 #[tauri::command]
+pub fn set_ai_provider_credential(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    reference: String,
+    secret: String,
+) -> Result<(), String> {
+    state.set_credential(&provider_id, &reference, &secret)
+}
+
+#[tauri::command]
+pub fn delete_ai_provider_credential(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    reference: String,
+) -> Result<(), String> {
+    state.delete_credential(&provider_id, &reference)
+}
+
+#[tauri::command]
 pub fn test_ai_provider(
     state: State<'_, AiProviderManager>,
     provider_id: String,
@@ -789,6 +1021,7 @@ pub fn cancel_ai_task(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Cursor;
 
     fn comfy(id: &str) -> AiProviderConfigDto {
         AiProviderConfigDto {
@@ -847,5 +1080,53 @@ mod tests {
         let loaded = AiProviderManager::persistent(&path).unwrap();
         assert_eq!(loaded.list().unwrap()[0].id, "persisted");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn credential_store_resolves_references_without_serializing_secret_values() {
+        let credentials = CredentialStore::memory();
+        credentials
+            .set("provider", "api-key", "super-secret")
+            .unwrap();
+
+        assert_eq!(
+            credentials
+                .resolve("provider", "api-key")
+                .unwrap()
+                .as_deref(),
+            Some("super-secret")
+        );
+        let serialized = serde_json::to_string(&AiProviderConfigDto {
+            id: "provider".to_owned(),
+            name: "Provider".to_owned(),
+            kind: AiProviderKind::Http,
+            base_url: "https://example.test".to_owned(),
+            client_id: None,
+            manifest: Some(json!({
+                "id": "provider",
+                "name": "Provider",
+                "submit": {"method": "Post", "url": "https://example.test", "headers": {
+                    "Authorization": {"SecretRef": "api-key"}
+                }}
+            })),
+        })
+        .unwrap();
+        assert!(!serialized.contains("super-secret"));
+    }
+
+    #[test]
+    fn bounded_response_stream_rejects_oversized_chunked_payloads() {
+        let error = read_bounded_response(Cursor::new(vec![1, 2, 3, 4, 5]), 4).unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderError::ResponseTooLarge {
+                limit: 4,
+                actual: 5
+            }
+        ));
+
+        let body = read_bounded_response(Cursor::new(vec![1, 2, 3, 4]), 4).unwrap();
+        assert_eq!(body, vec![1, 2, 3, 4]);
+        assert!(body.capacity() <= 4);
     }
 }

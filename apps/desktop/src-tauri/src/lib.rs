@@ -2745,6 +2745,8 @@ pub fn run() {
             ai::list_ai_providers,
             ai::add_ai_provider,
             ai::remove_ai_provider,
+            ai::set_ai_provider_credential,
+            ai::delete_ai_provider_credential,
             ai::test_ai_provider,
             ai::submit_ai_task,
             ai::ai_task_status,

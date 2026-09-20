@@ -2,7 +2,7 @@ use rawweave_core::NodeId;
 use rawweave_graph::Graph;
 use rawweave_image::Image;
 use rawweave_node_api::{EvaluationContext, Inputs, NodePack, NodeRegistry, Parameters, Value};
-use rawweave_project::{built_in_node_pack_manifests, EditorCore};
+use rawweave_project::{EditorCore, built_in_node_pack_manifests};
 use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
 use rawweave_raw_nodes::RawNodePack;
 
@@ -172,11 +172,13 @@ fn editor_core_round_trips_a_raw_pipeline_and_executes_it_with_a_test_decoder() 
     let document: serde_json::Value = serde_json::from_str(&saved).unwrap();
     assert!(document.get("registry").is_none());
     assert!(document.get("render_cache").is_none());
-    assert!(document["nodes"]
-        .as_object()
-        .unwrap()
-        .values()
-        .all(|node| node.get("runtime_outputs").is_none()));
+    assert!(
+        document["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|node| node.get("runtime_outputs").is_none())
+    );
 
     let mut reloaded = EditorCore::new();
     reloaded.load_workflow(&saved).unwrap();

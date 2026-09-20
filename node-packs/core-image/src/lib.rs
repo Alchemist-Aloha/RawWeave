@@ -596,11 +596,7 @@ impl NodeInstance for RadialGradient {
         let values = region_values(region, |x, y| {
             let distance = ((x as f32 - center_x).powi(2) + (y as f32 - center_y).powi(2)).sqrt();
             if radius == inner_radius {
-                if distance <= radius {
-                    1.0
-                } else {
-                    0.0
-                }
+                if distance <= radius { 1.0 } else { 0.0 }
             } else {
                 ((radius - distance) / (radius - inner_radius)).clamp(0.0, 1.0)
             }
@@ -664,11 +660,7 @@ impl NodeInstance for ColorQualifier {
                 + (blue - target[2]).powi(2))
             .sqrt();
             if softness == 0.0 {
-                if distance <= tolerance {
-                    1.0
-                } else {
-                    0.0
-                }
+                if distance <= tolerance { 1.0 } else { 0.0 }
             } else {
                 ((tolerance + softness - distance) / softness).clamp(0.0, 1.0)
             }
@@ -776,11 +768,7 @@ impl NodeInstance for MaskThreshold {
         }
         let output = map_mask_region(&mask, context, |value| {
             if softness == 0.0 {
-                if value >= threshold {
-                    1.0
-                } else {
-                    0.0
-                }
+                if value >= threshold { 1.0 } else { 0.0 }
             } else {
                 ((value - (threshold - softness)) / (2.0 * softness)).clamp(0.0, 1.0)
             }
