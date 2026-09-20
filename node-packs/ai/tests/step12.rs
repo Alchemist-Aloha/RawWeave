@@ -52,6 +52,41 @@ fn registers_step12_ai_spatial_nodes_with_normal_graph_data_outputs() {
 }
 
 #[test]
+fn automatic_ai_nodes_use_connected_image_dimensions_with_default_context() {
+    let image = Image::from_pixels_with_origin(
+        Dimensions::new(3, 2),
+        (8, 12),
+        vec![[0.8, 0.45, 0.3, 1.0]; 6],
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    let context = EvaluationContext::default();
+    let inputs = [(String::from("image"), Value::Image(image.clone()))]
+        .into_iter()
+        .collect::<Inputs>();
+
+    for (type_id, output_id) in [
+        ("ai.skin-mask", "mask"),
+        ("ai.sky-mask", "mask"),
+        ("ai.foreground-mask", "mask"),
+        ("ai.depth-estimation", "depth"),
+    ] {
+        let node = registry().instantiate(type_id).unwrap();
+        let result = node
+            .evaluate(&inputs, &Parameters::new(), &context)
+            .unwrap();
+        let value = result.outputs.get(output_id).unwrap();
+        let dimensions = match value {
+            Value::Mask(mask) => mask.dimensions(),
+            Value::DepthMap(depth) => depth.dimensions(),
+            other => panic!("{type_id} emitted unexpected {}", other.data_type()),
+        };
+        assert_eq!(dimensions, image.dimensions(), "{type_id} dimensions");
+    }
+}
+
+#[test]
 fn automatic_ai_masks_and_depth_feed_ordinary_graph_values() {
     let image = Image::from_pixels_with_origin(
         Dimensions::new(2, 1),

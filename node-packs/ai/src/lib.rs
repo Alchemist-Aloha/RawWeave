@@ -382,7 +382,7 @@ fn requested_region(full: Region, context: &EvaluationContext) -> Region {
     context
         .requested_region()
         .and_then(|requested| requested.intersection(full))
-        .unwrap_or_else(|| Region::new(full.x, full.y, 0, 0))
+        .unwrap_or(full)
 }
 
 fn spatial_values(

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rawweave_ai_provider::{
-    AiImage, AiInput, AiOperation, AiResult, AiWorkflow, ColorInterchange, PollPolicy,
+    AiImage, AiInput, AiOperation, AiOutput, AiResult, AiWorkflow, ColorInterchange, PollPolicy,
     SubmitRequest, TaskProvenance, WorkflowBindings,
 };
 use rawweave_batch::{
@@ -24,7 +24,9 @@ use rawweave_graph::{
     ExternalToolMetadata, GenerationMetadata, GenerationToken, Graph, NodePackManifest, Provenance,
     SubgraphDependency, WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
 };
-use rawweave_image::{Dimensions, Image, Mask};
+use rawweave_image::{
+    ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
+};
 use rawweave_node_api::{EvaluationContext, NodeDescriptor, ParameterValue, Value};
 use rawweave_project::{built_in_node_pack_manifests, EditorCore};
 use rawweave_raw::{RawDecodeLimits, RawDecoder, RawFrame, RawloaderDecoder};
@@ -1026,14 +1028,72 @@ fn ai_parameter_string(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AiCheckpointSpec {
+    operation: AiOperation,
+    output_type: &'static str,
+    /// The stable PNG interpretation requested from providers that return bytes.
+    encoding: &'static str,
+}
+
 fn ai_operation_for_type(type_id: &str) -> Result<AiOperation, String> {
     match type_id {
         "ai.img2img" => Ok(AiOperation::Img2Img),
         "ai.inpaint" => Ok(AiOperation::Inpaint),
         "ai.generative-fill" => Ok(AiOperation::GenerativeFill),
         "ai.upscale" => Ok(AiOperation::Upscale),
+        // The provider-neutral protocol currently has no segmentation
+        // operation. Spatial workflows are provider-defined image jobs and use
+        // Img2Img while output_type/output_encoding select the typed artifact.
+        "ai.subject-segmentation"
+        | "ai.semantic-segmentation"
+        | "ai.prompt-segmentation"
+        | "ai.scene-analysis" => Ok(AiOperation::Img2Img),
         _ => Err(format!("unsupported AI checkpoint node '{type_id}'")),
     }
+}
+
+fn ai_checkpoint_spec(type_id: &str, output_port: &str) -> Result<AiCheckpointSpec, String> {
+    let operation = ai_operation_for_type(type_id)?;
+    let (output_type, encoding) = match (type_id, output_port) {
+        ("ai.img2img" | "ai.inpaint" | "ai.generative-fill" | "ai.upscale", "image") => {
+            ("core.Image", "png-image-v1")
+        }
+        ("ai.subject-segmentation", "mask") | ("ai.prompt-segmentation", "mask") => {
+            ("core.Mask", "png-mask-v1")
+        }
+        ("ai.subject-segmentation", "mask_set") => ("core.MaskSet", "png-mask-set-v1"),
+        ("ai.subject-segmentation", "confidence")
+        | ("ai.prompt-segmentation", "confidence")
+        | ("ai.semantic-segmentation", "confidence")
+        | ("ai.scene-analysis", "confidence") => ("core.ConfidenceMap", "png-confidence-v1"),
+        ("ai.semantic-segmentation", "label_map") | ("ai.scene-analysis", "label_map") => {
+            ("core.LabelMap", "png-label-map-v1")
+        }
+        ("ai.scene-analysis", "regions") => ("core.RegionSet", "png-region-set-v1"),
+        (type_id, output_port) => {
+            return Err(format!(
+                "unsupported AI checkpoint output '{type_id}:{output_port}'"
+            ));
+        }
+    };
+    Ok(AiCheckpointSpec {
+        operation,
+        output_type,
+        encoding,
+    })
+}
+
+fn spatial_encoding_for_output(output_type: &str) -> Option<&'static str> {
+    Some(match output_type {
+        "core.Mask" => "png-mask-v1",
+        "core.MaskSet" => "png-mask-set-v1",
+        "core.LabelMap" => "png-label-map-v1",
+        "core.ConfidenceMap" => "png-confidence-v1",
+        "core.DepthMap" => "png-depth-v1",
+        "core.RegionSet" => "png-region-set-v1",
+        _ => return None,
+    })
 }
 
 fn source_ai_image(context: &EvaluationContext) -> Result<AiImage, String> {
@@ -1074,6 +1134,7 @@ fn ai_input_from_value(value: Value, data_type: &str) -> Result<AiInput, String>
     match (data_type, value) {
         ("core.Image", Value::Image(image)) => Ok(AiInput::Image(ai_image_from_image(&image)?)),
         ("core.Mask", Value::Mask(mask)) => Ok(AiInput::Mask(ai_mask_from_mask(&mask)?)),
+        ("value.String", Value::String(value)) => Ok(AiInput::Text(value)),
         (expected, value) => Err(format!(
             "AI input expected '{expected}', got '{}'",
             value.data_type()
@@ -1107,6 +1168,7 @@ fn connected_ai_input(
         })
 }
 
+#[cfg(test)]
 fn build_ai_submit_request(
     editor: &EditorCore,
     node_id: &str,
@@ -1114,11 +1176,35 @@ fn build_ai_submit_request(
     context: &EvaluationContext,
     dependency_hash: &str,
 ) -> Result<SubmitRequest, String> {
+    let output_port = editor
+        .graph()
+        .node(&NodeId::from(node_id))
+        .and_then(|node| node.descriptor.outputs.first())
+        .map(|port| port.id.as_str())
+        .ok_or_else(|| format!("AI node '{node_id}' has no outputs"))?;
+    build_ai_submit_request_for_output(
+        editor,
+        node_id,
+        input_port,
+        output_port,
+        context,
+        dependency_hash,
+    )
+}
+
+fn build_ai_submit_request_for_output(
+    editor: &EditorCore,
+    node_id: &str,
+    input_port: &str,
+    output_port: &str,
+    context: &EvaluationContext,
+    dependency_hash: &str,
+) -> Result<SubmitRequest, String> {
     let node = editor
         .graph()
         .node(&NodeId::from(node_id))
         .ok_or_else(|| format!("AI node '{node_id}' does not exist"))?;
-    let operation = ai_operation_for_type(&node.type_id)?;
+    let spec = ai_checkpoint_spec(&node.type_id, output_port)?;
     let provider_id = ai_parameter_string(node, "provider_id")?;
     let workflow_id = ai_parameter_string(node, "workflow_id")?;
     let workflow_definition = ai_parameter_string(node, "workflow_definition")?;
@@ -1160,11 +1246,31 @@ fn build_ai_submit_request(
                 .map_err(|error| format!("could not hash AI workflow: {error}"))?,
         );
     let mut request = SubmitRequest::new(workflow, provenance)
-        .with_parameter("operation", serde_json::to_value(operation).unwrap());
+        .with_parameter("operation", serde_json::to_value(spec.operation).unwrap())
+        .with_parameter(
+            "output_port",
+            serde_json::Value::String(output_port.to_owned()),
+        )
+        .with_parameter(
+            "output_type",
+            serde_json::Value::String(spec.output_type.to_owned()),
+        )
+        .with_parameter(
+            "output_encoding",
+            serde_json::Value::String(spec.encoding.to_owned()),
+        );
     for port in &node.descriptor.inputs {
         let connected = connected_ai_input(editor, &NodeId::from(node_id), &port.id, context)?;
         let input = match connected {
             Some(value) => Some(ai_input_from_value(value, &port.data_type)?),
+            None if port.id == "prompt" => match node.parameters.get("prompt") {
+                Some(ParameterValue::String(prompt)) => Some(AiInput::Text(prompt.clone())),
+                Some(_) => return Err("AI prompt parameter must be a string".to_owned()),
+                None if port.required => {
+                    return Err(format!("required AI input '{}' is not connected", port.id));
+                }
+                None => None,
+            },
             None if port.required => {
                 return Err(format!("required AI input '{}' is not connected", port.id));
             }
@@ -1214,21 +1320,321 @@ fn ai_mask_node_ids(editor: &EditorCore, node_id: &str) -> Vec<String> {
         .collect()
 }
 
+const AI_SPATIAL_MAX_PIXELS: usize = 16_777_216;
+const AI_PROVIDER_MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+const AI_SPATIAL_MAX_MASKS: usize = 1024;
+const AI_SPATIAL_MAX_REGIONS: usize = 1_000_000;
+
+#[derive(Debug, Deserialize)]
+struct FloatPlaneDocument {
+    #[serde(rename = "type", default)]
+    kind: String,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    origin: [u32; 2],
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelPlaneDocument {
+    #[serde(rename = "type", default)]
+    kind: String,
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    origin: [u32; 2],
+    values: Vec<u16>,
+    #[serde(default)]
+    labels: BTreeMap<String, u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MaskSetDocument {
+    #[serde(rename = "type", default)]
+    kind: String,
+    masks: Vec<FloatPlaneDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegionDocument {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegionSetDocument {
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    regions: Vec<RegionDocument>,
+}
+
+fn provider_result_bytes(result: &AiResult) -> Result<(&[u8], &str), String> {
+    match &result.output {
+        AiOutput::Image(image) => Ok((&image.bytes, "image/png")),
+        AiOutput::Bytes { bytes, media_type } => Ok((bytes, media_type.as_str())),
+    }
+}
+
+fn spatial_dimensions(width: u32, height: u32) -> Result<Dimensions, String> {
+    if width == 0 || height == 0 {
+        return Err("AI spatial output dimensions must be non-zero".to_owned());
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| "AI spatial output dimensions overflow".to_owned())?;
+    if pixels > AI_SPATIAL_MAX_PIXELS as u64 {
+        return Err(format!(
+            "AI spatial output exceeds {AI_SPATIAL_MAX_PIXELS} pixels"
+        ));
+    }
+    Ok(Dimensions::new(width, height))
+}
+
+fn check_document_kind(kind: &str, expected: &str) -> Result<(), String> {
+    if !kind.is_empty() && kind != expected {
+        return Err(format!(
+            "AI structured output type '{kind}' does not match '{expected}'"
+        ));
+    }
+    Ok(())
+}
+
+fn float_plane_payload(
+    document: FloatPlaneDocument,
+    expected_kind: &str,
+) -> Result<CheckpointPayload, String> {
+    check_document_kind(&document.kind, expected_kind)?;
+    let dimensions = spatial_dimensions(document.width, document.height)?;
+    let mask = Mask::from_values_with_origin(
+        dimensions,
+        (document.origin[0], document.origin[1]),
+        document.values,
+    )
+    .map_err(|error| error.to_string())?;
+    match expected_kind {
+        "mask" => Ok(CheckpointPayload::Mask(mask)),
+        "confidence_map" => Ok(CheckpointPayload::ConfidenceMap(ConfidenceMap::from_mask(
+            mask,
+        ))),
+        "depth_map" => {
+            let values = mask.values();
+            let depth =
+                DepthMap::from_values(dimensions, (document.origin[0], document.origin[1]), values)
+                    .map_err(|error| error.to_string())?;
+            Ok(CheckpointPayload::DepthMap(depth))
+        }
+        _ => Err(format!(
+            "unsupported AI structured output type '{expected_kind}'"
+        )),
+    }
+}
+
+fn structured_provider_payload(
+    bytes: &[u8],
+    output_type: &str,
+) -> Result<CheckpointPayload, String> {
+    match output_type {
+        "core.Mask" => {
+            let document: FloatPlaneDocument = serde_json::from_slice(bytes)
+                .map_err(|error| format!("could not decode AI structured mask: {error}"))?;
+            float_plane_payload(document, "mask")
+        }
+        "core.ConfidenceMap" => {
+            let document: FloatPlaneDocument = serde_json::from_slice(bytes).map_err(|error| {
+                format!("could not decode AI structured confidence map: {error}")
+            })?;
+            float_plane_payload(document, "confidence_map")
+        }
+        "core.DepthMap" => {
+            let document: FloatPlaneDocument = serde_json::from_slice(bytes)
+                .map_err(|error| format!("could not decode AI structured depth map: {error}"))?;
+            float_plane_payload(document, "depth_map")
+        }
+        "core.LabelMap" => {
+            let document: LabelPlaneDocument = serde_json::from_slice(bytes)
+                .map_err(|error| format!("could not decode AI structured label map: {error}"))?;
+            check_document_kind(&document.kind, "label_map")?;
+            let dimensions = spatial_dimensions(document.width, document.height)?;
+            let map = LabelMap::from_values_with_labels(
+                dimensions,
+                (document.origin[0], document.origin[1]),
+                document.values,
+                document.labels,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(CheckpointPayload::LabelMap(map))
+        }
+        "core.MaskSet" => {
+            let document: MaskSetDocument = serde_json::from_slice(bytes)
+                .map_err(|error| format!("could not decode AI structured mask set: {error}"))?;
+            check_document_kind(&document.kind, "mask_set")?;
+            if document.masks.is_empty() || document.masks.len() > AI_SPATIAL_MAX_MASKS {
+                return Err(format!(
+                    "AI structured mask set must contain between one and {AI_SPATIAL_MAX_MASKS} masks"
+                ));
+            }
+            let mut masks = Vec::with_capacity(document.masks.len());
+            for plane in document.masks {
+                let payload = float_plane_payload(plane, "mask")?;
+                let CheckpointPayload::Mask(mask) = payload else {
+                    unreachable!("mask plane decoding is checked above")
+                };
+                masks.push(mask);
+            }
+            Ok(CheckpointPayload::MaskSet(MaskSet::new(masks)))
+        }
+        "core.RegionSet" => {
+            let document: RegionSetDocument = serde_json::from_slice(bytes)
+                .map_err(|error| format!("could not decode AI structured region set: {error}"))?;
+            check_document_kind(&document.kind, "region_set")?;
+            if document.regions.len() > AI_SPATIAL_MAX_REGIONS {
+                return Err(format!(
+                    "AI structured region set exceeds {AI_SPATIAL_MAX_REGIONS} regions"
+                ));
+            }
+            let regions = document
+                .regions
+                .into_iter()
+                .map(|region| {
+                    if region.width == 0
+                        || region.height == 0
+                        || region.x.checked_add(region.width).is_none()
+                        || region.y.checked_add(region.height).is_none()
+                    {
+                        return Err("AI structured region is empty or overflows".to_owned());
+                    }
+                    Ok(Region::new(region.x, region.y, region.width, region.height))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CheckpointPayload::RegionSet(RegionSet::new(regions)))
+        }
+        _ => Err(format!(
+            "unsupported AI checkpoint output type '{output_type}'"
+        )),
+    }
+}
+
+fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return Err("AI spatial byte output must use PNG encoding".to_owned());
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    let _ = spatial_dimensions(width, height)?;
+    Ok((width, height))
+}
+
+fn provider_png(result: &AiResult) -> Result<image::Rgba32FImage, String> {
+    let (bytes, media_type) = provider_result_bytes(result)?;
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type != "image/png" {
+        return Err(format!(
+            "AI provider spatial byte output must use image/png, got '{media_type}'"
+        ));
+    }
+    if bytes.is_empty() {
+        return Err("AI provider returned no output bytes".to_owned());
+    }
+    if bytes.len() > AI_PROVIDER_MAX_RESULT_BYTES {
+        return Err(format!(
+            "AI provider output exceeds {AI_PROVIDER_MAX_RESULT_BYTES} bytes"
+        ));
+    }
+    let (width, height) = png_dimensions(bytes)?;
+    let decoded = image::load_from_memory(bytes)
+        .map_err(|error| format!("could not decode AI provider PNG: {error}"))?
+        .to_rgba32f();
+    if decoded.width() != width || decoded.height() != height {
+        return Err("AI provider PNG dimensions changed while decoding".to_owned());
+    }
+    Ok(decoded)
+}
+
+fn provider_scalar(pixel: [f32; 4]) -> f32 {
+    let [red, green, blue, alpha] = pixel;
+    if alpha < 1.0 {
+        alpha.clamp(0.0, 1.0)
+    } else {
+        (0.2126 * red + 0.7152 * green + 0.0722 * blue).clamp(0.0, 1.0)
+    }
+}
+
+fn provider_plane(decoded: &image::Rgba32FImage) -> Vec<f32> {
+    decoded
+        .pixels()
+        .map(|pixel| provider_scalar(pixel.0))
+        .collect()
+}
+
+fn provider_regions(decoded: &image::Rgba32FImage) -> Vec<Region> {
+    let mut min_x = decoded.width();
+    let mut min_y = decoded.height();
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+    for (index, pixel) in decoded.pixels().enumerate() {
+        if provider_scalar(pixel.0) <= 0.0 {
+            continue;
+        }
+        let x = index as u32 % decoded.width();
+        let y = index as u32 / decoded.width();
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        found = true;
+    }
+    found
+        .then(|| Region::new(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
+        .into_iter()
+        .collect()
+}
+
 fn provider_result_payload(
     result: &AiResult,
     output_type: &str,
 ) -> Result<CheckpointPayload, String> {
-    if !matches!(output_type, "core.Image" | "core.Mask") {
+    let (bytes, media_type) = provider_result_bytes(result)?;
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if media_type == "application/json" {
+        if bytes.len() > AI_PROVIDER_MAX_RESULT_BYTES {
+            return Err(format!(
+                "AI provider output exceeds {AI_PROVIDER_MAX_RESULT_BYTES} bytes"
+            ));
+        }
+        return structured_provider_payload(bytes, output_type);
+    }
+    if !matches!(
+        output_type,
+        "core.Image"
+            | "core.Mask"
+            | "core.MaskSet"
+            | "core.LabelMap"
+            | "core.ConfidenceMap"
+            | "core.DepthMap"
+            | "core.RegionSet"
+    ) {
         return Err(format!(
             "unsupported AI checkpoint output type '{output_type}'"
         ));
     }
-    let bytes = result
-        .bytes()
-        .ok_or_else(|| "AI provider returned no image bytes".to_owned())?;
-    let decoded = image::load_from_memory(bytes)
-        .map_err(|error| format!("could not decode AI provider image: {error}"))?
-        .to_rgba32f();
+    let decoded = provider_png(result)?;
+    let dimensions = spatial_dimensions(decoded.width(), decoded.height())?;
+    let values = provider_plane(&decoded);
     match output_type {
         "core.Image" => {
             let image = Image::from_pixels(
@@ -1239,24 +1645,30 @@ fn provider_result_payload(
             .map_err(|error| format!("could not create AI checkpoint image: {error}"))?;
             Ok(CheckpointPayload::Image(image))
         }
-        "core.Mask" => {
-            let mask = Mask::from_values(
-                Dimensions::new(decoded.width(), decoded.height()),
-                decoded
-                    .pixels()
-                    .map(|pixel| {
-                        let [red, green, blue, alpha] = pixel.0;
-                        if alpha < 1.0 {
-                            alpha
-                        } else {
-                            0.2126 * red + 0.7152 * green + 0.0722 * blue
-                        }
-                    })
-                    .collect(),
-            )
-            .map_err(|error| format!("could not create AI checkpoint mask: {error}"))?;
-            Ok(CheckpointPayload::Mask(mask))
+        "core.Mask" => Mask::from_values(dimensions, values)
+            .map(CheckpointPayload::Mask)
+            .map_err(|error| format!("could not create AI checkpoint mask: {error}")),
+        "core.MaskSet" => Mask::from_values(dimensions, values)
+            .map(|mask| CheckpointPayload::MaskSet(MaskSet::new(vec![mask])))
+            .map_err(|error| format!("could not create AI checkpoint mask set: {error}")),
+        "core.LabelMap" => {
+            let labels = values
+                .into_iter()
+                .map(|value| (value * 255.0).round() as u16)
+                .collect();
+            LabelMap::from_values(dimensions, (0, 0), labels)
+                .map(CheckpointPayload::LabelMap)
+                .map_err(|error| format!("could not create AI checkpoint label map: {error}"))
         }
+        "core.ConfidenceMap" => Mask::from_values(dimensions, values)
+            .map(|mask| CheckpointPayload::ConfidenceMap(ConfidenceMap::from_mask(mask)))
+            .map_err(|error| format!("could not create AI checkpoint confidence map: {error}")),
+        "core.DepthMap" => DepthMap::from_values(dimensions, (0, 0), values)
+            .map(CheckpointPayload::DepthMap)
+            .map_err(|error| format!("could not create AI checkpoint depth map: {error}")),
+        "core.RegionSet" => Ok(CheckpointPayload::RegionSet(RegionSet::new(
+            provider_regions(&decoded),
+        ))),
         _ => unreachable!("output type checked above"),
     }
 }
@@ -1282,6 +1694,10 @@ fn provider_checkpoint_artifact(
         .unwrap_or_else(|| "unknown-ai-provider".to_owned());
     let mut parameters = BTreeMap::new();
     parameters.insert("task_id".to_owned(), result.task_id.clone());
+    parameters.insert("output_type".to_owned(), context.output_type.to_owned());
+    if let Some(encoding) = spatial_encoding_for_output(context.output_type) {
+        parameters.insert("output_encoding".to_owned(), encoding.to_owned());
+    }
     if !result.provenance.workflow_id.is_empty() {
         parameters.insert(
             "workflow_id".to_owned(),
@@ -2826,12 +3242,7 @@ async fn generate_checkpoint(
     let is_ai_node = evaluation_editor
         .graph()
         .node(&evaluation_node_id)
-        .is_some_and(|node| {
-            matches!(
-                node.type_id.as_str(),
-                "ai.img2img" | "ai.inpaint" | "ai.generative-fill" | "ai.upscale"
-            )
-        });
+        .is_some_and(|node| ai_checkpoint_spec(&node.type_id, &output_port).is_ok());
     let ai_input_port = evaluation_editor
         .graph()
         .node(&evaluation_node_id)
@@ -2845,10 +3256,11 @@ async fn generate_checkpoint(
         .unwrap_or_else(|| "image".to_owned());
     let evaluation_context = checkpoint_context(source.as_ref());
     let ai_request = is_ai_node.then(|| {
-        build_ai_submit_request(
+        build_ai_submit_request_for_output(
             &evaluation_editor,
             &node_id,
             &ai_input_port,
+            &output_port,
             &evaluation_context,
             &dependency_hash,
         )
@@ -3887,6 +4299,207 @@ mod tests {
     }
 
     #[test]
+    fn step12_spatial_checkpoint_outputs_have_provider_operation_and_encoding_specs() {
+        let cases = [
+            (
+                "ai.subject-segmentation",
+                "mask",
+                "core.Mask",
+                "png-mask-v1",
+            ),
+            (
+                "ai.subject-segmentation",
+                "mask_set",
+                "core.MaskSet",
+                "png-mask-set-v1",
+            ),
+            (
+                "ai.semantic-segmentation",
+                "label_map",
+                "core.LabelMap",
+                "png-label-map-v1",
+            ),
+            (
+                "ai.semantic-segmentation",
+                "confidence",
+                "core.ConfidenceMap",
+                "png-confidence-v1",
+            ),
+            ("ai.prompt-segmentation", "mask", "core.Mask", "png-mask-v1"),
+            (
+                "ai.scene-analysis",
+                "regions",
+                "core.RegionSet",
+                "png-region-set-v1",
+            ),
+        ];
+
+        for (type_id, output_port, output_type, encoding) in cases {
+            let spec = ai_checkpoint_spec(type_id, output_port).unwrap();
+            assert_eq!(spec.operation, AiOperation::Img2Img);
+            assert_eq!(spec.output_type, output_type);
+            assert_eq!(spec.encoding, encoding);
+        }
+    }
+
+    #[test]
+    fn step12_provider_png_outputs_become_typed_spatial_payloads() {
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-spatial",
+            rgba_png(2, 1, &[255, 255, 255, 255, 0, 0, 0, 255]),
+            "image/png",
+        );
+
+        assert!(matches!(
+            provider_result_payload(&result, "core.MaskSet"),
+            Ok(CheckpointPayload::MaskSet(set)) if set.len() == 1
+        ));
+        assert!(matches!(
+            provider_result_payload(&result, "core.LabelMap"),
+            Ok(CheckpointPayload::LabelMap(map))
+                if map.dimensions() == rawweave_image::Dimensions::new(2, 1)
+                    && map.values() == [255, 0]
+        ));
+        assert!(matches!(
+            provider_result_payload(&result, "core.ConfidenceMap"),
+            Ok(CheckpointPayload::ConfidenceMap(map)) if map.dimensions().width == 2
+        ));
+        assert!(matches!(
+            provider_result_payload(&result, "core.DepthMap"),
+            Ok(CheckpointPayload::DepthMap(map)) if map.values() == [1.0, 0.0]
+        ));
+        assert!(matches!(
+            provider_result_payload(&result, "core.RegionSet"),
+            Ok(CheckpointPayload::RegionSet(set)) if set.len() == 1
+        ));
+    }
+
+    #[test]
+    fn step12_provider_structured_outputs_preserve_typed_spatial_metadata() {
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-structured-mask",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "mask",
+                "width": 2,
+                "height": 1,
+                "origin": [8, 12],
+                "values": [0.25, 0.75]
+            }))
+            .unwrap(),
+            "application/json; charset=utf-8",
+        );
+        let CheckpointPayload::Mask(mask) = provider_result_payload(&result, "core.Mask").unwrap()
+        else {
+            panic!("structured mask output must become a mask checkpoint payload");
+        };
+        assert_eq!(mask.dimensions(), Dimensions::new(2, 1));
+        assert_eq!(mask.origin(), (8, 12));
+        assert_eq!(mask.values(), [0.25, 0.75]);
+
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-structured-labels",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "label_map",
+                "width": 2,
+                "height": 1,
+                "origin": [8, 12],
+                "values": [3, 4],
+                "labels": {"subject": 3, "background": 4}
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let CheckpointPayload::LabelMap(map) =
+            provider_result_payload(&result, "core.LabelMap").unwrap()
+        else {
+            panic!("structured label output must become a label-map checkpoint payload");
+        };
+        assert_eq!(map.origin(), (8, 12));
+        assert_eq!(map.values(), [3, 4]);
+        assert_eq!(map.label_value("subject"), Some(3));
+
+        let result = rawweave_ai_provider::AiResult::from_bytes(
+            "task-structured-regions",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "region_set",
+                "regions": [{"x": 8, "y": 12, "width": 2, "height": 1}]
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let CheckpointPayload::RegionSet(regions) =
+            provider_result_payload(&result, "core.RegionSet").unwrap()
+        else {
+            panic!("structured regions output must become a region-set checkpoint payload");
+        };
+        assert_eq!(regions.regions(), &[Region::new(8, 12, 2, 1)]);
+    }
+
+    #[test]
+    fn step12_provider_structured_outputs_are_bounded_and_type_checked() {
+        let oversized = rawweave_ai_provider::AiResult::from_bytes(
+            "task-oversized-plane",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "mask",
+                "width": 4097,
+                "height": 4096,
+                "values": []
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let error = provider_result_payload(&oversized, "core.Mask").unwrap_err();
+        assert!(error.contains("AI spatial output exceeds"));
+
+        let wrong_type = rawweave_ai_provider::AiResult::from_bytes(
+            "task-wrong-type",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "label_map",
+                "width": 1,
+                "height": 1,
+                "values": [1]
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let error = provider_result_payload(&wrong_type, "core.Mask").unwrap_err();
+        assert!(error.contains("does not match 'mask'"));
+
+        let empty_set = rawweave_ai_provider::AiResult::from_bytes(
+            "task-empty-set",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "mask_set",
+                "masks": []
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let error = provider_result_payload(&empty_set, "core.MaskSet").unwrap_err();
+        assert!(error.contains("must contain between one and"));
+
+        let overflowing_region = rawweave_ai_provider::AiResult::from_bytes(
+            "task-overflowing-region",
+            serde_json::to_vec(&serde_json::json!({
+                "type": "region_set",
+                "regions": [{"x": 4294967295u64, "y": 0, "width": 2, "height": 1}]
+            }))
+            .unwrap(),
+            "application/json",
+        );
+        let error = provider_result_payload(&overflowing_region, "core.RegionSet").unwrap_err();
+        assert!(error.contains("empty or overflows"));
+    }
+
+    #[test]
+    fn provider_result_payload_rejects_non_png_spatial_bytes() {
+        let result =
+            rawweave_ai_provider::AiResult::from_bytes("task-jpeg", vec![0; 4], "image/jpeg");
+
+        let error = provider_result_payload(&result, "core.Mask").unwrap_err();
+        assert!(error.contains("must use image/png"));
+    }
+
+    #[test]
     fn ai_provider_result_becomes_a_durable_image_artifact_with_provider_provenance() {
         let mut bytes = Vec::new();
         let mut encoder = Encoder::new(Cursor::new(&mut bytes), 1, 1);
@@ -4092,15 +4705,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_result_payload_rejects_incompatible_requested_output_type() {
+    fn provider_result_payload_rejects_unknown_requested_output_type() {
         let result = rawweave_ai_provider::AiResult::from_bytes(
             "task-incompatible",
             rgba_png(1, 1, &[0, 0, 0, 255]),
             "image/png",
         );
 
-        let error = provider_result_payload(&result, "core.DepthMap").unwrap_err();
-        assert!(error.contains("unsupported AI checkpoint output type 'core.DepthMap'"));
+        let error = provider_result_payload(&result, "core.Unknown").unwrap_err();
+        assert!(error.contains("unsupported AI checkpoint output type 'core.Unknown'"));
     }
 
     #[test]
