@@ -103,6 +103,12 @@ struct GraphDocument {
     checkpoints: BTreeMap<NodeId, Checkpoint>,
 }
 
+#[derive(Serialize)]
+struct GraphDependencyDocument<'a> {
+    nodes: &'a BTreeMap<NodeId, GraphNode>,
+    edges: &'a [GraphEdge],
+}
+
 impl Serialize for Graph {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -219,10 +225,15 @@ impl Graph {
             ));
         }
         let affected = self.downstream_nodes(&node.id);
-        self.checkpoints
+        let mut checkpoints = self
+            .checkpoints
             .lock()
-            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?
-            .insert(node_id, checkpoint);
+            .map_err(|_| GraphError::Checkpoint(CheckpointError::StorePoisoned))?;
+        if checkpoints.get(&node_id) == Some(&checkpoint) {
+            return Ok(());
+        }
+        checkpoints.insert(node_id, checkpoint);
+        drop(checkpoints);
         self.invalidate_nodes(&affected);
         self.bump_revision();
         Ok(())
@@ -681,6 +692,7 @@ impl Graph {
             node_id,
             Some(output_port),
             context,
+            None,
             &mut memo,
             &mut visiting,
         )?;
@@ -775,8 +787,72 @@ impl Graph {
         Ok(value)
     }
 
+    /// Execute a manual checkpoint node for an explicit generation attempt.
+    ///
+    /// Normal graph evaluation never executes `ManualCheckpoint` nodes; it
+    /// resolves their committed artifact instead. Generation is the one
+    /// deliberate exception and bypasses the barrier only for the requested
+    /// node. Any upstream manual checkpoints still resolve their committed
+    /// artifacts, so generation cannot accidentally turn the whole graph into
+    /// an automatic evaluation.
+    pub fn evaluate_checkpoint_generation(
+        &self,
+        node_id: &NodeId,
+        output_port: &str,
+        context: &EvaluationContext,
+    ) -> Result<Value, GraphError> {
+        let node = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
+        if node.descriptor.evaluation_policy != EvaluationPolicy::ManualCheckpoint {
+            return Err(GraphError::Evaluation {
+                node: node_id.clone(),
+                source: NodeError::Message("node is not a manual checkpoint".to_owned()),
+            });
+        }
+        if node.descriptor.output(output_port).is_none() {
+            return Err(GraphError::MissingPort {
+                node: node_id.clone(),
+                port: output_port.to_owned(),
+            });
+        }
+        let mut memo = HashMap::new();
+        let mut visiting = BTreeSet::new();
+        let result = self.evaluate_node(
+            node_id,
+            Some(output_port),
+            context,
+            Some(node_id),
+            &mut memo,
+            &mut visiting,
+        )?;
+        result
+            .result
+            .outputs
+            .get(output_port)
+            .cloned()
+            .ok_or_else(|| GraphError::MissingOutput {
+                node: node_id.clone(),
+                port: output_port.to_owned(),
+            })
+    }
+
     pub fn to_json(&self) -> Result<String, GraphError> {
         Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Serialize the graph inputs that affect checkpoint generation.
+    ///
+    /// Runtime revision and checkpoint lifecycle state are intentionally
+    /// omitted. Registering a checkpoint invalidates downstream caches and
+    /// therefore changes the revision, but must not make the generation that
+    /// just registered that state appear stale.
+    pub fn to_dependency_json(&self) -> Result<String, GraphError> {
+        Ok(serde_json::to_string_pretty(&GraphDependencyDocument {
+            nodes: &self.nodes,
+            edges: &self.edges,
+        })?)
     }
 
     pub fn from_json(json: &str, registry: NodeRegistry) -> Result<Self, GraphError> {
@@ -822,6 +898,7 @@ impl Graph {
         node_id: &NodeId,
         port: &str,
         context: &EvaluationContext,
+        generation_target: Option<&NodeId>,
         memo: &mut HashMap<MemoKey, EvaluatedNode>,
         visiting: &mut BTreeSet<NodeId>,
     ) -> Result<Option<Value>, GraphError> {
@@ -836,6 +913,7 @@ impl Graph {
             &edge.from_node,
             Some(&edge.from_port),
             context,
+            generation_target,
             memo,
             visiting,
         )?;
@@ -856,6 +934,7 @@ impl Graph {
         node_id: &NodeId,
         requested_output: Option<&str>,
         context: &EvaluationContext,
+        generation_target: Option<&NodeId>,
         memo: &mut HashMap<MemoKey, EvaluatedNode>,
         visiting: &mut BTreeSet<NodeId>,
     ) -> Result<EvaluatedNode, GraphError> {
@@ -904,6 +983,7 @@ impl Graph {
                     node_id,
                     &gate.selector,
                     &execution_context,
+                    generation_target,
                     memo,
                     visiting,
                 )?;
@@ -927,6 +1007,7 @@ impl Graph {
                 &edge.from_node,
                 Some(&edge.from_port),
                 &execution_context,
+                generation_target,
                 memo,
                 visiting,
             )?;
@@ -991,7 +1072,9 @@ impl Graph {
                 });
             }
         }
-        if node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint {
+        if node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint
+            && generation_target != Some(node_id)
+        {
             let requested_output = requested_output.ok_or_else(|| GraphError::MissingPort {
                 node: node_id.clone(),
                 port: "<requested output>".to_owned(),
@@ -1041,12 +1124,16 @@ impl Graph {
             backend_identity_hash(&execution_context),
         );
         let current_revision = self.graph_revision();
-        let cached = self.render_cache.lock().ok().map(|cache| {
-            (
-                cache.get_current(&cache_key, current_revision),
-                cache.get_mask_current(&cache_key, current_revision),
-            )
-        });
+        let cached = (generation_target != Some(node_id))
+            .then(|| {
+                self.render_cache.lock().ok().map(|cache| {
+                    (
+                        cache.get_current(&cache_key, current_revision),
+                        cache.get_mask_current(&cache_key, current_revision),
+                    )
+                })
+            })
+            .flatten();
         if let Some((cached_image, cached_mask)) = cached
             && let Some(result) = cached_node_result(node, cached_image, cached_mask)
         {
@@ -1073,6 +1160,11 @@ impl Graph {
             output_hash: hash_node_result(&result),
             result,
         };
+        if generation_target == Some(node_id) {
+            visiting.remove(node_id);
+            memo.insert(memo_key, evaluated.clone());
+            return Ok(evaluated);
+        }
         if let Some(image) = single_image(&evaluated.result) {
             let render = RenderResult::new(image.clone(), current_revision);
             if let Ok(mut cache) = self.render_cache.lock() {

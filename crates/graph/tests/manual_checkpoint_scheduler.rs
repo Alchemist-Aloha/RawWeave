@@ -266,3 +266,44 @@ fn checkpoint_dependency_hash_is_stable_and_covers_transitive_content_parameters
     );
     assert_ne!(first_hash, current_dependency(&second));
 }
+
+#[test]
+fn checkpoint_generation_executes_manual_node_without_committed_artifact() {
+    let counter = FixtureCounter(Arc::new(AtomicUsize::new(0)));
+    let mut graph = graph(counter.clone());
+    add_pipeline(&mut graph);
+    let context = EvaluationContext::with_source_image(image(0.25));
+
+    let generated = graph
+        .evaluate_checkpoint_generation(&NodeId::from("manual"), "image", &context)
+        .unwrap();
+    let Value::Image(generated) = generated else {
+        panic!("expected image output");
+    };
+
+    assert_eq!(generated.pixel(0, 0), Some([0.25, 0.25, 0.25, 1.0]));
+    assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        graph
+            .checkpoint(&NodeId::from("manual"))
+            .unwrap()
+            .unwrap()
+            .state(),
+        CheckpointState::Ungenerated
+    );
+}
+
+#[test]
+fn checkpoint_registration_does_not_change_dependency_json() {
+    let counter = FixtureCounter(Arc::new(AtomicUsize::new(0)));
+    let mut graph = graph(counter);
+    add_pipeline(&mut graph);
+
+    let before = graph.to_dependency_json().unwrap();
+    graph
+        .register_checkpoint(Checkpoint::new("manual", 1))
+        .unwrap();
+    let after = graph.to_dependency_json().unwrap();
+
+    assert_eq!(before, after);
+}

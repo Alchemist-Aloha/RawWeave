@@ -919,6 +919,13 @@ impl Checkpoint {
         self.committed_artifact_id.as_ref()
     }
 
+    /// Return the in-memory token owned by the active generation attempt.
+    /// Tokens are never serialized and are only useful for coordinating an
+    /// attempt with its cancellation request.
+    pub fn active_generation_token(&self) -> Option<GenerationToken> {
+        self.active_generation
+    }
+
     pub fn set_dependency_hash(&mut self, dependency_hash: impl Into<String>) {
         let dependency_hash = dependency_hash.into();
         self.current_dependency_hash = Some(dependency_hash.clone());

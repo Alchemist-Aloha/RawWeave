@@ -263,6 +263,24 @@ impl EditorCore {
         Ok(())
     }
 
+    /// Load a workflow while retaining the durable artifact store used by its
+    /// manual checkpoints.
+    pub fn load_workflow_with_artifact_store(
+        &mut self,
+        json: &str,
+        artifact_store: ArtifactStore,
+    ) -> Result<(), ProjectError> {
+        let registry = self.graph.registry();
+        self.graph = Graph::from_json_with_artifact_store(json, registry, artifact_store)?;
+        Ok(())
+    }
+
+    /// Register live manual-checkpoint state with the graph scheduler.
+    pub fn register_checkpoint(&mut self, checkpoint: Checkpoint) -> Result<(), ProjectError> {
+        self.graph.register_checkpoint(checkpoint)?;
+        Ok(())
+    }
+
     pub fn create_subgraph_from_selection(
         &self,
         selection: &[&str],

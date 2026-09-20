@@ -2,7 +2,7 @@ mod browser;
 mod hosts;
 mod preview;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use rawweave_core::NodeId;
 use rawweave_graph::{
     hash_upstream_inputs, ArtifactStore, Checkpoint, CheckpointArtifact, CheckpointAvailability,
     CheckpointPayload, CheckpointState, DependencyReport, DependencyStatus, EvaluationPolicy,
-    GenerationMetadata, Graph, NodePackManifest, Provenance, SubgraphDependency,
+    GenerationMetadata, GenerationToken, Graph, NodePackManifest, Provenance, SubgraphDependency,
     WorkflowDefinition, WorkflowMetadata, WorkflowPort, WorkflowPortDirection,
 };
 use rawweave_image::Image;
@@ -459,7 +459,7 @@ struct CheckpointRecord {
 struct CheckpointManager {
     checkpoints: Mutex<BTreeMap<String, CheckpointRecord>>,
     store: ArtifactStore,
-    cancellation_requests: Mutex<BTreeSet<String>>,
+    cancellation_requests: Mutex<BTreeMap<String, GenerationToken>>,
     state_path: Option<PathBuf>,
 }
 
@@ -488,7 +488,7 @@ impl CheckpointManager {
         Self {
             checkpoints: Mutex::new(BTreeMap::new()),
             store: ArtifactStore::memory(),
-            cancellation_requests: Mutex::new(BTreeSet::new()),
+            cancellation_requests: Mutex::new(BTreeMap::new()),
             state_path: None,
         }
     }
@@ -500,7 +500,7 @@ impl CheckpointManager {
         Ok(Self {
             checkpoints: Mutex::new(checkpoints),
             store: ArtifactStore::new(root.join("artifacts")),
-            cancellation_requests: Mutex::new(BTreeSet::new()),
+            cancellation_requests: Mutex::new(BTreeMap::new()),
             state_path: Some(state_path),
         })
     }
@@ -871,7 +871,10 @@ fn checkpoint_dependencies(
     node_version: u32,
     source: Option<&SourceAsset>,
 ) -> Result<(String, BTreeMap<String, String>), String> {
-    let workflow = editor.save_workflow().map_err(|error| error.to_string())?;
+    let workflow = editor
+        .graph()
+        .to_dependency_json()
+        .map_err(|error| error.to_string())?;
     let upstream_hashes = BTreeMap::from([
         (
             "workflow".to_owned(),
@@ -945,6 +948,16 @@ fn checkpoint_status_dto(
     })
 }
 
+fn checkpoint_record_status_dto(
+    record: &CheckpointRecord,
+    store: &ArtifactStore,
+) -> Result<CheckpointStatusDto, String> {
+    let mut status = checkpoint_status_dto(&record.checkpoint, store)?;
+    status.output_port = record.output_port.clone();
+    status.progress = record.progress;
+    Ok(status)
+}
+
 fn ensure_checkpoint_record<'a>(
     records: &'a mut BTreeMap<String, CheckpointRecord>,
     editor: &EditorCore,
@@ -970,11 +983,18 @@ fn ensure_checkpoint_record<'a>(
     if node.descriptor.output(&selected_port).is_none() {
         return Err(format!("output '{node_id}:{selected_port}' does not exist"));
     }
+    let graph_checkpoint = editor
+        .graph()
+        .checkpoint(&NodeId::from(node_id))
+        .map_err(|error| error.to_string())?
+        .filter(|checkpoint| checkpoint.node_version == node.descriptor.version);
     let entry = records
         .entry(node_id.to_owned())
         .or_insert_with(|| CheckpointRecord {
             output_port: selected_port.clone(),
-            checkpoint: Checkpoint::new(node_id, node.descriptor.version),
+            checkpoint: graph_checkpoint
+                .clone()
+                .unwrap_or_else(|| Checkpoint::new(node_id, node.descriptor.version)),
             progress: None,
         });
     if entry.checkpoint.node_version != node.descriptor.version
@@ -1952,10 +1972,13 @@ fn load_workflow(state: State<'_, AppState>, workflow: String) -> Result<(), Str
 }
 
 fn load_workflow_state(state: &AppState, workflow: &str) -> Result<(), String> {
+    let artifact_store = state.checkpoint.store.clone();
     lock_editor(&state.editor)?
-        .load_workflow(workflow)
+        .load_workflow_with_artifact_store(workflow, artifact_store)
         .map_err(|error| error.to_string())?;
     clear_blueprint(state)?;
+    let editor = lock_editor(&state.editor)?.clone();
+    state.checkpoint.replace_from_graph(&editor)?;
     *state
         .source_image
         .lock()
@@ -2253,29 +2276,40 @@ fn checkpoint_status_for_node(
     node_id: &str,
     output_port: Option<&str>,
 ) -> Result<CheckpointStatusDto, String> {
-    let editor = lock_editor(&state.editor)?.clone();
+    let mut editor = lock_editor(&state.editor)?;
     let source = state
         .source_image
         .lock()
         .map_err(|_| "source image state is unavailable".to_owned())?
         .clone();
-    let mut records = state
-        .checkpoint
-        .checkpoints
-        .lock()
-        .map_err(|_| "checkpoint state is unavailable".to_owned())?;
-    let record = ensure_checkpoint_record(&mut records, &editor, node_id, output_port)?;
-    let (dependency_hash, _) = checkpoint_dependencies(
-        &editor,
-        node_id,
-        &record.output_port,
-        record.checkpoint.node_version,
-        source.as_ref(),
-    )?;
-    record.checkpoint.set_dependency_hash(dependency_hash);
-    let mut status = checkpoint_status_dto(&record.checkpoint, &state.checkpoint.store)?;
-    status.output_port = record.output_port.clone();
-    status.progress = record.progress;
+    let manager = Arc::clone(&state.checkpoint);
+    let (checkpoint, selected_port, progress) = {
+        let mut records = manager
+            .checkpoints
+            .lock()
+            .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+        let record = ensure_checkpoint_record(&mut records, &editor, node_id, output_port)?;
+        let (dependency_hash, _) = checkpoint_dependencies(
+            &editor,
+            node_id,
+            &record.output_port,
+            record.checkpoint.node_version,
+            source.as_ref(),
+        )?;
+        record.checkpoint.set_dependency_hash(dependency_hash);
+        (
+            record.checkpoint.clone(),
+            record.output_port.clone(),
+            record.progress,
+        )
+    };
+    editor
+        .register_checkpoint(checkpoint.clone())
+        .map_err(|error| error.to_string())?;
+    manager.persist()?;
+    let mut status = checkpoint_status_dto(&checkpoint, &manager.store)?;
+    status.output_port = selected_port;
+    status.progress = progress;
     Ok(status)
 }
 
@@ -2317,65 +2351,90 @@ async fn generate_checkpoint(
     node_id: String,
     output_port: String,
 ) -> Result<CheckpointStatusDto, String> {
-    let editor = lock_editor(&state.editor)?.clone();
+    let manager = Arc::clone(&state.checkpoint);
     let source = state
         .source_image
         .lock()
         .map_err(|_| "source image state is unavailable".to_owned())?
         .clone();
-    let manager = Arc::clone(&state.checkpoint);
-    let (token, node_version, dependency_hash, upstream_hashes) = {
+    let (evaluation_editor, token, node_version, dependency_hash, upstream_hashes) = {
+        let mut editor = lock_editor(&state.editor)?;
         let mut records = manager
             .checkpoints
             .lock()
             .map_err(|_| "checkpoint state is unavailable".to_owned())?;
-        let record = ensure_checkpoint_record(&mut records, &editor, &node_id, Some(&output_port))?;
-        let (dependency_hash, upstream_hashes) = checkpoint_dependencies(
-            &editor,
-            &node_id,
-            &record.output_port,
-            record.checkpoint.node_version,
-            source.as_ref(),
-        )?;
-        record
-            .checkpoint
-            .set_dependency_hash(dependency_hash.clone());
-        let token = record
-            .checkpoint
-            .begin_generation_token()
-            .map_err(|error| error.to_string())?;
-        record.progress = Some(0.0);
+        let (token, node_version, dependency_hash, upstream_hashes, checkpoint) = {
+            let record =
+                ensure_checkpoint_record(&mut records, &editor, &node_id, Some(&output_port))?;
+            let (dependency_hash, upstream_hashes) = checkpoint_dependencies(
+                &editor,
+                &node_id,
+                &record.output_port,
+                record.checkpoint.node_version,
+                source.as_ref(),
+            )?;
+            record
+                .checkpoint
+                .set_dependency_hash(dependency_hash.clone());
+            let token = record
+                .checkpoint
+                .begin_generation_token()
+                .map_err(|error| error.to_string())?;
+            record.progress = Some(0.0);
+            (
+                token,
+                record.checkpoint.node_version,
+                dependency_hash,
+                upstream_hashes,
+                record.checkpoint.clone(),
+            )
+        };
         manager
             .cancellation_requests
             .lock()
             .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
             .remove(&node_id);
+        editor
+            .register_checkpoint(checkpoint)
+            .map_err(|error| error.to_string())?;
+        drop(records);
+        manager.persist()?;
         (
+            editor.clone(),
             token,
-            record.checkpoint.node_version,
+            node_version,
             dependency_hash,
             upstream_hashes,
         )
     };
     emit_checkpoint_progress(&app, &node_id, &output_port, 0.05, "generating", None);
 
-    let evaluation_editor = editor.clone();
     let evaluation_source = source.clone();
     let evaluation_node = node_id.clone();
     let evaluation_output = output_port.clone();
-    let evaluated = tauri::async_runtime::spawn_blocking(move || {
-        let value = evaluation_editor
-            .evaluate(
-                &evaluation_node,
+    let evaluated = match tauri::async_runtime::spawn_blocking(move || {
+        evaluation_editor
+            .graph()
+            .evaluate_checkpoint_generation(
+                &NodeId::from(evaluation_node),
                 &evaluation_output,
-                checkpoint_context(evaluation_source.as_ref()),
+                &checkpoint_context(evaluation_source.as_ref()),
             )
-            .map_err(|error| error.to_string())?;
-        checkpoint_payload(value)
+            .map_err(|error| error.to_string())
+            .and_then(checkpoint_payload)
     })
     .await
-    .map_err(|error| format!("checkpoint worker failed: {error}"))?;
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("checkpoint worker failed: {error}")),
+    };
 
+    let mut editor = lock_editor(&state.editor)?;
+    let current_source = state
+        .source_image
+        .lock()
+        .map_err(|_| "source image state is unavailable".to_owned())?
+        .clone();
     let mut records = manager
         .checkpoints
         .lock()
@@ -2383,17 +2442,44 @@ async fn generate_checkpoint(
     let record = records
         .get_mut(&node_id)
         .ok_or_else(|| format!("checkpoint '{node_id}' is not registered"))?;
-    let cancelled = manager
+    let selected_port = record.output_port.clone();
+
+    // A late result must never change the state of a newer attempt. The
+    // active token is the authoritative ownership check; node ids alone are
+    // insufficient when a user cancels and immediately regenerates.
+    if record.checkpoint.active_generation_token() != Some(token) {
+        let status = checkpoint_record_status_dto(record, &manager.store)?;
+        drop(records);
+        manager.persist()?;
+        return Ok(status);
+    }
+    let cancellation_requested = manager
         .cancellation_requests
         .lock()
         .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
-        .remove(&node_id)
-        || record.checkpoint.state() == CheckpointState::Cancelled;
-    if cancelled {
+        .get(&node_id)
+        .is_some_and(|requested| *requested == token);
+    if cancellation_requested || record.checkpoint.state() != CheckpointState::Generating {
+        if cancellation_requested {
+            manager
+                .cancellation_requests
+                .lock()
+                .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+                .remove(&node_id);
+            record
+                .checkpoint
+                .cancel_generation(&token)
+                .map_err(|error| error.to_string())?;
+        }
         record.progress = None;
-        emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.0, "cancelled", None);
-        let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
-        status.output_port = record.output_port.clone();
+        let checkpoint = record.checkpoint.clone();
+        let status = checkpoint_record_status_dto(record, &manager.store)?;
+        editor
+            .register_checkpoint(checkpoint)
+            .map_err(|error| error.to_string())?;
+        drop(records);
+        manager.persist()?;
+        emit_checkpoint_progress(&app, &node_id, &selected_port, 0.0, "cancelled", None);
         return Ok(status);
     }
 
@@ -2405,30 +2491,22 @@ async fn generate_checkpoint(
                 .fail_generation(&token, &error)
                 .map_err(|failure| failure.to_string())?;
             record.progress = None;
-            emit_checkpoint_progress(
-                &app,
-                &node_id,
-                &record.output_port,
-                0.0,
-                "failed",
-                Some(error),
-            );
-            let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
-            status.output_port = record.output_port.clone();
+            let checkpoint = record.checkpoint.clone();
+            let status = checkpoint_record_status_dto(record, &manager.store)?;
+            editor
+                .register_checkpoint(checkpoint)
+                .map_err(|failure| failure.to_string())?;
+            drop(records);
+            manager.persist()?;
+            emit_checkpoint_progress(&app, &node_id, &selected_port, 0.0, "failed", Some(error));
             return Ok(status);
         }
     };
 
-    let current_editor = lock_editor(&state.editor)?.clone();
-    let current_source = state
-        .source_image
-        .lock()
-        .map_err(|_| "source image state is unavailable".to_owned())?
-        .clone();
     let (current_dependency_hash, _) = checkpoint_dependencies(
-        &current_editor,
+        &editor,
         &node_id,
-        &record.output_port,
+        &selected_port,
         node_version,
         current_source.as_ref(),
     )?;
@@ -2436,14 +2514,14 @@ async fn generate_checkpoint(
         .checkpoint
         .set_dependency_hash(current_dependency_hash);
     record.progress = Some(90.0);
-    emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.9, "committing", None);
+    emit_checkpoint_progress(&app, &node_id, &selected_port, 0.9, "committing", None);
     let provenance = Provenance {
         dependency_hash: dependency_hash.clone(),
         upstream_hashes,
         node_version,
         external_tool: None,
     };
-    let artifact = CheckpointArtifact::new(
+    let artifact = match CheckpointArtifact::new(
         payload,
         dependency_hash,
         provenance,
@@ -2453,40 +2531,62 @@ async fn generate_checkpoint(
             duration_millis: None,
             generator: Some("rawweave-desktop".to_owned()),
         },
-    )
-    .map_err(|error| error.to_string())?;
-    let commit_result = record
-        .checkpoint
-        .commit_generation(token, artifact, &manager.store);
-    record.progress = None;
-    match commit_result {
-        Ok(()) => {
-            emit_checkpoint_progress(&app, &node_id, &record.output_port, 1.0, "complete", None)
-        }
-        Err(error) if record.checkpoint.state() == CheckpointState::Stale => {
-            emit_checkpoint_progress(
-                &app,
-                &node_id,
-                &record.output_port,
-                1.0,
-                "complete",
-                Some(error.to_string()),
-            )
-        }
+    ) {
+        Ok(artifact) => artifact,
         Err(error) => {
-            record.checkpoint.fail(error.to_string());
+            record
+                .checkpoint
+                .fail_generation(&token, error.to_string())
+                .map_err(|failure| failure.to_string())?;
+            record.progress = None;
+            let checkpoint = record.checkpoint.clone();
+            let status = checkpoint_record_status_dto(record, &manager.store)?;
+            editor
+                .register_checkpoint(checkpoint)
+                .map_err(|failure| failure.to_string())?;
+            drop(records);
+            manager.persist()?;
             emit_checkpoint_progress(
                 &app,
                 &node_id,
-                &record.output_port,
+                &selected_port,
                 0.0,
                 "failed",
                 Some(error.to_string()),
             );
+            return Ok(status);
         }
+    };
+    let commit_result = record
+        .checkpoint
+        .commit_generation(token, artifact, &manager.store);
+    record.progress = None;
+    let checkpoint = record.checkpoint.clone();
+    let status = checkpoint_record_status_dto(record, &manager.store)?;
+    editor
+        .register_checkpoint(checkpoint)
+        .map_err(|error| error.to_string())?;
+    drop(records);
+    manager.persist()?;
+    match commit_result {
+        Ok(()) => emit_checkpoint_progress(&app, &node_id, &selected_port, 1.0, "complete", None),
+        Err(error) if status.state == CheckpointState::Stale => emit_checkpoint_progress(
+            &app,
+            &node_id,
+            &selected_port,
+            1.0,
+            "complete",
+            Some(error.to_string()),
+        ),
+        Err(error) => emit_checkpoint_progress(
+            &app,
+            &node_id,
+            &selected_port,
+            0.0,
+            "failed",
+            Some(error.to_string()),
+        ),
     }
-    let mut status = checkpoint_status_dto(&record.checkpoint, &manager.store)?;
-    status.output_port = record.output_port.clone();
     Ok(status)
 }
 
@@ -2496,41 +2596,57 @@ fn cancel_checkpoint(
     state: State<'_, AppState>,
     node_id: String,
 ) -> Result<CheckpointStatusDto, String> {
-    let editor = lock_editor(&state.editor)?.clone();
+    let mut editor = lock_editor(&state.editor)?;
     let source = state
         .source_image
         .lock()
         .map_err(|_| "source image state is unavailable".to_owned())?
         .clone();
-    let mut records = state
-        .checkpoint
-        .checkpoints
-        .lock()
-        .map_err(|_| "checkpoint state is unavailable".to_owned())?;
-    let record = ensure_checkpoint_record(&mut records, &editor, &node_id, None)?;
-    if record.checkpoint.state() == CheckpointState::Generating {
-        state
-            .checkpoint
-            .cancellation_requests
+    let manager = Arc::clone(&state.checkpoint);
+    let (checkpoint, status, output_port, was_generating) = {
+        let mut records = manager
+            .checkpoints
             .lock()
-            .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
-            .insert(node_id.clone());
-        record.checkpoint.cancel();
-        record.progress = None;
-        emit_checkpoint_progress(&app, &node_id, &record.output_port, 0.0, "cancelled", None);
-    } else {
-        let (dependency_hash, _) = checkpoint_dependencies(
-            &editor,
-            &node_id,
-            &record.output_port,
-            record.checkpoint.node_version,
-            source.as_ref(),
-        )?;
-        record.checkpoint.set_dependency_hash(dependency_hash);
+            .map_err(|_| "checkpoint state is unavailable".to_owned())?;
+        let record = ensure_checkpoint_record(&mut records, &editor, &node_id, None)?;
+        let was_generating = record.checkpoint.state() == CheckpointState::Generating;
+        if was_generating {
+            let token = record
+                .checkpoint
+                .active_generation_token()
+                .ok_or_else(|| "checkpoint generation token is unavailable".to_owned())?;
+            manager
+                .cancellation_requests
+                .lock()
+                .map_err(|_| "checkpoint cancellation state is unavailable".to_owned())?
+                .insert(node_id.clone(), token);
+            record
+                .checkpoint
+                .cancel_generation(&token)
+                .map_err(|error| error.to_string())?;
+            record.progress = None;
+        } else {
+            let (dependency_hash, _) = checkpoint_dependencies(
+                &editor,
+                &node_id,
+                &record.output_port,
+                record.checkpoint.node_version,
+                source.as_ref(),
+            )?;
+            record.checkpoint.set_dependency_hash(dependency_hash);
+        }
+        let checkpoint = record.checkpoint.clone();
+        let status = checkpoint_record_status_dto(record, &manager.store)?;
+        let output_port = record.output_port.clone();
+        (checkpoint, status, output_port, was_generating)
+    };
+    editor
+        .register_checkpoint(checkpoint)
+        .map_err(|error| error.to_string())?;
+    manager.persist()?;
+    if was_generating {
+        emit_checkpoint_progress(&app, &node_id, &output_port, 0.0, "cancelled", None);
     }
-    let mut status = checkpoint_status_dto(&record.checkpoint, &state.checkpoint.store)?;
-    status.output_port = record.output_port.clone();
-    status.progress = record.progress;
     Ok(status)
 }
 
