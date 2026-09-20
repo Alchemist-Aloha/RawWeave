@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use png::{BitDepth, ColorType, Encoder};
@@ -366,17 +366,8 @@ impl PreviewManager {
 
 pub fn decode_image_file(path: impl AsRef<Path>) -> Result<Image, String> {
     let path = path.as_ref();
-    let decoded = image::ImageReader::open(path)
-        .map_err(|error| format!("could not open image '{}': {error}", path.display()))?
-        .decode()
-        .map_err(|error| format!("could not decode image '{}': {error}", path.display()))?;
-    let rgba = decoded.to_rgba32f();
-    Image::from_pixels(
-        rgba.width(),
-        rgba.height(),
-        rgba.pixels().map(|pixel| pixel.0).collect(),
-    )
-    .map_err(|error| format!("could not create rawweave image: {error}"))
+    rawweave_batch::decode_ordinary_file(path)
+        .map_err(|error| format!("could not decode image '{}': {error}", path.display()))
 }
 
 pub fn preview_path(request_id: &str) -> String {
@@ -1047,6 +1038,38 @@ mod tests {
         assert_eq!((metadata.width, metadata.height), (2, 2));
         assert_eq!((metadata.full_width, metadata.full_height), (2, 2));
         assert!(manager.store.get(&preview_path("open-render")).is_some());
+    }
+
+    #[test]
+    fn rejects_a_declared_oversized_png_before_preview_decode() {
+        let path = std::env::temp_dir().join(format!(
+            "rawweave-preview-oversized-{}.png",
+            std::process::id()
+        ));
+        let mut bytes = encode_png(&Image::new(1, 1).unwrap()).unwrap();
+        bytes[16..20].copy_from_slice(&(rawweave_batch::MAX_ORDINARY_IMAGE_EDGE + 1).to_be_bytes());
+        let crc = png_crc32(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = decode_image_file(&path).expect_err("oversized PNG must be rejected");
+        let _ = std::fs::remove_file(&path);
+        assert!(error.contains("edge limit"));
+    }
+
+    fn png_crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 0 {
+                    crc >> 1
+                } else {
+                    (crc >> 1) ^ 0xedb8_8320
+                };
+            }
+        }
+        !crc
     }
 
     #[test]

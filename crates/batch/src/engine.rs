@@ -131,6 +131,10 @@ const RAW_EXTENSIONS: &[&str] = &[
     "raf", "raw", "rw2", "rwl", "srw", "x3f",
 ];
 
+/// Hard upper bound for batch worker threads accepted by the engine and its
+/// desktop request boundary.
+pub const MAX_BATCH_WORKERS: usize = 64;
+
 fn is_raw_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -575,21 +579,8 @@ fn decode_ordinary(item: &BatchItem) -> Result<Image, BatchError> {
             "RAW source requires a RAW workflow".to_owned(),
         ));
     }
-    let decoded = image::ImageReader::open(&item.source_path)
-        .map_err(|error| BatchError::Processor(format!("could not open source: {error}")))?
-        .decode()
-        .map_err(|error| BatchError::Processor(format!("could not decode source: {error}")))?
-        .to_rgba32f();
-    let (width, height) = decoded.dimensions();
-    let pixels = decoded.pixels().map(|pixel| pixel.0).collect::<Vec<_>>();
-    Image::from_pixels_with_metadata(
-        width,
-        height,
-        pixels,
-        PixelFormat::Rgba32Float,
-        ColorDomain::Srgb,
-    )
-    .map_err(|error| BatchError::Processor(format!("decoded image is invalid: {error}")))
+    crate::decode_ordinary_file(&item.source_path)
+        .map_err(|error| BatchError::Processor(format!("could not decode source: {error}")))
 }
 
 fn workflow_kind(definition: &WorkflowDefinition) -> Result<WorkflowKind, BatchError> {
@@ -825,6 +816,11 @@ impl BatchEngine {
             return Err(BatchError::InvalidJob(
                 "worker concurrency must be greater than zero".to_owned(),
             ));
+        }
+        if max_workers > MAX_BATCH_WORKERS {
+            return Err(BatchError::InvalidJob(format!(
+                "worker concurrency cannot exceed the maximum of {MAX_BATCH_WORKERS}"
+            )));
         }
         attach_artifact_store(&mut job.workflow.definition, &artifact_store);
         job.validate()?;

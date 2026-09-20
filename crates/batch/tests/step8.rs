@@ -269,6 +269,23 @@ fn bounded_engine_isolates_failures_and_handles_more_than_100_items() {
 }
 
 #[test]
+fn batch_engine_rejects_worker_counts_above_the_hard_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = BatchEngine::new(
+        job(1, dir.path()),
+        JobStore::memory(),
+        Arc::new(SyntheticProcessor {
+            calls: Arc::new(AtomicUsize::new(0)),
+            fail: false,
+        }),
+        MAX_BATCH_WORKERS + 1,
+    );
+
+    let error = result.err().expect("worker bound should reject the engine");
+    assert!(error.to_string().contains("maximum"));
+}
+
+#[test]
 fn atomic_restart_skips_valid_completed_outputs_and_retries_invalid_outputs() {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir.path().join("job.json");
