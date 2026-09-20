@@ -8,7 +8,8 @@ use crate::recipe::{record_for_path, write_output};
 use crate::{BatchError, OutputRecord};
 use rawweave_color::{DisplayRGB, SceneLinearRGB};
 use rawweave_graph::{
-    ArtifactStore, Checkpoint, EvaluationPolicy, GenerationToken, WorkflowDefinition, WorkflowPort,
+    ArtifactStore, Checkpoint, CheckpointArtifact, CheckpointError, CheckpointPayload,
+    EvaluationPolicy, GenerationMetadata, GraphError, Provenance, WorkflowDefinition, WorkflowPort,
 };
 use rawweave_image::{ColorDomain, Image, PixelFormat};
 use rawweave_node_api::{EvaluationContext, NodeRegistry, ParameterValue, Value};
@@ -71,7 +72,7 @@ pub trait BatchProcessor: Send + Sync {
     /// compatible with the runtime.
     fn refresh_checkpoint_dependencies(
         &self,
-        _workflow: &PinnedWorkflow,
+        _workflow: &mut PinnedWorkflow,
         _item: &BatchItem,
         _cancel: &CancellationToken,
     ) -> Result<(), BatchError> {
@@ -92,6 +93,20 @@ pub trait BatchProcessor: Send + Sync {
             "checkpoint '{}' requires a generation-capable batch processor; use use_committed or generate it before the batch",
             checkpoint.node_id
         )))
+    }
+
+    /// Generate a checkpoint identified by its path through nested workflow
+    /// definitions. Processors that do not need nested-definition awareness
+    /// retain the legacy node-only hook above.
+    fn generate_checkpoint_at(
+        &self,
+        workflow: &PinnedWorkflow,
+        item: &BatchItem,
+        _checkpoint_path: &str,
+        checkpoint: &Checkpoint,
+        cancel: &CancellationToken,
+    ) -> Result<CheckpointArtifact, BatchError> {
+        self.generate_checkpoint(workflow, item, checkpoint, cancel)
     }
 }
 
@@ -137,9 +152,8 @@ impl ImageFileProcessor {
         workflow: &PinnedWorkflow,
     ) -> Result<WorkflowDefinition, BatchError> {
         workflow.verify()?;
-        let registry = default_registry();
         let mut definition = workflow.definition.clone();
-        attach_registry(&mut definition, &registry);
+        attach_runtime_registries(&mut definition);
         Ok(definition)
     }
 
@@ -154,6 +168,31 @@ impl ImageFileProcessor {
             .validate()
             .map_err(|error| BatchError::Workflow(error.to_string()))?;
         Ok(definition)
+    }
+
+    fn item_context(
+        &self,
+        definition: &WorkflowDefinition,
+        item: &BatchItem,
+    ) -> Result<EvaluationContext, BatchError> {
+        let mut context = match workflow_kind(definition)? {
+            WorkflowKind::Ordinary => EvaluationContext::with_source_image(decode_ordinary(item)?),
+            WorkflowKind::Raw => EvaluationContext::default().with_source_path(&item.source_path),
+        };
+        for (id, value) in &item.overrides {
+            let parameter = definition.parameters().get(id).ok_or_else(|| {
+                BatchError::Processor(format!(
+                    "workflow parameter override '{id}' is not declared"
+                ))
+            })?;
+            validate_override(definition, parameter, id, value)?;
+            context = context.with_parameter_override(
+                parameter.node_id.as_str(),
+                &parameter.parameter_id,
+                value.clone(),
+            );
+        }
+        Ok(context)
     }
 }
 
@@ -176,23 +215,7 @@ impl BatchProcessor for ImageFileProcessor {
             return Err(BatchError::Cancelled);
         }
         let definition = self.validate_definition(workflow, &PinnedDependencies::default())?;
-        let mut context = match workflow_kind(&definition)? {
-            WorkflowKind::Ordinary => EvaluationContext::with_source_image(decode_ordinary(item)?),
-            WorkflowKind::Raw => EvaluationContext::default().with_source_path(&item.source_path),
-        };
-        for (id, value) in &item.overrides {
-            let parameter = definition.parameters().get(id).ok_or_else(|| {
-                BatchError::Processor(format!(
-                    "workflow parameter override '{id}' is not declared"
-                ))
-            })?;
-            validate_override(&definition, parameter, id, value)?;
-            context = context.with_parameter_override(
-                parameter.node_id.as_str(),
-                &parameter.parameter_id,
-                value.clone(),
-            );
-        }
+        let context = self.item_context(&definition, item)?;
         if cancel.is_cancelled() {
             return Err(BatchError::Cancelled);
         }
@@ -201,6 +224,80 @@ impl BatchProcessor for ImageFileProcessor {
             return Err(BatchError::Cancelled);
         }
         Ok(image)
+    }
+
+    fn refresh_checkpoint_dependencies(
+        &self,
+        workflow: &mut PinnedWorkflow,
+        item: &BatchItem,
+        cancel: &CancellationToken,
+    ) -> Result<(), BatchError> {
+        workflow.verify()?;
+        attach_runtime_registries(&mut workflow.definition);
+        let context = self.item_context(&workflow.definition, item)?;
+        refresh_definition_checkpoints(&mut workflow.definition, "", &context, cancel)
+    }
+
+    fn generate_checkpoint(
+        &self,
+        workflow: &PinnedWorkflow,
+        item: &BatchItem,
+        checkpoint: &Checkpoint,
+        cancel: &CancellationToken,
+    ) -> Result<CheckpointArtifact, BatchError> {
+        self.generate_checkpoint_at(workflow, item, &checkpoint.node_id, checkpoint, cancel)
+    }
+
+    fn generate_checkpoint_at(
+        &self,
+        workflow: &PinnedWorkflow,
+        item: &BatchItem,
+        checkpoint_path: &str,
+        checkpoint: &Checkpoint,
+        cancel: &CancellationToken,
+    ) -> Result<CheckpointArtifact, BatchError> {
+        if cancel.is_cancelled() {
+            return Err(BatchError::Cancelled);
+        }
+        let definition = definition_at_path(&workflow.definition, checkpoint_path)?;
+        let node_id = rawweave_core::NodeId::from(checkpoint.node_id.as_str());
+        let node = definition.graph.node(&node_id).ok_or_else(|| {
+            BatchError::CheckpointPolicy(format!(
+                "checkpoint '{checkpoint_path}' is not present in its workflow definition"
+            ))
+        })?;
+        let output_port = node
+            .descriptor
+            .outputs
+            .first()
+            .map(|port| port.id.as_str())
+            .ok_or_else(|| {
+                BatchError::CheckpointPolicy(format!(
+                    "checkpoint '{checkpoint_path}' has no output port"
+                ))
+            })?;
+        let context = self.item_context(&workflow.definition, item)?;
+        let value = definition
+            .graph
+            .evaluate_checkpoint_generation(&node_id, output_port, &context)
+            .map_err(|error| {
+                BatchError::CheckpointPolicy(format!(
+                    "checkpoint '{checkpoint_path}' generation failed: {error}"
+                ))
+            })?;
+        let payload = checkpoint_payload(value)?;
+        let dependency_hash = checkpoint.current_dependency_hash().ok_or_else(|| {
+            BatchError::CheckpointPolicy(format!(
+                "checkpoint '{checkpoint_path}' has no current dependency hash"
+            ))
+        })?;
+        CheckpointArtifact::new(
+            payload,
+            dependency_hash,
+            Provenance::new(dependency_hash, checkpoint.node_version),
+            GenerationMetadata::new(workflow.revision),
+        )
+        .map_err(BatchError::from)
     }
 }
 
@@ -217,10 +314,142 @@ fn attach_registry(definition: &mut WorkflowDefinition, registry: &NodeRegistry)
     }
 }
 
+fn attach_runtime_registries(definition: &mut WorkflowDefinition) {
+    let registry = definition.graph.registry();
+    let needs_default = definition
+        .graph
+        .nodes()
+        .values()
+        .any(|node| registry.descriptor(&node.type_id).is_none());
+    if needs_default {
+        let default = default_registry();
+        attach_registry(definition, &default);
+        return;
+    }
+    for nested in definition.nested_subgraphs.values_mut() {
+        attach_runtime_registries(nested);
+    }
+}
+
 fn attach_artifact_store(definition: &mut WorkflowDefinition, store: &ArtifactStore) {
     definition.graph = definition.graph.clone().with_artifact_store(store.clone());
     for nested in definition.nested_subgraphs.values_mut() {
         attach_artifact_store(nested, store);
+    }
+}
+
+fn definition_at_path<'a>(
+    definition: &'a WorkflowDefinition,
+    checkpoint_path: &str,
+) -> Result<&'a WorkflowDefinition, BatchError> {
+    let mut current = definition;
+    let mut parts = checkpoint_path.split('/').collect::<Vec<_>>();
+    let node_id = parts.pop().unwrap_or(checkpoint_path);
+    for segment in parts {
+        current = current
+            .nested_subgraphs
+            .get(segment)
+            .map(Box::as_ref)
+            .ok_or_else(|| {
+                BatchError::CheckpointPolicy(format!(
+                    "checkpoint '{checkpoint_path}' references missing nested definition '{segment}'"
+                ))
+            })?;
+    }
+    if current
+        .graph
+        .node(&rawweave_core::NodeId::from(node_id))
+        .is_none()
+    {
+        return Err(BatchError::CheckpointPolicy(format!(
+            "checkpoint '{checkpoint_path}' references missing node '{node_id}'"
+        )));
+    }
+    Ok(current)
+}
+
+fn refresh_definition_checkpoints(
+    definition: &mut WorkflowDefinition,
+    prefix: &str,
+    context: &EvaluationContext,
+    cancel: &CancellationToken,
+) -> Result<(), BatchError> {
+    let manual_nodes = definition
+        .graph
+        .nodes()
+        .values()
+        .filter(|node| node.descriptor.evaluation_policy == EvaluationPolicy::ManualCheckpoint)
+        .map(|node| (node.id.clone(), node.descriptor.version))
+        .collect::<Vec<_>>();
+    let store = definition.graph.artifact_store();
+    for (node_id, node_version) in manual_nodes {
+        if cancel.is_cancelled() {
+            return Err(BatchError::Cancelled);
+        }
+        let key = checkpoint_key(prefix, node_id.as_str());
+        let mut checkpoint = definition
+            .graph
+            .checkpoint(&node_id)
+            .map_err(|error| BatchError::CheckpointPolicy(format!("{key}: {error}")))?
+            .unwrap_or_else(|| Checkpoint::new(node_id.as_str(), node_version));
+        if checkpoint.node_version != node_version {
+            return Err(BatchError::Checkpoint(
+                CheckpointError::NodeVersionMismatch {
+                    expected: node_version,
+                    actual: checkpoint.node_version,
+                },
+            ));
+        }
+        let output_port = definition
+            .graph
+            .node(&node_id)
+            .and_then(|node| node.descriptor.outputs.first())
+            .map(|port| port.id.as_str())
+            .ok_or_else(|| {
+                BatchError::CheckpointPolicy(format!("{key}: manual checkpoint has no output port"))
+            })?;
+        match definition.graph.evaluate_checkpoint(
+            &node_id,
+            output_port,
+            context,
+            &mut checkpoint,
+            &store,
+        ) {
+            Ok(_) => {}
+            Err(GraphError::Checkpoint(CheckpointError::NoCommittedArtifact))
+                if checkpoint.current_dependency_hash().is_some() => {}
+            Err(error) => {
+                return Err(BatchError::CheckpointPolicy(format!(
+                    "{key}: could not evaluate checkpoint dependencies: {error}"
+                )));
+            }
+        }
+        definition
+            .graph
+            .register_checkpoint(checkpoint)
+            .map_err(|error| BatchError::CheckpointPolicy(format!("{key}: {error}")))?;
+    }
+    for (nested_id, nested) in &mut definition.nested_subgraphs {
+        let nested_prefix = checkpoint_key(prefix, nested_id);
+        refresh_definition_checkpoints(nested, &nested_prefix, context, cancel)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_payload(value: Value) -> Result<CheckpointPayload, BatchError> {
+    match value {
+        Value::Image(image) => Ok(CheckpointPayload::Image(image)),
+        Value::Mask(mask) => Ok(CheckpointPayload::Mask(mask)),
+        Value::MaskSet(set) => Ok(CheckpointPayload::MaskSet(set)),
+        Value::LabelMap(map) => Ok(CheckpointPayload::LabelMap(map)),
+        Value::ConfidenceMap(map) => Ok(CheckpointPayload::ConfidenceMap(map)),
+        Value::DepthMap(map) => Ok(CheckpointPayload::DepthMap(map)),
+        Value::RegionSet(set) => Ok(CheckpointPayload::RegionSet(set)),
+        Value::Bytes(bytes) => Ok(CheckpointPayload::SpatialData(bytes)),
+        value => Err(BatchError::CheckpointPolicy(format!(
+            "checkpoint output type '{}' is not persistable",
+            value.data_type()
+        ))),
     }
 }
 
@@ -1049,64 +1278,70 @@ fn process_with_checkpoint_policy(
     }
 
     let keys = checkpoints.keys().cloned().collect::<Vec<_>>();
-    {
-        let mut runtime = CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
-        let mut pending_generations = Vec::<(String, GenerationToken, Checkpoint)>::new();
-        for key in keys {
-            if inner.cancel.is_cancelled() {
-                for (node_id, token, _) in pending_generations.drain(..) {
-                    let _ = runtime.cancel_generation(&node_id, token);
-                }
-                return Err(BatchError::Cancelled);
-            }
-            match runtime
+    for key in keys {
+        if inner.cancel.is_cancelled() {
+            return Err(BatchError::Cancelled);
+        }
+        let resolution = {
+            let mut runtime =
+                CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
+            runtime
                 .resolve(&key)
                 .map_err(|error| checkpoint_policy_failure(&item.id, error))?
-            {
-                CheckpointResolution::UseCommitted { .. } => {}
-                CheckpointResolution::Generate { token } => {
-                    let checkpoint = runtime
-                        .checkpoint(&key)
-                        .map_err(|error| checkpoint_policy_failure(&item.id, error))?
-                        .clone();
-                    pending_generations.push((key, token, checkpoint));
-                }
+        };
+        let CheckpointResolution::Generate { token } = resolution else {
+            continue;
+        };
+        let checkpoint = checkpoints.get(&key).cloned().ok_or_else(|| {
+            checkpoint_policy_failure(
+                &item.id,
+                BatchError::CheckpointPolicy(format!("checkpoint '{key}' disappeared")),
+            )
+        })?;
+        let generated = inner.processor.generate_checkpoint_at(
+            workflow,
+            item,
+            &key,
+            &checkpoint,
+            &inner.cancel,
+        );
+        let artifact = match generated {
+            Ok(artifact) => artifact,
+            Err(BatchError::Cancelled) => {
+                let mut runtime =
+                    CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
+                let _ = runtime.cancel_generation(&key, token);
+                return Err(BatchError::Cancelled);
             }
+            Err(error) => {
+                let mut runtime =
+                    CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
+                let _ = runtime.fail_generation(&key, token, error.to_string());
+                return Err(checkpoint_policy_failure(
+                    &item.id,
+                    BatchError::CheckpointPolicy(format!(
+                        "checkpoint '{key}' generation failed: {error}"
+                    )),
+                ));
+            }
+        };
+        if inner.cancel.is_cancelled() {
+            let mut runtime =
+                CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
+            let _ = runtime.cancel_generation(&key, token);
+            return Err(BatchError::Cancelled);
         }
-
-        for (node_id, token, checkpoint) in pending_generations {
-            if inner.cancel.is_cancelled() {
-                let _ = runtime.cancel_generation(&node_id, token);
-                return Err(BatchError::Cancelled);
-            }
-            let generated =
-                inner
-                    .processor
-                    .generate_checkpoint(workflow, item, &checkpoint, &inner.cancel);
-            let artifact = match generated {
-                Ok(artifact) => artifact,
-                Err(BatchError::Cancelled) => {
-                    let _ = runtime.cancel_generation(&node_id, token);
-                    return Err(BatchError::Cancelled);
-                }
-                Err(error) => {
-                    let _ = runtime.fail_generation(&node_id, token, error.to_string());
-                    return Err(checkpoint_policy_failure(
-                        &item.id,
-                        BatchError::CheckpointPolicy(format!(
-                            "checkpoint '{node_id}' generation failed: {error}"
-                        )),
-                    ));
-                }
-            };
-            if inner.cancel.is_cancelled() {
-                let _ = runtime.cancel_generation(&node_id, token);
-                return Err(BatchError::Cancelled);
-            }
+        {
+            let mut runtime =
+                CheckpointRuntime::new(policy, &mut checkpoints, &inner.artifact_store);
             runtime
-                .commit_generation(&node_id, token, artifact)
+                .commit_generation(&key, token, artifact)
                 .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
         }
+        // Make a newly generated checkpoint visible to upstream evaluation of
+        // a later nested/root checkpoint in the same item.
+        apply_checkpoints(&mut workflow.definition, "", &checkpoints)
+            .map_err(|error| checkpoint_policy_failure(&item.id, error))?;
     }
     apply_checkpoints(&mut workflow.definition, "", &checkpoints)
         .map_err(|error| checkpoint_policy_failure(&item.id, error))?;

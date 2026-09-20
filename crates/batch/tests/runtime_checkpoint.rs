@@ -1,7 +1,7 @@
 use rawweave_batch::{
     BatchEngine, BatchError, BatchItem, BatchJob, BatchProcessor, CancellationToken,
-    CheckpointPolicy, CheckpointResolution, CheckpointRuntime, ItemState, JobStore, OutputFormat,
-    OutputRecipe, PinnedDependencies, PinnedWorkflow,
+    CheckpointPolicy, CheckpointResolution, CheckpointRuntime, ImageFileProcessor, ItemState,
+    JobStore, OutputFormat, OutputRecipe, PinnedDependencies, PinnedWorkflow,
 };
 use rawweave_core::NodeId;
 use rawweave_graph::{
@@ -46,12 +46,26 @@ impl NodeInstance for BatchManualNode {
         &self,
         _inputs: &Inputs,
         _parameters: &Parameters,
-        _context: &EvaluationContext,
+        context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
-        Err(NodeError::Message(
-            "batch fixture is not evaluated directly".to_owned(),
-        ))
+        context
+            .source_image
+            .clone()
+            .map(|image| NodeResult::single("image", rawweave_node_api::Value::Image(image)))
+            .ok_or_else(|| NodeError::Message("batch fixture has no source image".to_owned()))
     }
+}
+
+fn write_source_png(path: &std::path::Path, value: u8) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = png::Encoder::new(file, 1, 1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer
+        .write_image_data(&[value, value, value, 255])
+        .unwrap();
+    writer.finish().unwrap();
 }
 
 fn manual_workflow(store: &ArtifactStore, checkpoint: Checkpoint) -> WorkflowDefinition {
@@ -412,4 +426,104 @@ fn batch_engine_fail_if_stale_fails_the_item_without_processing_or_generation() 
     assert_eq!(item.outputs.len(), 0);
     assert_eq!(generated.load(Ordering::SeqCst), 0);
     assert_eq!(processed.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn production_processor_recomputes_checkpoint_freshness_for_each_item_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_a = directory.path().join("a.png");
+    let source_b = directory.path().join("b.png");
+    write_source_png(&source_a, 32);
+    write_source_png(&source_b, 224);
+    let store = ArtifactStore::memory();
+    let processor = ImageFileProcessor;
+    let cancel = CancellationToken::new();
+    let item_a = BatchItem::new("a", &source_a, "a.png");
+    let mut pinned = PinnedWorkflow::new(manual_workflow(&store, missing_checkpoint()), 1).unwrap();
+
+    processor
+        .refresh_checkpoint_dependencies(&mut pinned, &item_a, &cancel)
+        .unwrap();
+    let mut checkpoint = pinned
+        .definition
+        .graph
+        .checkpoint(&NodeId::from("manual"))
+        .unwrap()
+        .unwrap();
+    let token = checkpoint.begin_generation_token().unwrap();
+    let generated = processor
+        .generate_checkpoint(&pinned, &item_a, &checkpoint, &cancel)
+        .unwrap();
+    checkpoint
+        .commit_generation(token, generated, &store)
+        .unwrap();
+    pinned
+        .definition
+        .graph
+        .register_checkpoint(checkpoint)
+        .unwrap();
+
+    let job = BatchJob::new(
+        "production-freshness",
+        pinned,
+        PinnedDependencies::default(),
+        BTreeMap::new(),
+        vec![OutputRecipe::new(OutputFormat::Png, directory.path())],
+        CheckpointPolicy::FailIfStale,
+        vec![item_a, BatchItem::new("b", &source_b, "b.png")],
+    )
+    .unwrap();
+    let engine = BatchEngine::new_with_artifact_store(
+        job,
+        JobStore::memory(),
+        Arc::new(processor),
+        1,
+        store,
+    )
+    .unwrap();
+    engine.start().unwrap();
+    engine.wait().unwrap();
+
+    let snapshot = engine.snapshot().unwrap();
+    assert_eq!(snapshot.items[0].state, ItemState::Completed);
+    assert_eq!(snapshot.items[1].state, ItemState::Failed);
+    assert!(
+        snapshot.items[1]
+            .failure
+            .as_deref()
+            .is_some_and(|message| message.contains("stale"))
+    );
+}
+
+#[test]
+fn production_processor_generates_missing_checkpoint_with_pinned_graph_runtime() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.png");
+    write_source_png(&source, 96);
+    let store = ArtifactStore::memory();
+    let workflow = PinnedWorkflow::new(manual_workflow(&store, missing_checkpoint()), 1).unwrap();
+    let job = BatchJob::new(
+        "production-generation",
+        workflow,
+        PinnedDependencies::default(),
+        BTreeMap::new(),
+        vec![OutputRecipe::new(OutputFormat::Png, directory.path())],
+        CheckpointPolicy::GenerateIfMissing,
+        vec![BatchItem::new("source", &source, "source.png")],
+    )
+    .unwrap();
+    let engine = BatchEngine::new_with_artifact_store(
+        job,
+        JobStore::memory(),
+        Arc::new(ImageFileProcessor),
+        1,
+        store,
+    )
+    .unwrap();
+    engine.start().unwrap();
+    engine.wait().unwrap();
+
+    let item = &engine.snapshot().unwrap().items[0];
+    assert_eq!(item.state, ItemState::Completed);
+    assert_eq!(item.outputs.len(), 1);
 }
