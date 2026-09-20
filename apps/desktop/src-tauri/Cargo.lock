@@ -3774,6 +3774,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawweave-pro-tools"
+version = "0.1.0"
+dependencies = [
+ "rawweave-image",
+ "rawweave-node-api",
+]
+
+[[package]]
 name = "rawweave-project"
 version = "0.1.0"
 dependencies = [
@@ -3786,6 +3794,7 @@ dependencies = [
  "rawweave-graph",
  "rawweave-image",
  "rawweave-node-api",
+ "rawweave-pro-tools",
  "rawweave-raw",
  "rawweave-raw-nodes",
  "thiserror 2.0.20",
