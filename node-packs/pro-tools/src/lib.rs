@@ -4,6 +4,9 @@
 //! contract free of private shortcuts. All algorithms are deterministic,
 //! bounded, and preserve the source image's global origin and metadata.
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use rawweave_image::{Image, Mask, Region};
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
@@ -303,23 +306,282 @@ fn sample_bilinear(image: &Image, x: f32, y: f32) -> [f32; 4] {
     })
 }
 
-fn average_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
-    if radius == 0 {
-        return sample_nearest(image, i64::from(x), i64::from(y));
+#[derive(Clone, Copy, Debug, Default)]
+struct AxisSegment {
+    start: usize,
+    end: usize,
+    repetitions: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AxisSegments {
+    values: [AxisSegment; 3],
+    len: usize,
+}
+
+impl AxisSegments {
+    fn for_clamped_range(start: i64, end: i64, origin: u32, length: u32) -> Self {
+        let mut segments = Self::default();
+        if length == 0 {
+            return segments;
+        }
+
+        let origin = i64::from(origin);
+        let image_end = origin + i64::from(length);
+        let left_end = end.min(origin);
+        segments.push(0, 1, left_end - start);
+
+        let interior_start = start.max(origin);
+        let interior_end = end.min(image_end);
+        segments.push(
+            interior_start - origin,
+            interior_end - origin,
+            if interior_end > interior_start { 1 } else { 0 },
+        );
+
+        let right_start = start.max(image_end);
+        segments.push(i64::from(length) - 1, i64::from(length), end - right_start);
+        segments
     }
-    let radius = i64::from(radius);
-    let mut total = [0.0; 4];
-    let mut count = 0.0;
-    for offset_y in -radius..=radius {
-        for offset_x in -radius..=radius {
-            let pixel = sample_nearest(image, i64::from(x) + offset_x, i64::from(y) + offset_y);
-            for channel in 0..4 {
-                total[channel] += pixel[channel];
-            }
-            count += 1.0;
+
+    fn push(&mut self, start: i64, end: i64, repetitions: i64) {
+        if start >= end || repetitions <= 0 {
+            return;
+        }
+        let (Some(start), Some(end), Some(repetitions)) = (
+            usize::try_from(start).ok(),
+            usize::try_from(end).ok(),
+            usize::try_from(repetitions).ok(),
+        ) else {
+            return;
+        };
+        if let Some(slot) = self.values.get_mut(self.len) {
+            *slot = AxisSegment {
+                start,
+                end,
+                repetitions,
+            };
+            self.len += 1;
         }
     }
-    total.map(|value| value / count)
+
+    fn iter(&self) -> impl Iterator<Item = &AxisSegment> {
+        self.values.iter().take(self.len)
+    }
+}
+
+/// A four-channel summed-area table for bounded, edge-clamped neighborhoods.
+///
+/// The table stores prefix sums for the image's local coordinates. Queries are
+/// split into at most three source ranges per axis so samples outside the image
+/// repeat the nearest edge pixel exactly as `sample_nearest` does.
+struct IntegralImage {
+    width: u32,
+    height: u32,
+    origin: (u32, u32),
+    stride: usize,
+    sums: Vec<[f32; 4]>,
+    #[cfg(test)]
+    build_work_units: usize,
+    #[cfg(test)]
+    query_work_units: Cell<usize>,
+}
+
+impl IntegralImage {
+    fn new(image: &Image) -> Result<Self, NodeError> {
+        checked_pixel_count(image.global_region())?;
+        let width = image.width();
+        let height = image.height();
+        let stride = usize::try_from(width)
+            .ok()
+            .and_then(|width| width.checked_add(1))
+            .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+        let rows = usize::try_from(height)
+            .ok()
+            .and_then(|height| height.checked_add(1))
+            .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+        let sum_count = stride
+            .checked_mul(rows)
+            .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+        let mut sums = Vec::new();
+        sums.try_reserve_exact(sum_count)
+            .map_err(|_| NodeError::InvalidParameter("dimensions".to_owned()))?;
+        sums.resize(sum_count, [0.0; 4]);
+
+        for y in 0..usize::try_from(height).unwrap_or(0) {
+            for x in 0..usize::try_from(width).unwrap_or(0) {
+                let source_index = y
+                    .checked_mul(usize::try_from(width).unwrap_or(0))
+                    .and_then(|row| row.checked_add(x))
+                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+                let prefix_index = (y + 1)
+                    .checked_mul(stride)
+                    .and_then(|row| row.checked_add(x + 1))
+                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+                let above_index = y
+                    .checked_mul(stride)
+                    .and_then(|row| row.checked_add(x + 1))
+                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+                let left_index = (y + 1)
+                    .checked_mul(stride)
+                    .and_then(|row| row.checked_add(x))
+                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+                let diagonal_index = y
+                    .checked_mul(stride)
+                    .and_then(|row| row.checked_add(x))
+                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
+                let Some(&pixel) = image.pixels().get(source_index) else {
+                    return Err(NodeError::Message("image pixels are incomplete".to_owned()));
+                };
+                let Some(&above) = sums.get(above_index) else {
+                    return Err(NodeError::Message(
+                        "integral image dimensions overflowed".to_owned(),
+                    ));
+                };
+                let Some(&left) = sums.get(left_index) else {
+                    return Err(NodeError::Message(
+                        "integral image dimensions overflowed".to_owned(),
+                    ));
+                };
+                let Some(&diagonal) = sums.get(diagonal_index) else {
+                    return Err(NodeError::Message(
+                        "integral image dimensions overflowed".to_owned(),
+                    ));
+                };
+                let Some(slot) = sums.get_mut(prefix_index) else {
+                    return Err(NodeError::Message(
+                        "integral image dimensions overflowed".to_owned(),
+                    ));
+                };
+                *slot = std::array::from_fn(|channel| {
+                    pixel[channel] + above[channel] + left[channel] - diagonal[channel]
+                });
+            }
+        }
+
+        Ok(Self {
+            width,
+            height,
+            origin: image.origin(),
+            stride,
+            sums,
+            #[cfg(test)]
+            build_work_units: usize::try_from(width)
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(height)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
+                .unwrap_or(0),
+            #[cfg(test)]
+            query_work_units: Cell::new(0),
+        })
+    }
+
+    fn rectangle_sum(
+        &self,
+        x_start: usize,
+        x_end: usize,
+        y_start: usize,
+        y_end: usize,
+    ) -> [f32; 4] {
+        #[cfg(test)]
+        self.query_work_units
+            .set(self.query_work_units.get().saturating_add(1));
+
+        let top_left_index = y_start
+            .checked_mul(self.stride)
+            .and_then(|row| row.checked_add(x_start));
+        let top_right_index = y_start
+            .checked_mul(self.stride)
+            .and_then(|row| row.checked_add(x_end));
+        let bottom_left_index = y_end
+            .checked_mul(self.stride)
+            .and_then(|row| row.checked_add(x_start));
+        let bottom_right_index = y_end
+            .checked_mul(self.stride)
+            .and_then(|row| row.checked_add(x_end));
+        let (
+            Some(top_left_index),
+            Some(top_right_index),
+            Some(bottom_left_index),
+            Some(bottom_right_index),
+        ) = (
+            top_left_index,
+            top_right_index,
+            bottom_left_index,
+            bottom_right_index,
+        )
+        else {
+            return [0.0; 4];
+        };
+        let (Some(&top_left), Some(&top_right), Some(&bottom_left), Some(&bottom_right)) = (
+            self.sums.get(top_left_index),
+            self.sums.get(top_right_index),
+            self.sums.get(bottom_left_index),
+            self.sums.get(bottom_right_index),
+        ) else {
+            return [0.0; 4];
+        };
+        std::array::from_fn(|channel| {
+            bottom_right[channel] - top_right[channel] - bottom_left[channel] + top_left[channel]
+        })
+    }
+
+    fn average(&self, x: u32, y: u32, radius: u32) -> [f32; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [0.0; 4];
+        }
+        let radius = i64::from(radius);
+        let x_segments = AxisSegments::for_clamped_range(
+            i64::from(x).saturating_sub(radius),
+            i64::from(x).saturating_add(radius).saturating_add(1),
+            self.origin.0,
+            self.width,
+        );
+        let y_segments = AxisSegments::for_clamped_range(
+            i64::from(y).saturating_sub(radius),
+            i64::from(y).saturating_add(radius).saturating_add(1),
+            self.origin.1,
+            self.height,
+        );
+        let mut total = [0.0; 4];
+        for x_segment in x_segments.iter() {
+            for y_segment in y_segments.iter() {
+                let rectangle = self.rectangle_sum(
+                    x_segment.start,
+                    x_segment.end,
+                    y_segment.start,
+                    y_segment.end,
+                );
+                let repetitions = x_segment.repetitions.saturating_mul(y_segment.repetitions);
+                let repetitions = u32::try_from(repetitions)
+                    .map(|value| value as f32)
+                    .unwrap_or(f32::MAX);
+                for channel in 0..4 {
+                    total[channel] += rectangle[channel] * repetitions;
+                }
+            }
+        }
+        let side = radius
+            .saturating_mul(2)
+            .saturating_add(1)
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let count = side as f32 * side as f32;
+        total.map(|value| value / count)
+    }
+
+    #[cfg(test)]
+    fn build_work_units(&self) -> usize {
+        self.build_work_units
+    }
+
+    #[cfg(test)]
+    fn query_work_units(&self) -> usize {
+        self.query_work_units.get()
+    }
 }
 
 fn luminance([red, green, blue, _]: [f32; 4]) -> f32 {
@@ -422,8 +684,9 @@ fn evaluate_denoise(
     }
     let strength = bounded_float(parameters, "strength", 0.5, 0.0, 1.0)?;
     let preserve_detail = bounded_float(parameters, "preserve_detail", 0.5, 0.0, 1.0)?;
+    let integral = IntegralImage::new(image)?;
     let output = map_region(image, context, |x, y, pixel| {
-        let average = average_pixel(image, x, y, radius);
+        let average = integral.average(x, y, radius);
         let difference = [
             (pixel[0] - average[0]).abs(),
             (pixel[1] - average[1]).abs(),
@@ -453,6 +716,7 @@ fn evaluate_detail_separation(
         return Err(NodeError::InvalidParameter("radius".to_owned()));
     }
     let region = source_region(image, context);
+    let integral = IntegralImage::new(image)?;
     let mut base_pixels = Vec::with_capacity(checked_pixel_count(region)?);
     let mut detail_pixels = Vec::with_capacity(checked_pixel_count(region)?);
     for y in 0..region.height {
@@ -462,7 +726,7 @@ fn evaluate_detail_separation(
             let source = image.pixel_global(global_x, global_y).ok_or_else(|| {
                 NodeError::Message("requested region was outside the image".to_owned())
             })?;
-            let base = average_pixel(image, global_x, global_y, radius);
+            let base = integral.average(global_x, global_y, radius);
             base_pixels.push([base[0], base[1], base[2], source[3]]);
             detail_pixels.push([
                 source[0] - base[0],
@@ -498,10 +762,11 @@ fn evaluate_sharpen(
     let amount = bounded_float(parameters, "amount", 0.5, 0.0, 8.0)?;
     let threshold = bounded_float(parameters, "threshold", 0.0, 0.0, 1.0)?;
     let iterations = integer_parameter_value(parameters, "iterations", 1, 8)?;
+    let integral = IntegralImage::new(image)?;
     let output = map_region(image, context, |x, y, pixel| {
         let mut current = pixel;
         for _ in 0..iterations.max(1) {
-            let average = average_pixel(image, x, y, radius);
+            let average = integral.average(x, y, radius);
             let difference = [
                 current[0] - average[0],
                 current[1] - average[1],
@@ -530,8 +795,9 @@ fn evaluate_local_contrast(
 ) -> Result<NodeResult, NodeError> {
     let radius = integer_parameter_value(parameters, "radius", 4, MAX_RADIUS)?;
     let amount = bounded_float(parameters, "amount", 0.5, -4.0, 4.0)?;
+    let integral = IntegralImage::new(image)?;
     let output = map_region(image, context, |x, y, pixel| {
-        let average = average_pixel(image, x, y, radius);
+        let average = integral.average(x, y, radius);
         [
             pixel[0] + (pixel[0] - average[0]) * amount,
             pixel[1] + (pixel[1] - average[1]) * amount,
@@ -1037,8 +1303,9 @@ fn evaluate_halation(
     let amount = bounded_float(parameters, "amount", 0.2, 0.0, 4.0)?;
     let threshold = bounded_float(parameters, "threshold", 0.75, 0.0, 64.0)?;
     let radius = integer_parameter_value(parameters, "radius", 2, MAX_RADIUS)?;
+    let integral = IntegralImage::new(image)?;
     let output = map_region(image, context, |x, y, pixel| {
-        let average = average_pixel(image, x, y, radius);
+        let average = integral.average(x, y, radius);
         let excess = (luminance(average) - threshold).max(0.0);
         let halo = excess * amount;
         [
@@ -1059,8 +1326,9 @@ fn evaluate_bloom(
     let amount = bounded_float(parameters, "amount", 0.25, 0.0, 4.0)?;
     let threshold = bounded_float(parameters, "threshold", 0.75, 0.0, 64.0)?;
     let radius = integer_parameter_value(parameters, "radius", 3, MAX_RADIUS)?;
+    let integral = IntegralImage::new(image)?;
     let output = map_region(image, context, |x, y, pixel| {
-        let average = average_pixel(image, x, y, radius);
+        let average = integral.average(x, y, radius);
         let bright = (luminance(average) - threshold).max(0.0) * amount;
         [
             pixel[0] + average[0] * bright,
@@ -1266,13 +1534,14 @@ fn evaluate_noise(
             "cannot analyze an empty image".to_owned(),
         ));
     }
+    let integral = IntegralImage::new(image)?;
     let mut total = 0.0;
     let mut count = 0.0;
     for y in 0..region.height {
         for x in 0..region.width {
             let global_x = region.x + x;
             let global_y = region.y + y;
-            let average = average_pixel(image, global_x, global_y, radius);
+            let average = integral.average(global_x, global_y, radius);
             let difference = luminance(image.pixel_global(global_x, global_y).unwrap_or([0.0; 4]))
                 - luminance(average);
             total += difference * difference;
@@ -1831,5 +2100,86 @@ mod tests {
             .map(|descriptor| descriptor.type_id)
             .collect::<Vec<_>>();
         assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
+    fn neighborhood_test_image(width: u32, height: u32, origin: (u32, u32)) -> Image {
+        let pixels = (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    [
+                        ((x * 3 + y * 5) % 17) as f32 / 17.0,
+                        ((x * 7 + y * 2 + 1) % 19) as f32 / 19.0,
+                        ((x * 11 + y * 13 + 2) % 23) as f32 / 23.0,
+                        1.0,
+                    ]
+                })
+            })
+            .collect();
+        Image::from_pixels_with_origin(
+            rawweave_image::Dimensions::new(width, height),
+            origin,
+            pixels,
+            rawweave_image::PixelFormat::default(),
+            rawweave_image::ColorMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    fn naive_average_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
+        if radius == 0 {
+            return sample_nearest(image, i64::from(x), i64::from(y));
+        }
+        let radius = i64::from(radius);
+        let mut total = [0.0; 4];
+        let mut count = 0.0;
+        for offset_y in -radius..=radius {
+            for offset_x in -radius..=radius {
+                let pixel = sample_nearest(image, i64::from(x) + offset_x, i64::from(y) + offset_y);
+                for channel in 0..4 {
+                    total[channel] += pixel[channel];
+                }
+                count += 1.0;
+            }
+        }
+        total.map(|value| value / count)
+    }
+
+    #[test]
+    fn summed_area_averages_match_naive_reference_for_nonzero_origin() {
+        let image = neighborhood_test_image(9, 7, (17, 23));
+        let summed_area = IntegralImage::new(&image).unwrap();
+
+        for radius in [1, 2, 4] {
+            for y in 23..30 {
+                for x in 17..26 {
+                    let expected = naive_average_pixel(&image, x, y, radius);
+                    let actual = summed_area.average(x, y, radius);
+                    for channel in 0..4 {
+                        assert!(
+                            (actual[channel] - expected[channel]).abs() <= 1.0e-5,
+                            "radius={radius} coordinate=({x},{y}) channel={channel}: {actual:?} != {expected:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn summed_area_query_work_is_bounded_by_a_constant_per_pixel() {
+        let width = 64;
+        let height = 64;
+        let image = neighborhood_test_image(width, height, (31, 47));
+        let summed_area = IntegralImage::new(&image).unwrap();
+
+        for y in 47..(47 + height) {
+            for x in 31..(31 + width) {
+                let _ = summed_area.average(x, y, MAX_RADIUS);
+            }
+        }
+
+        let pixel_count = width as usize * height as usize;
+        assert_eq!(summed_area.build_work_units(), pixel_count);
+        assert!(summed_area.query_work_units() <= pixel_count * 9);
     }
 }
