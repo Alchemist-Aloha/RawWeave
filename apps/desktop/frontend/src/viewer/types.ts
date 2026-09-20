@@ -1,5 +1,6 @@
 export type ViewerId = 'A' | 'B';
 export type ViewerLayout = 'split' | 'side-by-side';
+export type ViewerComparison = 'side-by-side' | 'wipe' | 'blink' | 'difference';
 export type ViewerZoomMode = 'fit' | '100%' | 'custom';
 export type PreviewQuality = 'draft' | 'preview' | 'final';
 export type MaskDisplay = 'grayscale' | 'overlay';
@@ -75,5 +76,7 @@ export interface ViewerPaneState {
 export interface ViewerState {
   currentRevision: number;
   layout: ViewerLayout;
+  comparison: ViewerComparison;
+  clippingOverlay: boolean;
   panes: Record<ViewerId, ViewerPaneState>;
 }

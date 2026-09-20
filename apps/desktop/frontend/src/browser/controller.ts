@@ -1,4 +1,4 @@
-import type { BrowserEntry, BrowserFilter, BrowserSort, DirectoryPage, FileOperationResult } from './types';
+import type { BrowserEntry, BrowserFilter, BrowserLayout, BrowserSort, DirectoryPage, FileOperationResult } from './types';
 import type { BrowserSession } from './types';
 
 export interface BrowserPlatform {
@@ -19,7 +19,7 @@ export interface BrowserState {
   currentFolder: string;
   entries: BrowserEntry[];
   selectedPaths: string[];
-  view: { sort: BrowserSort; filter: BrowserFilter; thumbnailSize: 'small' | 'medium' | 'large' };
+  view: { sort: BrowserSort; filter: BrowserFilter; thumbnailSize: 'small' | 'medium' | 'large'; layout?: BrowserLayout };
   nextOffset: number | null;
   loading: boolean;
   error: string | null;
@@ -38,6 +38,7 @@ export class BrowserController {
       sort: { by: 'name', direction: 'asc' },
       filter: { query: '', rating: 'any', flag: 'any' },
       thumbnailSize: 'medium',
+      layout: 'grid',
     },
     nextOffset: null,
     loading: false,

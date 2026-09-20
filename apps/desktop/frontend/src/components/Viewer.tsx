@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { EditorNode, ParameterValue, SourceResult } from '../editor/types';
 import { MaskPainter } from '../mask/MaskPainter';
 import { ViewerController } from '../viewer/controller';
-import type { PreviewTarget, ViewerId, ViewerPaneState } from '../viewer/types';
+import type { PreviewTarget, ViewerComparison, ViewerId, ViewerPaneState } from '../viewer/types';
 
 interface ViewerProps {
   controller: ViewerController;
@@ -43,18 +43,48 @@ function targetKey(target: PreviewTarget): string {
   return `${target.nodeId}:${target.outputPort}`;
 }
 
-function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange }: {
+function TargetSelect({ viewer, pane, options, controller }: {
+  viewer: ViewerId;
+  pane: ViewerPaneState;
+  options: PreviewTarget[];
+  controller: ViewerController;
+}) {
+  const selectedKey = pane.target ? targetKey(pane.target) : '';
+  return (
+    <select
+      aria-label={`Viewer ${viewer} target`}
+      className="viewer-pane__target"
+      onChange={(event) => {
+        const next = options.find((option) => targetKey(option) === event.target.value) ?? null;
+        controller.setTarget(viewer, next);
+      }}
+      value={selectedKey}
+    >
+      <option value="">Select image output</option>
+      {options.map((option) => (
+        <option key={targetKey(option)} value={targetKey(option)}>
+          {option.nodeName} · {option.outputName}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, surface = false, clippingOverlay = false, className = '', style }: {
   viewer: ViewerId;
   pane: ViewerPaneState;
   options: PreviewTarget[];
   controller: ViewerController;
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
+  surface?: boolean;
+  clippingOverlay?: boolean;
+  className?: string;
+  style?: CSSProperties;
 }) {
   const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
-  const selectedKey = pane.target ? targetKey(pane.target) : '';
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -77,29 +107,16 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
   }, [controller, viewer]);
 
   return (
-    <article className="viewer-pane" aria-label={`Viewer ${viewer}`}>
-      <div className="viewer-pane__header">
-        <div>
-          <span className="eyebrow">Viewer {viewer}</span>
-          <strong>{pane.target ? `${pane.target.nodeName} · ${pane.target.outputName}` : 'No target selected'}</strong>
+    <article aria-label={`Viewer ${viewer}`} className={`viewer-pane${surface ? ' viewer-pane--surface' : ''}${className ? ` ${className}` : ''}`} style={style}>
+      {!surface && (
+        <div className="viewer-pane__header">
+          <div>
+            <span className="eyebrow">Viewer {viewer}</span>
+            <strong>{pane.target ? `${pane.target.nodeName} · ${pane.target.outputName}` : 'No target selected'}</strong>
+          </div>
+          <TargetSelect controller={controller} options={options} pane={pane} viewer={viewer} />
         </div>
-        <select
-          aria-label={`Viewer ${viewer} target`}
-          className="viewer-pane__target"
-          onChange={(event) => {
-            const next = options.find((option) => targetKey(option) === event.target.value) ?? null;
-            controller.setTarget(viewer, next);
-          }}
-          value={selectedKey}
-        >
-          <option value="">Select image output</option>
-          {options.map((option) => (
-            <option key={targetKey(option)} value={targetKey(option)}>
-              {option.nodeName} · {option.outputName}
-            </option>
-          ))}
-        </select>
-      </div>
+      )}
       <div
         className="viewer-pane__stage"
         ref={stageRef}
@@ -147,6 +164,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             {pane.status === 'loading' ? 'Rendering preview…' : 'Select an intermediate node output'}
           </div>
         )}
+        {clippingOverlay && <div aria-label={`Viewer ${viewer} clipping overlay`} className="viewer-pane__clipping-overlay" role="img" />}
         {pane.status === 'loading' && (
           <div className="viewer-pane__progress" role="status">
             <span>Rendering {Math.round(pane.progress * 100)}%</span>
@@ -164,7 +182,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
           />
         )}
       </div>
-      <div className="viewer-pane__controls">
+      {!surface && <div className="viewer-pane__controls">
         <button onClick={() => controller.fitToWindow(viewer)} type="button">Fit</button>
         <button onClick={() => controller.viewAt100(viewer)} type="button">100%</button>
         <button aria-label={`Zoom out Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, -1)} type="button">−</button>
@@ -191,17 +209,102 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
           </div>
         )}
         {pane.status === 'loading' && <button onClick={() => void controller.cancel(viewer)} type="button">Cancel</button>}
-      </div>
+      </div>}
     </article>
+  );
+}
+
+function ComparisonSurface({
+  comparison,
+  controller,
+  options,
+  clippingOverlay,
+  onWipePositionChange,
+  wipePosition,
+  blinkViewer,
+  paintedNode,
+  onPaintedMaskChange,
+}: {
+  comparison: Exclude<ViewerComparison, 'side-by-side'>;
+  controller: ViewerController;
+  options: PreviewTarget[];
+  clippingOverlay: boolean;
+  onWipePositionChange: (position: number) => void;
+  wipePosition: number;
+  blinkViewer: ViewerId;
+  paintedNode?: EditorNode;
+  onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
+}) {
+  const paneA = controller.state.panes.A;
+  const paneB = controller.state.panes.B;
+  const visiblePane = comparison === 'blink' ? blinkViewer : null;
+  return (
+    <div aria-label={`${comparison} comparison`} className={`viewer-comparison viewer-comparison--${comparison}`}>
+      <div className="viewer-comparison__selectors">
+        <label><span>Viewer A</span><TargetSelect controller={controller} options={options} pane={paneA} viewer="A" /></label>
+        <label><span>Viewer B</span><TargetSelect controller={controller} options={options} pane={paneB} viewer="B" /></label>
+      </div>
+      <Pane
+        className="viewer-pane--comparison-a"
+        clippingOverlay={clippingOverlay}
+        controller={controller}
+        onPaintedMaskChange={onPaintedMaskChange}
+        options={options}
+        paintedNode={paintedNode}
+        pane={paneA}
+        surface
+        style={visiblePane === 'B' ? { visibility: 'hidden' } : undefined}
+        viewer="A"
+      />
+      <Pane
+        className="viewer-pane--comparison-b"
+        clippingOverlay={clippingOverlay}
+        controller={controller}
+        onPaintedMaskChange={onPaintedMaskChange}
+        options={options}
+        paintedNode={paintedNode}
+        pane={paneB}
+        surface
+        style={{
+          clipPath: comparison === 'wipe' ? `inset(0 ${100 - wipePosition}% 0 0)` : undefined,
+          visibility: visiblePane === 'A' ? 'hidden' : undefined,
+        }}
+        viewer="B"
+      />
+      {comparison === 'wipe' && (
+        <label className="viewer-comparison__wipe">
+          <span className="sr-only">Wipe position</span>
+          <input
+            aria-label="Wipe position"
+            max="100"
+            min="0"
+            onChange={(event) => onWipePositionChange(Number(event.target.value))}
+            type="range"
+            value={wipePosition}
+          />
+        </label>
+      )}
+      {comparison === 'blink' && <span aria-live="polite" className="viewer-comparison__status">Showing Viewer {blinkViewer}</span>}
+    </div>
   );
 }
 
 export function Viewer({ controller, nodes, revision, source, paintedNode, onPaintedMaskChange }: ViewerProps) {
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
+  const [wipePosition, setWipePosition] = useState(50);
+  const [blinkViewer, setBlinkViewer] = useState<ViewerId>('A');
 
   useEffect(() => controller.subscribe(() => setRender((value) => value + 1)), [controller]);
   useEffect(() => controller.setRevision(revision), [controller, revision]);
+  useEffect(() => {
+    if (controller.state.comparison !== 'blink') {
+      setBlinkViewer('A');
+      return;
+    }
+    const timer = window.setInterval(() => setBlinkViewer((viewer) => (viewer === 'A' ? 'B' : 'A')), 450);
+    return () => window.clearInterval(timer);
+  }, [controller.state.comparison]);
   useEffect(() => {
     if (source?.kind !== 'raw') {
       controller.clearTargets();
@@ -229,25 +332,62 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             Split
           </button>
         </div>
+        <div aria-label="Viewer comparison" className="viewer-section__comparison" role="group">
+          {(['side-by-side', 'wipe', 'blink', 'difference'] as ViewerComparison[]).map((comparison) => (
+            <button
+              aria-pressed={controller.state.comparison === comparison}
+              className={controller.state.comparison === comparison ? 'is-active' : ''}
+              key={comparison}
+              onClick={() => controller.setComparison(comparison)}
+              type="button"
+            >
+              {comparison === 'side-by-side' ? 'A / B' : comparison[0].toUpperCase() + comparison.slice(1)}
+            </button>
+          ))}
+          <label className="viewer-section__clipping">
+            <input
+              checked={controller.state.clippingOverlay}
+              onChange={(event) => controller.setClippingOverlay(event.target.checked)}
+              type="checkbox"
+            />
+            Clipping
+          </label>
+        </div>
       </div>
-      <div className={`viewer-grid viewer-grid--${controller.state.layout}`}>
-        <Pane
+      {controller.state.comparison === 'side-by-side' ? (
+        <div className={`viewer-grid viewer-grid--${controller.state.layout}`}>
+          <Pane
+            clippingOverlay={controller.state.clippingOverlay}
+            controller={controller}
+            onPaintedMaskChange={onPaintedMaskChange}
+            options={options}
+            paintedNode={paintedNode}
+            pane={controller.state.panes.A}
+            viewer="A"
+          />
+          <Pane
+            clippingOverlay={controller.state.clippingOverlay}
+            controller={controller}
+            onPaintedMaskChange={onPaintedMaskChange}
+            options={options}
+            paintedNode={paintedNode}
+            pane={controller.state.panes.B}
+            viewer="B"
+          />
+        </div>
+      ) : (
+        <ComparisonSurface
+          blinkViewer={blinkViewer}
+          clippingOverlay={controller.state.clippingOverlay}
+          comparison={controller.state.comparison}
           controller={controller}
           onPaintedMaskChange={onPaintedMaskChange}
+          onWipePositionChange={setWipePosition}
           options={options}
           paintedNode={paintedNode}
-          pane={controller.state.panes.A}
-          viewer="A"
+          wipePosition={wipePosition}
         />
-        <Pane
-          controller={controller}
-          onPaintedMaskChange={onPaintedMaskChange}
-          options={options}
-          paintedNode={paintedNode}
-          pane={controller.state.panes.B}
-          viewer="B"
-        />
-      </div>
+      )}
     </section>
   );
 }

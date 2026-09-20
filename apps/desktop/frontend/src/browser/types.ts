@@ -8,6 +8,7 @@ export type BrowserSortBy = 'name' | 'modified' | 'size' | 'rating';
 export type BrowserSortDirection = 'asc' | 'desc';
 export type BrowserRatingFilter = 'any' | 'rated' | 'unrated';
 export type BrowserFlagFilter = 'any' | BrowserFlag;
+export type BrowserLayout = 'grid' | 'list';
 
 export interface BrowserSort {
   by: BrowserSortBy;
@@ -102,6 +103,7 @@ export interface BrowserViewSettings {
   sort: BrowserSort;
   filter: BrowserFilter;
   thumbnailSize: 'small' | 'medium' | 'large';
+  layout?: BrowserLayout;
 }
 
 export interface WorkingQueueSession {

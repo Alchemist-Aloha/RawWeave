@@ -217,7 +217,27 @@ describe('BrowserQueue', () => {
     expect(changes[0]?.collections[0]?.members.map((member) => member.path)).toEqual(['/photos/one.jpg']);
   });
 
-  it('edits current workflow parameters per image and exposes override actions', async () => {
+  it('supports list mode and fast rating shortcuts for the current preview', async () => {
+    const view = await renderQueue(fakePlatform());
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Select one.jpg"]')?.click();
+    });
+
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="List view"]')?.click();
+    });
+    expect(view.querySelector('.browser-grid--list')).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '5', bubbles: true }));
+    });
+    expect(view.querySelector('[aria-label="Set 5 stars for one.jpg"]')?.classList.contains('is-active')).toBe(true);
+  });
+
+  it('edits current workflow parameters and exposes override actions', async () => {
     const promoted: Record<string, unknown>[] = [];
     const workflowParameters: WorkflowParameter[] = [{
       id: 'exposure:enabled',

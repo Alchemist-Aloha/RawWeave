@@ -6,6 +6,7 @@ import type {
   ViewerId,
   ViewerPaneState,
   ViewerState,
+  ViewerComparison,
 } from './types';
 import type { PreviewTransport } from './transport';
 
@@ -91,6 +92,8 @@ export class ViewerController {
   public state: ViewerState = {
     currentRevision: 0,
     layout: 'side-by-side',
+    comparison: 'side-by-side',
+    clippingOverlay: false,
     panes: { A: paneState(), B: paneState() },
   };
 
@@ -210,6 +213,22 @@ export class ViewerController {
   public setLayout(layout: ViewerState['layout']): void {
     if (layout === this.state.layout) return;
     this.state = { ...this.state, layout };
+    this.publish();
+  }
+
+  public setComparison(comparison: ViewerComparison): void {
+    if (comparison === this.state.comparison) return;
+    this.state = {
+      ...this.state,
+      comparison,
+      layout: comparison === 'side-by-side' ? this.state.layout : 'side-by-side',
+    };
+    this.publish();
+  }
+
+  public setClippingOverlay(enabled: boolean): void {
+    if (enabled === this.state.clippingOverlay) return;
+    this.state = { ...this.state, clippingOverlay: enabled };
     this.publish();
   }
 

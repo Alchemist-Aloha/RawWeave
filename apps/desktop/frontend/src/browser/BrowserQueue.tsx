@@ -109,6 +109,7 @@ export function BrowserQueue({
   const [localImageSets, setLocalImageSets] = useState<ImageSetCollection[]>([]);
   const [localActiveImageSetId, setLocalActiveImageSetId] = useState<string | null>(null);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [queueDropActive, setQueueDropActive] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const imageSets = providedImageSets ?? localImageSets;
@@ -209,6 +210,7 @@ export function BrowserQueue({
   const currentOverrideCount = currentQueueItem ? Object.keys(currentQueueItem.overrides).length : 0;
   const testSetCount = queue.items.filter((item) => item.testSet).length;
   const breadcrumbs = breadcrumbSegments(browser.currentFolder);
+  const browserLayout = browser.view.layout ?? 'grid';
 
   const run = useCallback(async (action: () => Promise<void>) => {
     try {
@@ -294,6 +296,30 @@ export function BrowserQueue({
       queueController.updateSourceMarks(path, rating, flag);
     });
   }, [browserController, queueController, run]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (typeof target?.closest === 'function' && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const path = previewPath ?? queue.currentPath ?? browser.selectedPaths.at(-1);
+      if (!path) return;
+      const entry = browser.entries.find((candidate) => candidate.path === path);
+      if (!entry || entry.kind !== 'file') return;
+      if (/^[0-5]$/.test(event.key)) {
+        event.preventDefault();
+        const rating = Number(event.key);
+        mark(path, rating === 0 ? null : rating, entry.flag);
+      } else if (event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        mark(path, entry.rating, entry.flag === 'pick' ? 'none' : 'pick');
+      } else if (event.key.toLowerCase() === 'x') {
+        event.preventDefault();
+        mark(path, entry.rating, entry.flag === 'reject' ? 'none' : 'reject');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [browser.entries, browser.selectedPaths, mark, previewPath, queue.currentPath]);
 
   const toggleTestSet = useCallback((path: string, included: boolean) => {
     queueController.setTestSet([path], included);
@@ -382,6 +408,35 @@ export function BrowserQueue({
                 <option value="unrated">Unrated</option>
               </select>
             </label>
+            <label>
+              <span className="sr-only">Filter flag</span>
+              <select aria-label="Filter flag" onChange={(event) => browserController.setView({ filter: { ...browser.view.filter, flag: event.target.value as BrowserState['view']['filter']['flag'] } })} value={browser.view.filter.flag}>
+                <option value="any">Any flag</option>
+                <option value="pick">Picks</option>
+                <option value="reject">Rejects</option>
+                <option value="none">Unflagged</option>
+              </select>
+            </label>
+            <button
+              aria-label={`Sort ${browser.view.sort.direction === 'asc' ? 'descending' : 'ascending'}`}
+              className="button button--quiet"
+              onClick={() => browserController.setView({ sort: { ...browser.view.sort, direction: browser.view.sort.direction === 'asc' ? 'desc' : 'asc' } })}
+              type="button"
+            >
+              {browser.view.sort.direction === 'asc' ? '↑' : '↓'}
+            </button>
+            <div aria-label="Browser view" className="browser-view-toggle" role="group">
+              <button aria-label="Grid view" aria-pressed={browserLayout === 'grid'} className={browserLayout === 'grid' ? 'is-active' : ''} onClick={() => browserController.setView({ layout: 'grid' })} type="button">Grid</button>
+              <button aria-label="List view" aria-pressed={browserLayout === 'list'} className={browserLayout === 'list' ? 'is-active' : ''} onClick={() => browserController.setView({ layout: 'list' })} type="button">List</button>
+            </div>
+            <label>
+              <span className="sr-only">Thumbnail size</span>
+              <select aria-label="Thumbnail size" onChange={(event) => browserController.setView({ thumbnailSize: event.target.value as BrowserState['view']['thumbnailSize'] })} value={browser.view.thumbnailSize}>
+                <option value="small">Small</option>
+                <option value="medium">Medium</option>
+                <option value="large">Large</option>
+              </select>
+            </label>
             <button aria-label="Add selected to queue" className="button button--primary" disabled={browser.selectedPaths.length === 0} onClick={addSelection} type="button">
               Add {browser.selectedPaths.length || ''} to queue
             </button>
@@ -405,7 +460,7 @@ export function BrowserQueue({
             </button>
           </div>
           {browser.error && <p className="browser-error">{browser.error}</p>}
-          <div className="browser-grid">
+          <div className={`browser-grid browser-grid--${browserLayout} browser-grid--${browser.view.thumbnailSize}`}>
             {!browser.currentFolder && <p className="empty-state">Choose a folder to browse photographs.</p>}
             {browser.currentFolder && visibleEntries.length === 0 && <p className="empty-state">Folder is empty</p>}
             {visibleEntries.map((entry) => {
@@ -414,8 +469,17 @@ export function BrowserQueue({
                 <article className={`browser-tile${selected ? ' is-selected' : ''}`} key={entry.path}>
                   <button
                     aria-label={entry.kind === 'directory' ? `Open folder ${entry.name}` : `Select ${entry.name}`}
+                    aria-pressed={entry.kind === 'file' ? selected : undefined}
                     className="browser-tile__open"
+                    draggable={entry.kind === 'file'}
                     onClick={(event) => selectEntry(event, entry)}
+                    onDragStart={(event) => {
+                      if (entry.kind === 'file') {
+                        event.dataTransfer.effectAllowed = 'copy';
+                        event.dataTransfer.setData('text/rawweave-path', entry.path);
+                      }
+                    }}
+                    onDragEnd={() => setQueueDropActive(false)}
                     type="button"
                   >
                     {entry.thumbnail ? <img alt="" src={entry.thumbnail} /> : <span className="browser-tile__placeholder">{entry.kind === 'directory' ? '▰' : '◌'}</span>}
@@ -424,9 +488,9 @@ export function BrowserQueue({
                   </button>
                   {entry.kind === 'file' && (
                     <div className="browser-tile__marks">
-                      <button aria-label={`Set 5 stars for ${entry.name}`} className={entry.rating === 5 ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating === 5 ? null : 5, entry.flag)} type="button">★</button>
-                      <button aria-label={`Mark ${entry.name} as pick`} className={entry.flag === 'pick' ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'pick' ? 'none' : 'pick')} type="button">✓</button>
-                      <button aria-label={`Mark ${entry.name} as reject`} className={entry.flag === 'reject' ? 'is-active is-reject' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'reject' ? 'none' : 'reject')} type="button">×</button>
+                      <button aria-label={`Set 5 stars for ${entry.name}`} aria-pressed={entry.rating === 5} className={entry.rating === 5 ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating === 5 ? null : 5, entry.flag)} type="button">★</button>
+                      <button aria-label={`Mark ${entry.name} as pick`} aria-pressed={entry.flag === 'pick'} className={entry.flag === 'pick' ? 'is-active' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'pick' ? 'none' : 'pick')} type="button">✓</button>
+                      <button aria-label={`Mark ${entry.name} as reject`} aria-pressed={entry.flag === 'reject'} className={entry.flag === 'reject' ? 'is-active is-reject' : ''} onClick={() => mark(entry.path, entry.rating, entry.flag === 'reject' ? 'none' : 'reject')} type="button">×</button>
                     </div>
                   )}
                 </article>
@@ -435,7 +499,31 @@ export function BrowserQueue({
           </div>
         </section>
 
-        <aside aria-label="Working Queue" className="queue-panel">
+        <aside
+          aria-label="Working Queue"
+          className={`queue-panel${queueDropActive ? ' queue-panel--drop-target' : ''}`}
+          onDragEnter={(event) => {
+            if (event.dataTransfer.types.includes('text/rawweave-path')) setQueueDropActive(true);
+          }}
+          onDragLeave={() => setQueueDropActive(false)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            if (event.dataTransfer.types.includes('text/rawweave-path')) {
+              event.dataTransfer.dropEffect = 'copy';
+              setQueueDropActive(true);
+            }
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setQueueDropActive(false);
+            const path = event.dataTransfer.getData('text/rawweave-path');
+            const entry = browser.entries.find((candidate) => candidate.path === path && candidate.kind === 'file');
+            if (entry) {
+              queueController.addSelection([entry], workflowBinding);
+              openPreview(entry.path);
+            }
+          }}
+        >
           <header className="queue-panel__heading">
             <div>
               <span className="eyebrow">Working Queue</span>

@@ -114,6 +114,20 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.B.pan).toEqual({ x: 18, y: -6 });
   });
 
+  it('stores comparison and clipping display modes independently from render targets', () => {
+    const viewer = new ViewerController(new FakeTransport());
+    viewer.setTarget('A', target('before', 'Before'));
+    viewer.setTarget('B', target('after', 'After'));
+
+    viewer.setComparison('difference');
+    viewer.setClippingOverlay(true);
+
+    expect(viewer.state.comparison).toBe('difference');
+    expect(viewer.state.clippingOverlay).toBe(true);
+    expect(viewer.state.panes.A.target).toEqual(target('before', 'Before'));
+    expect(viewer.state.panes.B.target).toEqual(target('after', 'After'));
+  });
+
   it('reports progress while a target is rendering', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);

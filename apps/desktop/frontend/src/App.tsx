@@ -33,6 +33,7 @@ import { AiProviderManager } from './components/AiProviderManager';
 import { createTauriHostManager } from './platform/hosts';
 import { CheckpointController } from './checkpoint/controller';
 import { createCheckpointPlatform } from './platform/checkpoint';
+import { shortcutAction } from './ui/shortcuts';
 
 const nodeTypes = { rawweave: GraphNode };
 
@@ -222,6 +223,7 @@ export default function App() {
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
+  const nodeSearchInput = useRef<HTMLInputElement>(null);
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
   const refreshEditorDescriptors = useCallback(
@@ -645,6 +647,38 @@ export default function App() {
     }
   }, [isTauri, openImagePath, platform]);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = shortcutAction(event);
+      if (!action) return;
+      const target = event.target as HTMLElement | null;
+      const editingText = typeof target?.closest === 'function'
+        && target.closest('input, textarea, select, [contenteditable="true"]');
+      if (editingText && !event.ctrlKey && !event.metaKey) return;
+      if (action === 'focus-node-search') {
+        event.preventDefault();
+        nodeSearchInput.current?.focus();
+      } else if (action === 'open-image') {
+        event.preventDefault();
+        void openImage();
+      } else if (action === 'open-workflow') {
+        event.preventDefault();
+        fileInput.current?.click();
+      } else if (action === 'save-workflow') {
+        event.preventDefault();
+        void controller.saveWorkflow().then(downloadWorkflow).catch(() => undefined);
+      } else if (action === 'delete-selection' && controller.state.selectedNodeIds.length > 0) {
+        event.preventDefault();
+        const selectedNodeIds = [...controller.state.selectedNodeIds];
+        void (async () => {
+          for (const nodeId of selectedNodeIds) await controller.removeNode(nodeId);
+        })().catch(() => undefined);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [controller, fileInput, nodeSearchInput, openImage]);
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -750,6 +784,7 @@ export default function App() {
           descriptors={controller.state.descriptors}
           onAdd={(typeId) => void controller.createNode(typeId).catch(() => undefined)}
           onCreateSubgraph={() => setShowSubgraphForm(true)}
+          searchInputRef={nodeSearchInput}
           selectedCount={controller.state.selectedNodeIds.length}
         />
         <section className="canvas-panel">

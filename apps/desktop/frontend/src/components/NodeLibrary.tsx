@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type RefObject } from 'react';
 import type { NodeDescriptor } from '../editor/types';
 
 interface NodeLibraryProps {
@@ -6,17 +6,30 @@ interface NodeLibraryProps {
   onAdd: (typeId: string) => void;
   selectedCount?: number;
   onCreateSubgraph?: () => void;
+  searchInputRef?: RefObject<HTMLInputElement | null>;
+  compatibleDataTypes?: string[];
 }
 
-export function NodeLibrary({ descriptors, onAdd, selectedCount = 0, onCreateSubgraph }: NodeLibraryProps) {
+export function NodeLibrary({
+  descriptors,
+  onAdd,
+  selectedCount = 0,
+  onCreateSubgraph,
+  searchInputRef,
+  compatibleDataTypes,
+}: NodeLibraryProps) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
-    if (!normalized) return descriptors;
-    return descriptors.filter((descriptor) =>
-      `${descriptor.name} ${descriptor.typeId}`.toLowerCase().includes(normalized),
-    );
-  }, [descriptors, query]);
+    const compatible = compatibleDataTypes && compatibleDataTypes.length > 0
+      ? new Set(compatibleDataTypes)
+      : null;
+    return descriptors.filter((descriptor) => {
+      if (normalized && !`${descriptor.name} ${descriptor.typeId}`.toLowerCase().includes(normalized)) return false;
+      if (compatible && !descriptor.inputs.some((input) => compatible.has(input.dataType))) return false;
+      return true;
+    });
+  }, [compatibleDataTypes, descriptors, query]);
 
   return (
     <aside className="panel panel--library">
@@ -30,12 +43,26 @@ export function NodeLibrary({ descriptors, onAdd, selectedCount = 0, onCreateSub
       <label className="search-field">
         <span className="sr-only">Search nodes</span>
         <input
-          value={query}
+          aria-describedby="node-library-hint"
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && filtered[0]) {
+              event.preventDefault();
+              onAdd(filtered[0].typeId);
+            }
+          }}
           placeholder="Search nodes"
+          ref={searchInputRef}
           type="search"
+          value={query}
         />
       </label>
+      <div className="node-library__toolbar">
+        <span id="node-library-hint">Enter adds the first result · ⌘K focuses search</span>
+        {compatibleDataTypes && compatibleDataTypes.length > 0 && (
+          <span aria-label="Compatible nodes only" className="filter-chip">Compatible</span>
+        )}
+      </div>
       <div className="node-library">
         {filtered.map((descriptor) => (
           <button
