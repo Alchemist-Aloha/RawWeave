@@ -293,6 +293,154 @@ fn generic_http_provider_fixture_supports_submit_poll_and_result() {
 }
 
 #[test]
+fn generic_http_provider_builds_manifest_mapped_json_and_multipart_fields() {
+    let transport =
+        FixtureHttp::with_responses(vec![HttpResponse::bytes(200, vec![9, 8, 7], "image/png")]);
+    let mut manifest = HttpProviderManifest::new(
+        "http-fixture",
+        "HTTP Fixture",
+        HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+    );
+    manifest.submit.json_fields = BTreeMap::from([
+        ("prompt".to_owned(), "$PROMPT".to_owned()),
+        ("strength".to_owned(), "$STRENGTH".to_owned()),
+    ]);
+    manifest.submit.multipart_fields = BTreeMap::from([("image".to_owned(), "$IMAGE".to_owned())]);
+    let provider = HttpProvider::new(manifest, transport.clone(), |_reference| Ok(None)).unwrap();
+    let mut request = request("http-fixture");
+    request.inputs.insert(
+        "image".to_owned(),
+        rawweave_ai_provider::AiInput::Image(
+            AiImage::new(vec![1, 2, 3], [1, 1], ColorInterchange::png_srgb()).unwrap(),
+        ),
+    );
+    request.inputs.insert(
+        "prompt".to_owned(),
+        rawweave_ai_provider::AiInput::Text("new prompt".to_owned()),
+    );
+    request.parameters.insert("strength".to_owned(), json!(0.7));
+
+    provider.submit(&request).unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .headers
+            .get("Content-Type")
+            .is_some_and(|value| value.starts_with("multipart/form-data; boundary="))
+    );
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(requests[0].body.windows(2).any(|window| window == b"\r\n"));
+    assert!(body.contains("name=\"prompt\""));
+    assert!(body.contains("new prompt"));
+    assert!(body.contains("name=\"strength\""));
+    assert!(body.contains("0.7"));
+    assert!(
+        requests[0]
+            .body
+            .windows(3)
+            .any(|window| window == [1, 2, 3])
+    );
+}
+
+#[test]
+fn generic_http_provider_builds_manifest_mapped_json_body() {
+    let transport =
+        FixtureHttp::with_responses(vec![HttpResponse::bytes(200, vec![9, 8, 7], "image/png")]);
+    let mut manifest = HttpProviderManifest::new(
+        "http-fixture",
+        "HTTP Fixture",
+        HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+    );
+    manifest.submit.json_fields = BTreeMap::from([
+        ("prompt".to_owned(), "$PROMPT".to_owned()),
+        ("strength".to_owned(), "$STRENGTH".to_owned()),
+    ]);
+    let provider = HttpProvider::new(manifest, transport.clone(), |_reference| Ok(None)).unwrap();
+    let mut request = request("http-fixture");
+    request.inputs.insert(
+        "prompt".to_owned(),
+        rawweave_ai_provider::AiInput::Text("new prompt".to_owned()),
+    );
+    request.parameters.insert("strength".to_owned(), json!(0.7));
+
+    provider.submit(&request).unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["prompt"], "new prompt");
+    assert_eq!(body["strength"], json!(0.7));
+}
+
+#[test]
+fn generic_http_provider_percent_encodes_job_ids_in_endpoint_urls() {
+    let transport = FixtureHttp::with_responses(vec![
+        HttpResponse::json(202, json!({"id": "job/a?x=1"})),
+        HttpResponse::json(200, json!({"status": "completed"})),
+        HttpResponse::bytes(200, vec![9, 8, 7], "image/png"),
+    ]);
+    let mut manifest = HttpProviderManifest::new(
+        "http-fixture",
+        "HTTP Fixture",
+        HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+    );
+    manifest.status = Some(HttpEndpoint::new(
+        HttpMethod::Get,
+        "https://example.test/jobs/$JOB_ID",
+    ));
+    manifest.result = Some(HttpEndpoint::new(
+        HttpMethod::Get,
+        "https://example.test/jobs/$JOB_ID/result",
+    ));
+    manifest.job_id_path = Some("$.id".to_owned());
+    let provider = HttpProvider::new(manifest, transport.clone(), |_reference| Ok(None)).unwrap();
+    let submitted = provider.submit(&request("http-fixture")).unwrap();
+    provider.status(&submitted.task_id).unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests[1].url, "https://example.test/jobs/job%2Fa%3Fx%3D1");
+}
+
+#[test]
+fn generic_http_provider_fetches_result_url_extracted_from_json() {
+    let transport = FixtureHttp::with_responses(vec![
+        HttpResponse::json(202, json!({"id": "remote-1"})),
+        HttpResponse::json(200, json!({"status": "completed"})),
+        HttpResponse::json(
+            200,
+            json!({"output": {"image": "https://cdn.example.test/result.png"}}),
+        ),
+        HttpResponse::bytes(200, vec![4, 5, 6], "image/png"),
+    ]);
+    let mut manifest = HttpProviderManifest::new(
+        "http-fixture",
+        "HTTP Fixture",
+        HttpEndpoint::new(HttpMethod::Post, "https://example.test/submit"),
+    );
+    manifest.status = Some(HttpEndpoint::new(
+        HttpMethod::Get,
+        "https://example.test/jobs/$JOB_ID",
+    ));
+    manifest.result = Some(HttpEndpoint::new(
+        HttpMethod::Get,
+        "https://example.test/jobs/$JOB_ID/result",
+    ));
+    manifest.job_id_path = Some("$.id".to_owned());
+    manifest.result_path = Some("$.output.image".to_owned());
+    let provider = HttpProvider::new(manifest, transport.clone(), |_reference| Ok(None)).unwrap();
+    let submitted = provider.submit(&request("http-fixture")).unwrap();
+    provider.status(&submitted.task_id).unwrap();
+    assert_eq!(
+        provider.result(&submitted.task_id).unwrap().bytes(),
+        Some(&[4, 5, 6][..])
+    );
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests[3].url, "https://cdn.example.test/result.png");
+}
+
+#[test]
 fn comfyui_fixture_uses_authoritative_history_and_view_endpoints() {
     let transport = FixtureHttp::with_responses(vec![
         HttpResponse::json(200, json!({"prompt_id": "prompt-1"})),

@@ -746,6 +746,12 @@ pub struct HttpEndpoint {
     pub url: String,
     #[serde(default)]
     pub headers: BTreeMap<String, HeaderValue>,
+    /// JSON body field name to a request value placeholder, such as `$PROMPT`.
+    #[serde(default, rename = "json", alias = "json_fields")]
+    pub json_fields: BTreeMap<String, String>,
+    /// Multipart field name to a request value placeholder, such as `$IMAGE`.
+    #[serde(default, rename = "multipart", alias = "multipart_fields")]
+    pub multipart_fields: BTreeMap<String, String>,
 }
 
 impl HttpEndpoint {
@@ -754,6 +760,8 @@ impl HttpEndpoint {
             method,
             url: url.into(),
             headers: BTreeMap::new(),
+            json_fields: BTreeMap::new(),
+            multipart_fields: BTreeMap::new(),
         }
     }
 }
@@ -926,6 +934,9 @@ fn validate_json_path(path: Option<&str>, field: &str) -> Result<(), ProviderErr
     let Some(path) = path else {
         return Ok(());
     };
+    if path == "$" {
+        return Ok(());
+    }
     let Some(path) = path.strip_prefix("$.") else {
         return Err(ProviderError::InvalidRequest(format!(
             "HTTP manifest {field} must start with $."
@@ -937,6 +948,25 @@ fn validate_json_path(path: Option<&str>, field: &str) -> Result<(), ProviderErr
         )));
     }
     Ok(())
+}
+
+fn percent_encode_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
+}
+
+fn replace_job_id(url: &str, job_id: Option<&str>) -> String {
+    let encoded = job_id.map(percent_encode_component).unwrap_or_default();
+    url.replace("$JOB_ID", &encoded)
 }
 
 fn sensitive_header(name: &str) -> bool {
@@ -1066,6 +1096,31 @@ fn validate_endpoint(
             _ => {}
         }
     }
+    validate_field_mappings(&endpoint.json_fields, "JSON")?;
+    validate_field_mappings(&endpoint.multipart_fields, "multipart")?;
+    Ok(())
+}
+
+fn validate_field_mappings(
+    mappings: &BTreeMap<String, String>,
+    kind: &str,
+) -> Result<(), ProviderError> {
+    for (name, source) in mappings {
+        if name.trim().is_empty()
+            || name
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+        {
+            return Err(ProviderError::InvalidRequest(format!(
+                "HTTP {kind} field names must be non-empty and printable"
+            )));
+        }
+        if source.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidRequest(format!(
+                "HTTP {kind} field mappings must not contain control characters"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1144,6 +1199,240 @@ pub trait HttpTransport: Send + Sync {
 
 type SecretResolver = Arc<dyn Fn(&str) -> Result<Option<String>, ProviderError> + Send + Sync>;
 
+enum ResolvedField {
+    Value(Value),
+    File {
+        bytes: Vec<u8>,
+        filename: String,
+        media_type: &'static str,
+    },
+}
+
+enum MultipartValue {
+    Text(String),
+    File {
+        bytes: Vec<u8>,
+        filename: String,
+        media_type: &'static str,
+    },
+}
+
+fn find_input<'a>(request: &'a SubmitRequest, name: &str) -> Option<&'a AiInput> {
+    request.inputs.get(name).or_else(|| {
+        request
+            .inputs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    })
+}
+
+fn first_input<F>(request: &SubmitRequest, predicate: F) -> Option<&AiInput>
+where
+    F: Fn(&AiInput) -> bool,
+{
+    request.inputs.values().find(|input| predicate(input))
+}
+
+fn required_input<'a>(
+    request: &'a SubmitRequest,
+    name: &str,
+) -> Result<&'a AiInput, ProviderError> {
+    find_input(request, name)
+        .or_else(|| {
+            let predicate: fn(&AiInput) -> bool = match name {
+                "image" => |input| matches!(input, AiInput::Image(_)),
+                "mask" => |input| matches!(input, AiInput::Mask(_)),
+                "prompt" => |input| matches!(input, AiInput::Text(_)),
+                _ => |_| false,
+            };
+            first_input(request, predicate)
+        })
+        .ok_or_else(|| {
+            ProviderError::InvalidRequest(format!("HTTP request input '{name}' is not available"))
+        })
+}
+
+fn parameter_value<'a>(request: &'a SubmitRequest, name: &str) -> Option<&'a Value> {
+    request.parameters.get(name).or_else(|| {
+        request
+            .parameters
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    })
+}
+
+fn input_filename(name: &str) -> String {
+    let component: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let component = if component.is_empty() {
+        "input"
+    } else {
+        component.as_str()
+    };
+    format!("rawweave-{component}.png")
+}
+
+fn resolve_field(request: &SubmitRequest, source: &str) -> Result<MultipartValue, ProviderError> {
+    match resolve_field_value_inner(request, source)? {
+        ResolvedField::Value(value) => Ok(MultipartValue::Text(multipart_text(value))),
+        ResolvedField::File {
+            bytes,
+            filename,
+            media_type,
+        } => Ok(MultipartValue::File {
+            bytes,
+            filename,
+            media_type,
+        }),
+    }
+}
+
+fn resolve_field_value(request: &SubmitRequest, source: &str) -> Result<Value, ProviderError> {
+    match resolve_field_value_inner(request, source)? {
+        ResolvedField::Value(value) => Ok(value),
+        ResolvedField::File { .. } => Err(ProviderError::InvalidRequest(format!(
+            "HTTP JSON field '{source}' cannot contain binary image input"
+        ))),
+    }
+}
+
+fn resolve_field_value_inner(
+    request: &SubmitRequest,
+    source: &str,
+) -> Result<ResolvedField, ProviderError> {
+    let Some(name) = source.strip_prefix('$') else {
+        return Ok(ResolvedField::Value(Value::String(source.to_owned())));
+    };
+    if name.eq_ignore_ascii_case("image") || name.eq_ignore_ascii_case("mask") {
+        let input_name = name.to_ascii_lowercase();
+        return match required_input(request, &input_name)? {
+            AiInput::Image(image) | AiInput::Mask(image) => Ok(ResolvedField::File {
+                bytes: image.bytes.clone(),
+                filename: input_filename(&input_name),
+                media_type: "image/png",
+            }),
+            _ => Err(ProviderError::InvalidRequest(format!(
+                "HTTP field '{source}' requires an image input"
+            ))),
+        };
+    }
+    if name.eq_ignore_ascii_case("prompt") {
+        return match required_input(request, "prompt")? {
+            AiInput::Text(text) => Ok(ResolvedField::Value(Value::String(text.clone()))),
+            _ => Err(ProviderError::InvalidRequest(
+                "HTTP field '$PROMPT' requires a text input".to_owned(),
+            )),
+        };
+    }
+    if let Some(input_name) = name
+        .strip_prefix("INPUT:")
+        .or_else(|| name.strip_prefix("input:"))
+    {
+        return match required_input(request, input_name)? {
+            AiInput::Image(image) | AiInput::Mask(image) => Ok(ResolvedField::File {
+                bytes: image.bytes.clone(),
+                filename: input_filename(input_name),
+                media_type: "image/png",
+            }),
+            AiInput::Text(text) => Ok(ResolvedField::Value(Value::String(text.clone()))),
+            AiInput::Json(value) => Ok(ResolvedField::Value(value.clone())),
+        };
+    }
+    if let Some(parameter_name) = name
+        .strip_prefix("PARAM:")
+        .or_else(|| name.strip_prefix("param:"))
+    {
+        return parameter_value(request, parameter_name)
+            .cloned()
+            .map(ResolvedField::Value)
+            .ok_or_else(|| {
+                ProviderError::InvalidRequest(format!(
+                    "HTTP request parameter '{parameter_name}' is not available"
+                ))
+            });
+    }
+    if name.eq_ignore_ascii_case("workflow") {
+        return Ok(ResolvedField::Value(request.workflow.definition.clone()));
+    }
+    if name.eq_ignore_ascii_case("workflow_id") {
+        return Ok(ResolvedField::Value(Value::String(
+            request.workflow.id.clone(),
+        )));
+    }
+    if name.eq_ignore_ascii_case("workflow_version") {
+        return Ok(ResolvedField::Value(Value::String(
+            request.workflow.version.clone(),
+        )));
+    }
+    parameter_value(request, name)
+        .cloned()
+        .map(ResolvedField::Value)
+        .ok_or_else(|| {
+            ProviderError::InvalidRequest(format!(
+                "HTTP request source '{source}' is not available"
+            ))
+        })
+}
+
+fn multipart_text(value: Value) -> String {
+    match value {
+        Value::String(value) => value,
+        value => serde_json::to_string(&value).unwrap_or_else(|_| "null".to_owned()),
+    }
+}
+
+fn append_multipart_field(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    name: &str,
+    value: MultipartValue,
+) -> Result<(), ProviderError> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|character| character.is_control() || character == '"')
+    {
+        return Err(ProviderError::InvalidRequest(
+            "HTTP multipart field names must be non-empty and printable".to_owned(),
+        ));
+    }
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    match value {
+        MultipartValue::Text(value) => {
+            body.extend_from_slice(
+                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+        }
+        MultipartValue::File {
+            bytes,
+            filename,
+            media_type,
+        } => {
+            body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(format!("Content-Type: {media_type}\r\n\r\n").as_bytes());
+            body.extend_from_slice(&bytes);
+        }
+    }
+    body.extend_from_slice(b"\r\n");
+    Ok(())
+}
+
 struct HttpTask {
     remote_job_id: Option<String>,
     inline_result: Option<AiResult>,
@@ -1207,7 +1496,7 @@ impl HttpProvider {
         job_id: Option<&str>,
         body: Vec<u8>,
     ) -> Result<HttpRequest, ProviderError> {
-        let url = endpoint.url.replace("$JOB_ID", job_id.unwrap_or(""));
+        let url = replace_job_id(&endpoint.url, job_id);
         let mut headers = BTreeMap::new();
         for (name, value) in &endpoint.headers {
             let resolved = match value {
@@ -1218,12 +1507,18 @@ impl HttpProvider {
             };
             headers.insert(name.clone(), resolved);
         }
-        if !body.is_empty()
-            && !headers
+        if !body.is_empty() {
+            if !endpoint.multipart_fields.is_empty() {
+                headers.insert(
+                    "Content-Type".to_owned(),
+                    "multipart/form-data; boundary=----rawweave-http-boundary".to_owned(),
+                );
+            } else if !headers
                 .keys()
                 .any(|name| name.eq_ignore_ascii_case("content-type"))
-        {
-            headers.insert("Content-Type".to_owned(), "application/json".to_owned());
+            {
+                headers.insert("Content-Type".to_owned(), "application/json".to_owned());
+            }
         }
         Ok(HttpRequest {
             method: endpoint.method,
@@ -1232,6 +1527,61 @@ impl HttpProvider {
             body,
             max_response_bytes: self.manifest.max_response_bytes,
         })
+    }
+
+    fn submit_body(
+        &self,
+        endpoint: &HttpEndpoint,
+        request: &SubmitRequest,
+    ) -> Result<Vec<u8>, ProviderError> {
+        if endpoint.json_fields.is_empty() && endpoint.multipart_fields.is_empty() {
+            return serde_json::to_vec(request)
+                .map_err(|error| ProviderError::InvalidRequest(format!("request JSON: {error}")));
+        }
+        if endpoint.multipart_fields.is_empty() {
+            let mut fields = serde_json::Map::new();
+            for (name, source) in &endpoint.json_fields {
+                fields.insert(name.clone(), resolve_field_value(request, source)?);
+            }
+            return serde_json::to_vec(&Value::Object(fields))
+                .map_err(|error| ProviderError::InvalidRequest(format!("request JSON: {error}")));
+        }
+
+        let boundary = "----rawweave-http-boundary";
+        let mut body = Vec::new();
+        for (name, source) in &endpoint.multipart_fields {
+            append_multipart_field(&mut body, boundary, name, resolve_field(request, source)?)?;
+        }
+        for (name, source) in &endpoint.json_fields {
+            append_multipart_field(
+                &mut body,
+                boundary,
+                name,
+                MultipartValue::Text(multipart_text(resolve_field_value(request, source)?)),
+            )?;
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        Ok(body)
+    }
+
+    fn fetch_result_url(&self, url: &str) -> Result<HttpResponse, ProviderError> {
+        let endpoint = HttpEndpoint::new(HttpMethod::Get, url);
+        validate_endpoint(&endpoint, self.manifest.allow_insecure_http)?;
+        let request = self.endpoint_request(&endpoint, None, Vec::new())?;
+        let response = self.transport.execute(request)?;
+        if response.body.len() > self.manifest.max_response_bytes {
+            return Err(ProviderError::ResponseTooLarge {
+                limit: self.manifest.max_response_bytes,
+                actual: response.body.len(),
+            });
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(ProviderError::Remote {
+                status: response.status,
+                message: bounded_message(&response.body),
+            });
+        }
+        Ok(response)
     }
 
     fn execute(
@@ -1290,8 +1640,7 @@ impl AiProvider for HttpProvider {
     }
 
     fn submit(&self, request: &SubmitRequest) -> Result<SubmitResponse, ProviderError> {
-        let body = serde_json::to_vec(request)
-            .map_err(|error| ProviderError::InvalidRequest(format!("request JSON: {error}")))?;
+        let body = self.submit_body(&self.manifest.submit, request)?;
         let response = self.execute(&self.manifest.submit, None, body)?;
         let task_id = self.local_task_id();
         let workflow_hash = request.workflow.content_hash()?;
@@ -1399,18 +1748,28 @@ impl AiProvider for HttpProvider {
             ProviderError::Unsupported("HTTP result endpoint is not configured".to_owned())
         })?;
         let response = self.execute(endpoint, Some(job_id), Vec::new())?;
-        let media_type = response.media_type();
-        let bytes = if let Some(path) = &self.manifest.result_path {
+        let (bytes, media_type) = if let Some(path) = &self.manifest.result_path {
             let json = Self::json_response(&response)?;
             let value = json_path(&json, path)?;
-            if let Some(text) = value.as_str() {
-                text.as_bytes().to_vec()
+            if let Some(url) = value
+                .as_str()
+                .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+            {
+                let fetched = self.fetch_result_url(url)?;
+                let media_type = fetched.media_type();
+                (fetched.body, media_type)
+            } else if let Some(text) = value.as_str() {
+                (text.as_bytes().to_vec(), response.media_type())
             } else {
-                serde_json::to_vec(value)
-                    .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?
+                (
+                    serde_json::to_vec(value)
+                        .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?,
+                    response.media_type(),
+                )
             }
         } else {
-            response.body
+            let media_type = response.media_type();
+            (response.body, media_type)
         };
         Ok(AiResult::from_bytes(task_id, bytes, media_type).with_provenance(task.provenance))
     }
