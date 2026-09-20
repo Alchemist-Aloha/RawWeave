@@ -3,10 +3,13 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rawweave_ai_provider::{
-    AiCapabilities, AiOperation, AiProvider, ComfyUiConfig, ComfyUiProvider, HttpProvider,
-    HttpProviderManifest, HttpRequest, HttpResponse, HttpTransport, ProviderError,
+    poll_until_complete, AiCapabilities, AiOperation, AiProvider, AiResult, AiTask,
+    CancellationToken, ComfyUiConfig, ComfyUiProvider, HttpProvider, HttpProviderManifest,
+    HttpRequest, HttpResponse, HttpTransport, PollPolicy, ProviderError, SubmitRequest,
+    SubmitResponse, TaskState, TaskStatus, ThreadSleeper,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,7 +90,7 @@ struct ProviderRuntime {
     error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct AiProviderStore {
     path: Option<PathBuf>,
 }
@@ -275,6 +278,65 @@ impl HttpTransport for ValidationTransport {
     }
 }
 
+struct ReqwestTransport {
+    client: reqwest::blocking::Client,
+}
+
+impl ReqwestTransport {
+    fn new() -> Result<Self, ProviderError> {
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(|error| {
+                ProviderError::Transport(format!("could not create HTTP client: {error}"))
+            })?;
+        Ok(Self { client })
+    }
+}
+
+impl HttpTransport for ReqwestTransport {
+    fn execute(&self, request: HttpRequest) -> Result<HttpResponse, ProviderError> {
+        let method = match request.method {
+            rawweave_ai_provider::HttpMethod::Get => reqwest::Method::GET,
+            rawweave_ai_provider::HttpMethod::Post => reqwest::Method::POST,
+            rawweave_ai_provider::HttpMethod::Put => reqwest::Method::PUT,
+            rawweave_ai_provider::HttpMethod::Delete => reqwest::Method::DELETE,
+        };
+        let mut builder = self.client.request(method, &request.url);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        let response = builder
+            .body(request.body)
+            .send()
+            .map_err(|error| ProviderError::Transport(error.to_string()))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+            })
+            .collect();
+        let body = response
+            .bytes()
+            .map_err(|error| ProviderError::Transport(error.to_string()))?
+            .to_vec();
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+struct ActiveProviderTask {
+    provider: Arc<dyn AiProvider>,
+    token: CancellationToken,
+    task: AiTask,
+}
+
 fn capabilities_dto(capabilities: AiCapabilities) -> AiProviderCapabilitiesDto {
     let color = capabilities.color_interchange;
     AiProviderCapabilitiesDto {
@@ -291,20 +353,24 @@ fn capabilities_dto(capabilities: AiCapabilities) -> AiProviderCapabilitiesDto {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct AiProviderManager {
-    configs: Mutex<BTreeMap<String, AiProviderConfigDto>>,
-    runtime: Mutex<BTreeMap<String, ProviderRuntime>>,
-    store: AiProviderStore,
+    configs: Arc<Mutex<BTreeMap<String, AiProviderConfigDto>>>,
+    runtime: Arc<Mutex<BTreeMap<String, ProviderRuntime>>>,
+    providers: Arc<Mutex<BTreeMap<String, Arc<dyn AiProvider>>>>,
+    tasks: Arc<Mutex<BTreeMap<String, ActiveProviderTask>>>,
+    store: Arc<AiProviderStore>,
 }
 
 impl AiProviderManager {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn memory() -> Self {
         Self {
-            configs: Mutex::new(BTreeMap::new()),
-            runtime: Mutex::new(BTreeMap::new()),
-            store: AiProviderStore { path: None },
+            configs: Arc::new(Mutex::new(BTreeMap::new())),
+            runtime: Arc::new(Mutex::new(BTreeMap::new())),
+            providers: Arc::new(Mutex::new(BTreeMap::new())),
+            tasks: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(AiProviderStore { path: None }),
         }
     }
 
@@ -316,9 +382,11 @@ impl AiProviderManager {
             .map(|config| (config.id.clone(), config))
             .collect();
         Ok(Self {
-            configs: Mutex::new(configs),
-            runtime: Mutex::new(BTreeMap::new()),
-            store,
+            configs: Arc::new(Mutex::new(configs)),
+            runtime: Arc::new(Mutex::new(BTreeMap::new())),
+            providers: Arc::new(Mutex::new(BTreeMap::new())),
+            tasks: Arc::new(Mutex::new(BTreeMap::new())),
+            store: Arc::new(store),
         })
     }
 
@@ -363,6 +431,14 @@ impl AiProviderManager {
             .lock()
             .map_err(|_| "AI provider runtime state is unavailable".to_owned())?
             .remove(provider_id);
+        self.providers
+            .lock()
+            .map_err(|_| "AI provider runtime state is unavailable".to_owned())?
+            .remove(provider_id);
+        self.tasks
+            .lock()
+            .map_err(|_| "AI provider task state is unavailable".to_owned())?
+            .retain(|_, task| task.task.provider_id != provider_id);
         Ok(())
     }
 
@@ -404,6 +480,178 @@ impl AiProviderManager {
         runtimes.insert(provider_id.to_owned(), runtime);
         drop(runtimes);
         Ok(self.summary_from(&config))
+    }
+
+    fn provider_from_config(
+        &self,
+        config: &AiProviderConfigDto,
+    ) -> Result<Arc<dyn AiProvider>, String> {
+        let transport: Arc<dyn HttpTransport> =
+            Arc::new(ReqwestTransport::new().map_err(|error| error.to_string())?);
+        match config.kind {
+            AiProviderKind::ComfyUi => {
+                let comfy = ComfyUiProvider::new(
+                    ComfyUiConfig::new(config.base_url.clone())
+                        .with_provider_id(config.id.clone())
+                        .with_client_id(
+                            config
+                                .client_id
+                                .clone()
+                                .unwrap_or_else(|| "rawweave".to_owned()),
+                        ),
+                    transport,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(Arc::new(comfy))
+            }
+            AiProviderKind::Http => {
+                let manifest = config
+                    .manifest
+                    .clone()
+                    .ok_or_else(|| "HTTP AI providers require a manifest".to_owned())?;
+                let manifest: HttpProviderManifest = serde_json::from_value(manifest)
+                    .map_err(|error| format!("invalid HTTP AI provider manifest: {error}"))?;
+                let provider = HttpProvider::new(manifest, transport, |_reference| Ok(None))
+                    .map_err(|error| error.to_string())?;
+                Ok(Arc::new(provider))
+            }
+        }
+    }
+
+    fn provider(&self, provider_id: &str) -> Result<Arc<dyn AiProvider>, String> {
+        if let Some(provider) = self
+            .providers
+            .lock()
+            .map_err(|_| "AI provider runtime state is unavailable".to_owned())?
+            .get(provider_id)
+            .cloned()
+        {
+            return Ok(provider);
+        }
+        let config = self
+            .configs
+            .lock()
+            .map_err(|_| "AI provider configuration state is unavailable".to_owned())?
+            .get(provider_id)
+            .cloned()
+            .ok_or_else(|| format!("AI provider '{provider_id}' does not exist"))?;
+        let provider = self.provider_from_config(&config)?;
+        self.providers
+            .lock()
+            .map_err(|_| "AI provider runtime state is unavailable".to_owned())?
+            .insert(provider_id.to_owned(), Arc::clone(&provider));
+        Ok(provider)
+    }
+
+    fn task_key(provider_id: &str, task_id: &str) -> String {
+        format!("{provider_id}:{task_id}")
+    }
+
+    fn active_task(
+        &self,
+        provider_id: &str,
+        task_id: &str,
+    ) -> Result<(Arc<dyn AiProvider>, CancellationToken), String> {
+        let key = Self::task_key(provider_id, task_id);
+        let tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| "AI provider task state is unavailable".to_owned())?;
+        let active = tasks
+            .get(&key)
+            .ok_or_else(|| format!("AI provider task '{task_id}' does not exist"))?;
+        Ok((Arc::clone(&active.provider), active.token.clone()))
+    }
+
+    fn update_task_state(
+        &self,
+        provider_id: &str,
+        task_id: &str,
+        state: TaskState,
+    ) -> Result<AiTask, String> {
+        let key = Self::task_key(provider_id, task_id);
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| "AI provider task state is unavailable".to_owned())?;
+        let active = tasks
+            .get_mut(&key)
+            .ok_or_else(|| format!("AI provider task '{task_id}' does not exist"))?;
+        active.task.state = state;
+        Ok(active.task.clone())
+    }
+
+    pub fn submit(&self, provider_id: &str, mut request: SubmitRequest) -> Result<AiTask, String> {
+        let provider = self.provider(provider_id)?;
+        request.provenance.provider_id = Some(provider_id.to_owned());
+        let response: SubmitResponse = provider
+            .submit(&request)
+            .map_err(|error| error.to_string())?;
+        let task = AiTask {
+            task_id: response.task_id.clone(),
+            provider_id: provider_id.to_owned(),
+            state: response.status.state,
+            provenance: response.provenance,
+        };
+        let key = Self::task_key(provider_id, &task.task_id);
+        self.tasks
+            .lock()
+            .map_err(|_| "AI provider task state is unavailable".to_owned())?
+            .insert(
+                key,
+                ActiveProviderTask {
+                    provider,
+                    token: CancellationToken::new(),
+                    task: task.clone(),
+                },
+            );
+        Ok(task)
+    }
+
+    pub fn status(&self, provider_id: &str, task_id: &str) -> Result<TaskStatus, String> {
+        let (provider, _) = self.active_task(provider_id, task_id)?;
+        let status = provider
+            .status(task_id)
+            .map_err(|error| error.to_string())?;
+        self.update_task_state(provider_id, task_id, status.state)?;
+        Ok(status)
+    }
+
+    pub fn result(&self, provider_id: &str, task_id: &str) -> Result<AiResult, String> {
+        let (provider, _) = self.active_task(provider_id, task_id)?;
+        provider.result(task_id).map_err(|error| error.to_string())
+    }
+
+    pub fn wait(
+        &self,
+        provider_id: &str,
+        task_id: &str,
+        policy: PollPolicy,
+    ) -> Result<AiResult, String> {
+        let (provider, token) = self.active_task(provider_id, task_id)?;
+        let result =
+            poll_until_complete(provider.as_ref(), task_id, policy, &token, &ThreadSleeper);
+        match &result {
+            Ok(_) => {
+                self.update_task_state(provider_id, task_id, TaskState::Succeeded)?;
+            }
+            Err(ProviderError::Cancelled | ProviderError::TaskCancelled) => {
+                self.update_task_state(provider_id, task_id, TaskState::Cancelled)?;
+            }
+            Err(_) => {
+                self.update_task_state(provider_id, task_id, TaskState::Failed)?;
+            }
+        }
+        result.map_err(|error| error.to_string())
+    }
+
+    pub fn cancel(&self, provider_id: &str, task_id: &str) -> Result<AiTask, String> {
+        let (provider, token) = self.active_task(provider_id, task_id)?;
+        token.cancel();
+        provider
+            .cancel(task_id)
+            .map_err(|error| error.to_string())?;
+        self.update_task_state(provider_id, task_id, TaskState::Cancelled)
     }
 
     fn capabilities_for(
@@ -489,6 +737,52 @@ pub fn test_ai_provider(
     provider_id: String,
 ) -> Result<AiProviderDto, String> {
     state.test(&provider_id)
+}
+
+#[tauri::command]
+pub fn submit_ai_task(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    request: SubmitRequest,
+) -> Result<AiTask, String> {
+    state.submit(&provider_id, request)
+}
+
+#[tauri::command]
+pub fn ai_task_status(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    task_id: String,
+) -> Result<TaskStatus, String> {
+    state.status(&provider_id, &task_id)
+}
+
+#[tauri::command]
+pub fn ai_task_result(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    task_id: String,
+) -> Result<AiResult, String> {
+    state.result(&provider_id, &task_id)
+}
+
+#[tauri::command]
+pub fn wait_ai_task(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    task_id: String,
+    policy: Option<PollPolicy>,
+) -> Result<AiResult, String> {
+    state.wait(&provider_id, &task_id, policy.unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn cancel_ai_task(
+    state: State<'_, AiProviderManager>,
+    provider_id: String,
+    task_id: String,
+) -> Result<AiTask, String> {
+    state.cancel(&provider_id, &task_id)
 }
 
 #[cfg(test)]

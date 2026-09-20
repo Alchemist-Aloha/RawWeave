@@ -364,3 +364,98 @@ fn png_interchange_declares_lossless_color_and_alpha_assumptions() {
     let image = AiImage::new(vec![1, 2, 3], [1, 1], interchange).unwrap();
     assert!(AiOutput::image(image).as_image().is_some());
 }
+
+#[test]
+fn comfyui_uploads_bound_assets_and_binds_the_uploaded_paths() {
+    let transport = FixtureHttp::with_responses(vec![
+        HttpResponse::json(
+            200,
+            json!({"name": "image.png", "subfolder": "rawweave-image", "type": "input"}),
+        ),
+        HttpResponse::json(
+            200,
+            json!({"name": "mask.png", "subfolder": "rawweave-mask", "type": "input"}),
+        ),
+        HttpResponse::json(200, json!({"prompt_id": "prompt-uploads"})),
+    ]);
+    let provider = ComfyUiProvider::new(
+        ComfyUiConfig::new("http://127.0.0.1:8188"),
+        transport.clone(),
+    )
+    .unwrap();
+    let mut request = request("comfyui");
+    request.workflow.definition = json!({
+        "nodes": {
+            "load": {"inputs": {"image": "old.png", "mask": "old-mask.png"}},
+            "positive": {"inputs": {"text": "old prompt"}},
+            "sampler": {"inputs": {"steps": 1}}
+        }
+    });
+    request.workflow.bindings.image = Some(WorkflowBinding::new("load", "image"));
+    request.workflow.bindings.mask = Some(WorkflowBinding::new("load", "mask"));
+    request.workflow.bindings.prompt = Some(WorkflowBinding::new("positive", "text"));
+    request.workflow.bindings.parameters =
+        BTreeMap::from([("steps".to_owned(), WorkflowBinding::new("sampler", "steps"))]);
+    let image = AiImage::new(vec![1, 2, 3], [1, 1], ColorInterchange::png_srgb()).unwrap();
+    let mask = AiImage::new(vec![4, 5, 6], [1, 1], ColorInterchange::png_srgb()).unwrap();
+    request.inputs.insert(
+        "image".to_owned(),
+        rawweave_ai_provider::AiInput::Image(image),
+    );
+    request
+        .inputs
+        .insert("mask".to_owned(), rawweave_ai_provider::AiInput::Mask(mask));
+    request.inputs.insert(
+        "prompt".to_owned(),
+        rawweave_ai_provider::AiInput::Text("new prompt".to_owned()),
+    );
+    request.parameters.insert("steps".to_owned(), json!(30));
+
+    provider.submit(&request).unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].url.contains("upload/image"));
+    assert!(
+        requests[0]
+            .body
+            .windows(3)
+            .any(|window| window == [1, 2, 3])
+    );
+    assert!(requests[1].url.contains("upload/image"));
+    assert!(
+        requests[1]
+            .body
+            .windows(3)
+            .any(|window| window == [4, 5, 6])
+    );
+    let prompt: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(
+        prompt["prompt"]["nodes"]["load"]["inputs"]["image"],
+        "rawweave-image/image.png"
+    );
+    assert_eq!(
+        prompt["prompt"]["nodes"]["load"]["inputs"]["mask"],
+        "rawweave-mask/mask.png"
+    );
+    assert_eq!(
+        prompt["prompt"]["nodes"]["positive"]["inputs"]["text"],
+        "new prompt"
+    );
+    assert_eq!(prompt["prompt"]["nodes"]["sampler"]["inputs"]["steps"], 30);
+}
+
+#[test]
+fn comfyui_missing_history_is_still_a_running_task() {
+    let transport = FixtureHttp::with_responses(vec![
+        HttpResponse::json(200, json!({"prompt_id": "prompt-pending"})),
+        HttpResponse::json(200, json!({})),
+    ]);
+    let provider =
+        ComfyUiProvider::new(ComfyUiConfig::new("http://127.0.0.1:8188"), transport).unwrap();
+    let submitted = provider.submit(&request("comfyui")).unwrap();
+    assert_eq!(
+        provider.status(&submitted.task_id).unwrap().state,
+        TaskState::Running
+    );
+}

@@ -23,6 +23,7 @@ rawweave-external-host = { path = "../../../crates/external-host" }
 rawweave-external-protocol = { path = "../../../crates/external-protocol" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 base64 = "0.22"
 exif = { package = "kamadak-exif", version = "0.6.1" }
 serde = { version = "1.0", features = ["derive"] }

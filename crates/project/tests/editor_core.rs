@@ -14,7 +14,7 @@ fn editor_core_registers_the_backbone_node_packs() {
         .into_iter()
         .map(|descriptor| descriptor.type_id)
         .collect::<Vec<_>>();
-    assert_eq!(types.len(), 54);
+    assert_eq!(types.len(), 58);
     for type_id in [
         "core.image-input",
         "core.constant-float",
@@ -62,6 +62,10 @@ fn editor_core_registers_the_backbone_node_packs() {
         "core.curves",
         "core.color-matrix",
         "core.output",
+        "ai.img2img",
+        "ai.inpaint",
+        "ai.generative-fill",
+        "ai.upscale",
         "raw.decode",
         "raw.black-level",
         "raw.white-balance",

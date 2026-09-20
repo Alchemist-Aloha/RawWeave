@@ -1262,6 +1262,44 @@ fn json_path<'a>(value: &'a Value, path: &str) -> Result<&'a Value, ProviderErro
     Ok(current)
 }
 
+fn set_workflow_binding(
+    definition: &mut Value,
+    binding: &WorkflowBinding,
+    value: Value,
+) -> Result<(), ProviderError> {
+    let object = definition.as_object_mut().ok_or_else(|| {
+        ProviderError::InvalidRequest(
+            "ComfyUI workflow definition must be a JSON object".to_owned(),
+        )
+    })?;
+    let node = if object.get("nodes").and_then(Value::as_object).is_some() {
+        object
+            .get_mut("nodes")
+            .and_then(Value::as_object_mut)
+            .and_then(|nodes| nodes.get_mut(&binding.node))
+            .and_then(Value::as_object_mut)
+    } else {
+        object.get_mut(&binding.node).and_then(Value::as_object_mut)
+    }
+    .ok_or_else(|| {
+        ProviderError::InvalidRequest(format!(
+            "ComfyUI workflow binding node '{}' was not found",
+            binding.node
+        ))
+    })?;
+    let inputs = node
+        .get_mut("inputs")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            ProviderError::InvalidRequest(format!(
+                "ComfyUI workflow binding node '{}' has no inputs",
+                binding.node
+            ))
+        })?;
+    inputs.insert(binding.input.clone(), value);
+    Ok(())
+}
+
 fn join_url(base: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -1272,6 +1310,8 @@ fn join_url(base: &str, path: &str) -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComfyUiConfig {
+    #[serde(default = "default_provider_id")]
+    pub provider_id: String,
     pub base_url: String,
     #[serde(default = "default_client_id")]
     pub client_id: String,
@@ -1285,6 +1325,10 @@ fn default_client_id() -> String {
     "rawweave".to_owned()
 }
 
+fn default_provider_id() -> String {
+    "comfyui".to_owned()
+}
+
 const fn default_true() -> bool {
     true
 }
@@ -1292,6 +1336,7 @@ const fn default_true() -> bool {
 impl ComfyUiConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
+            provider_id: default_provider_id(),
             base_url: base_url.into(),
             client_id: default_client_id(),
             max_response_bytes: default_max_response_bytes(),
@@ -1303,11 +1348,17 @@ impl ComfyUiConfig {
         self.client_id = client_id.into();
         self
     }
+
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
 }
 
 struct ComfyTask {
     prompt_id: String,
     provenance: TaskProvenance,
+    output_node: Option<String>,
 }
 
 /// ComfyUI's HTTP adapter. It uses the same injected transport as the generic
@@ -1390,6 +1441,7 @@ impl ComfyUiProvider {
             .map(|task| ComfyTask {
                 prompt_id: task.prompt_id.clone(),
                 provenance: task.provenance.clone(),
+                output_node: task.output_node.clone(),
             })
             .ok_or_else(|| ProviderError::UnknownTask(task_id.to_owned()))
     }
@@ -1408,11 +1460,102 @@ impl ComfyUiProvider {
             ProviderError::InvalidResponse("ComfyUI history did not contain task".to_owned())
         })
     }
+
+    fn upload_asset(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        kind: &str,
+    ) -> Result<String, ProviderError> {
+        let boundary = "----rawweave-ai-boundary";
+        let mut body = Vec::with_capacity(bytes.len().saturating_add(256));
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"image\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let request = HttpRequest {
+            method: HttpMethod::Post,
+            url: format!(
+                "{}?type=input&overwrite=true&subfolder=rawweave-{kind}",
+                join_url(&self.config.base_url, "upload/image")
+            ),
+            headers: BTreeMap::from([(
+                "Content-Type".to_owned(),
+                format!("multipart/form-data; boundary={boundary}"),
+            )]),
+            body,
+            max_response_bytes: self.config.max_response_bytes,
+        };
+        let response = self.transport.execute(request)?;
+        if response.body.len() > self.config.max_response_bytes {
+            return Err(ProviderError::ResponseTooLarge {
+                limit: self.config.max_response_bytes,
+                actual: response.body.len(),
+            });
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(ProviderError::Remote {
+                status: response.status,
+                message: bounded_message(&response.body),
+            });
+        }
+        let uploaded = serde_json::from_slice::<Value>(&response.body)
+            .ok()
+            .and_then(|value| {
+                let name = value.get("name").and_then(Value::as_str)?;
+                let subfolder = value
+                    .get("subfolder")
+                    .and_then(Value::as_str)
+                    .filter(|subfolder| !subfolder.is_empty());
+                Some(match subfolder {
+                    Some(subfolder) if !name.starts_with(&format!("{subfolder}/")) => {
+                        format!("{subfolder}/{name}")
+                    }
+                    _ => name.to_owned(),
+                })
+            })
+            .unwrap_or_else(|| filename.to_owned());
+        Ok(uploaded)
+    }
+
+    fn prepare_workflow(&self, request: &SubmitRequest) -> Result<Value, ProviderError> {
+        let mut definition = request.workflow.definition.clone();
+        let mut set_input = |binding: &WorkflowBinding, value: Value| {
+            set_workflow_binding(&mut definition, binding, value)
+        };
+        if let Some(binding) = request.workflow.bindings.image.as_ref()
+            && let Some(AiInput::Image(image)) = request.inputs.get("image")
+        {
+            let filename = self.upload_asset(&image.bytes, "rawweave-image.png", "image")?;
+            set_input(binding, Value::String(filename))?;
+        }
+        if let Some(binding) = request.workflow.bindings.mask.as_ref()
+            && let Some(AiInput::Mask(mask)) = request.inputs.get("mask")
+        {
+            let filename = self.upload_asset(&mask.bytes, "rawweave-mask.png", "mask")?;
+            set_input(binding, Value::String(filename))?;
+        }
+        if let Some(binding) = request.workflow.bindings.prompt.as_ref()
+            && let Some(AiInput::Text(prompt)) = request.inputs.get("prompt")
+        {
+            set_input(binding, Value::String(prompt.clone()))?;
+        }
+        for (name, binding) in &request.workflow.bindings.parameters {
+            if let Some(value) = request.parameters.get(name) {
+                set_input(binding, value.clone())?;
+            }
+        }
+        Ok(definition)
+    }
 }
 
 impl AiProvider for ComfyUiProvider {
     fn id(&self) -> &str {
-        "comfyui"
+        &self.config.provider_id
     }
 
     fn capabilities(&self) -> AiCapabilities {
@@ -1424,8 +1567,9 @@ impl AiProvider for ComfyUiProvider {
     }
 
     fn submit(&self, request: &SubmitRequest) -> Result<SubmitResponse, ProviderError> {
+        let prompt = self.prepare_workflow(request)?;
         let payload = serde_json::json!({
-            "prompt": request.workflow.definition,
+            "prompt": prompt,
             "client_id": self.config.client_id,
         });
         let response = self.execute(
@@ -1455,6 +1599,8 @@ impl AiProvider for ComfyUiProvider {
                 ComfyTask {
                     prompt_id: prompt_id.clone(),
                     provenance: provenance.clone(),
+                    output_node: (!request.workflow.bindings.output.node.is_empty())
+                        .then(|| request.workflow.bindings.output.node.clone()),
                 },
             );
         Ok(SubmitResponse::queued(prompt_id, provenance))
@@ -1463,7 +1609,9 @@ impl AiProvider for ComfyUiProvider {
     fn status(&self, task_id: &str) -> Result<TaskStatus, ProviderError> {
         let task = self.task(task_id)?;
         let history = self.history(&task.prompt_id)?;
-        let entry = Self::history_entry(&history, &task.prompt_id)?;
+        let Some(entry) = history.get(&task.prompt_id) else {
+            return Ok(TaskStatus::running());
+        };
         let status = entry.get("status").unwrap_or(&Value::Null);
         if status.get("completed").and_then(Value::as_bool) == Some(true) {
             return Ok(TaskStatus::succeeded());
@@ -1486,7 +1634,13 @@ impl AiProvider for ComfyUiProvider {
         let image = entry
             .get("outputs")
             .and_then(Value::as_object)
-            .and_then(|outputs| outputs.values().find_map(|output| output.get("images")))
+            .and_then(|outputs| {
+                task.output_node
+                    .as_deref()
+                    .and_then(|node| outputs.get(node))
+                    .and_then(|output| output.get("images"))
+                    .or_else(|| outputs.values().find_map(|output| output.get("images")))
+            })
             .and_then(Value::as_array)
             .and_then(|images| images.first())
             .ok_or_else(|| {

@@ -1003,6 +1003,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawweave-ai-nodes"
+version = "0.1.0"
+dependencies = [
+ "rawweave-node-api",
+]
+
+[[package]]
 name = "rawweave-ai-provider"
 version = "0.1.0"
 dependencies = [
@@ -1138,6 +1145,7 @@ dependencies = [
 name = "rawweave-project"
 version = "0.1.0"
 dependencies = [
+ "rawweave-ai-nodes",
  "rawweave-core",
  "rawweave-core-image",
  "rawweave-core-values",

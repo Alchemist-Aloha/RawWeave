@@ -1,0 +1,10 @@
+[package]
+name = "rawweave-ai-nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rawweave-node-api.workspace = true
+
+[dev-dependencies]
