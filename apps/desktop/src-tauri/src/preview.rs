@@ -332,6 +332,7 @@ impl PreviewManager {
     pub fn release(&self, url: &str) -> Result<(), String> {
         let path = url
             .strip_prefix("rawweave-preview://localhost")
+            .or_else(|| url.strip_prefix("http://rawweave-preview.localhost"))
             .unwrap_or(url);
         if !path.starts_with("/preview/") {
             return Err("invalid preview URL".to_owned());
@@ -348,7 +349,7 @@ impl PreviewManager {
 
     pub fn response(&self, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         let path = request.uri().path();
-        match self.store.take(path) {
+        match self.store.get(path) {
             Some(bytes) => Response::builder()
                 .status(200)
                 .header("Content-Type", PREVIEW_MIME_TYPE)
@@ -375,7 +376,17 @@ pub fn preview_path(request_id: &str) -> String {
 }
 
 pub fn preview_url(request_id: &str) -> String {
-    format!("rawweave-preview://localhost{}", preview_path(request_id))
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    {
+        format!(
+            "http://rawweave-preview.localhost{}",
+            preview_path(request_id)
+        )
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    {
+        format!("rawweave-preview://localhost{}", preview_path(request_id))
+    }
 }
 
 pub fn encode_png(image: &Image) -> Result<Vec<u8>, String> {
@@ -969,6 +980,38 @@ mod tests {
     }
 
     #[test]
+    fn preview_url_matches_the_registered_scheme_on_this_platform() {
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        assert_eq!(
+            preview_url("request"),
+            "http://rawweave-preview.localhost/preview/request.png"
+        );
+        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+        assert_eq!(
+            preview_url("request"),
+            "rawweave-preview://localhost/preview/request.png"
+        );
+    }
+
+    #[test]
+    fn protocol_preview_can_be_loaded_again_until_released() {
+        let manager = PreviewManager::default();
+        let path = preview_path("request");
+        manager.store.insert(path.clone(), 12, vec![1, 2, 3]).unwrap();
+        let request = Request::builder()
+            .uri(preview_url("request"))
+            .body(Vec::new())
+            .unwrap();
+
+        assert_eq!(manager.response(&request).status(), 200);
+        assert_eq!(manager.response(&request).status(), 200);
+        assert_eq!(manager.store.get(&path), Some(vec![1, 2, 3]));
+
+        manager.release(&preview_url("request")).unwrap();
+        assert_eq!(manager.response(&request).status(), 404);
+    }
+
+    #[test]
     fn selects_the_requested_region_and_mip_for_preview_encoding() {
         let image = Image::new(4, 3).unwrap();
 
@@ -1288,6 +1331,52 @@ mod tests {
             assert!(image.width() > 0, "{filename} has zero width");
             assert!(image.height() > 0, "{filename} has zero height");
         }
+    }
+
+    #[test]
+    fn jpeg_source_renders_through_the_default_output_graph() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test-data/images/common/gracie-allen-portrait.jpg");
+        let image = decode_image_file(&path).unwrap();
+        let mut editor = EditorCore::default();
+        editor.add_node("input", "core.image-input").unwrap();
+        editor.add_node("output", "core.output").unwrap();
+        editor.connect("input", "image", "output", "image").unwrap();
+        let revision = editor.graph().revision();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let request = PreviewRequest {
+            request_id: "jpeg-default-output".to_owned(),
+            revision,
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: image.width(),
+                height: image.height(),
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 1,
+            mask_display: MaskDisplayRequest::Grayscale,
+        };
+
+        let metadata = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(image)),
+            request,
+        )
+        .unwrap();
+
+        assert!(metadata.width > 0 && metadata.height > 0);
+        assert_eq!(metadata.url, preview_url("jpeg-default-output"));
+        assert!(manager
+            .store
+            .get(&preview_path("jpeg-default-output"))
+            .is_some_and(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n")));
     }
 
     #[test]

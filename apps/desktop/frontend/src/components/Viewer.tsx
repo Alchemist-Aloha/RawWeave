@@ -394,6 +394,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
   const [wipePosition, setWipePosition] = useState(50);
+  const [showCompare, setShowCompare] = useState(false);
   const [blinkViewer, setBlinkViewer] = useState<ViewerId>('A');
   const [analyses, setAnalyses] = useState<Record<ViewerId, ImageAnalysis | null>>({ A: null, B: null });
   const handleAnalysis = useCallback((viewer: ViewerId, analysis: ImageAnalysis | null) => {
@@ -422,42 +423,57 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
     return () => window.clearInterval(timer);
   }, [controller.state.comparison]);
   useEffect(() => {
-    if (source?.kind !== 'raw') {
-      controller.clearTargets();
+    if (controller.state.panes.B.target) setShowCompare(true);
+  }, [controller.state.panes.B.target]);
+  useEffect(() => {
+    if (!source) {
+      if (controller.state.panes.A.target || controller.state.panes.B.target) controller.clearTargets();
       return;
     }
-    const displayTarget = options.find(
-      (option) => option.nodeName === 'Display Transform' && option.outputPort === 'display',
+    const available = (target: PreviewTarget | null) => target && options.some(
+      (option) => option.nodeId === target.nodeId && option.outputPort === target.outputPort,
     );
-    if (!displayTarget || controller.state.panes.A.target?.nodeId === displayTarget.nodeId) return;
-    controller.setTarget('A', displayTarget);
-  }, [controller, options, source?.kind, source?.revision]);
+    if (controller.state.panes.B.target && !available(controller.state.panes.B.target)) {
+      controller.setTarget('B', null);
+    }
+    if (available(controller.state.panes.A.target)) return;
+    const preferredNode = source.kind === 'raw'
+      ? nodes.find((node) => node.typeId === 'raw.display-transform')
+      : nodes.find((node) => node.typeId === 'core.output');
+    const target = options.find((option) => option.nodeId === preferredNode?.id)
+      ?? options.find((option) => option.dataType === 'core.Image' || option.dataType === 'color.DisplayRGB')
+      ?? options[0];
+    controller.setTarget('A', target ?? null);
+  }, [controller, nodes, options, source?.kind, source?.revision]);
 
   return (
     <section className="viewer-section" aria-label="Image viewers">
       <div className="viewer-section__toolbar">
         <div>
           <span className="eyebrow">Viewer</span>
-          <strong>Intermediate image preview</strong>
+          <strong>Image preview</strong>
         </div>
-        <div className="viewer-section__layout" role="group" aria-label="Viewer layout">
+        {showCompare && <div className="viewer-section__layout" role="group" aria-label="Viewer layout">
           <button className={controller.state.layout === 'side-by-side' ? 'is-active' : ''} onClick={() => controller.setLayout('side-by-side')} type="button">
             Side by side
           </button>
           <button className={controller.state.layout === 'split' ? 'is-active' : ''} onClick={() => controller.setLayout('split')} type="button">
             Split
           </button>
-        </div>
+        </div>}
         <div aria-label="Viewer comparison" className="viewer-section__comparison" role="group">
           {(['side-by-side', 'wipe', 'blink', 'difference'] as ViewerComparison[]).map((comparison) => (
             <button
-              aria-pressed={controller.state.comparison === comparison}
-              className={controller.state.comparison === comparison ? 'is-active' : ''}
+              aria-pressed={showCompare && controller.state.comparison === comparison}
+              className={showCompare && controller.state.comparison === comparison ? 'is-active' : ''}
               key={comparison}
-              onClick={() => controller.setComparison(comparison)}
+              onClick={() => {
+                controller.setComparison(comparison);
+                setShowCompare(comparison === 'side-by-side' ? !showCompare : true);
+              }}
               type="button"
             >
-              {comparison === 'side-by-side' ? 'A / B' : comparison[0].toUpperCase() + comparison.slice(1)}
+              {comparison === 'side-by-side' ? 'Compare A / B' : comparison[0].toUpperCase() + comparison.slice(1)}
             </button>
           ))}
           <label className="viewer-section__clipping">
@@ -471,7 +487,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
         </div>
       </div>
       {controller.state.comparison === 'side-by-side' ? (
-        <div className={`viewer-grid viewer-grid--${controller.state.layout}`}>
+        <div className={`viewer-grid viewer-grid--${showCompare ? controller.state.layout : 'single'}`}>
           <Pane
             analysis={analyses.A}
             clippingOverlay={controller.state.clippingOverlay}
@@ -482,7 +498,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             paintedNode={paintedNode}
             pane={controller.state.panes.A}
             viewer="A" />
-          <Pane
+          {showCompare && <Pane
             analysis={analyses.B}
             clippingOverlay={controller.state.clippingOverlay}
             controller={controller}
@@ -491,7 +507,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             options={options}
             paintedNode={paintedNode}
             pane={controller.state.panes.B}
-            viewer="B" />
+            viewer="B" />}
         </div>
       ) : (
         <ComparisonSurface

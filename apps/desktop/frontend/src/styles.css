@@ -10,20 +10,38 @@
 
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; min-width: 0; height: 100%; margin: 0; }
-body { overflow: auto; background: #0b0d12; }
+body { overflow: hidden; background: #0b0d12; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #6ee7c7; outline-offset: 2px; }
 
-.app-shell { display: grid; grid-template-rows: 66px minmax(132px, auto) auto minmax(260px, 32vh) minmax(0, 1fr) minmax(238px, 31vh); width: 100%; height: 100%; background: radial-gradient(circle at 50% -20%, #192330 0, #0b0d12 52%); }
-.topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid #1c2430; background: rgba(11, 13, 18, .86); }
+.app-shell { display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: radial-gradient(circle at 50% -20%, #192330 0, #0b0d12 52%); }
+.topbar { position: relative; z-index: 5; display: flex; flex: 0 0 66px; align-items: center; justify-content: space-between; gap: 18px; min-width: 0; padding: 0 20px; border-bottom: 1px solid #1c2430; background: rgba(11, 13, 18, .96); }
+.workspace-modes { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.workspace-modes button { border: 0; border-radius: 6px; padding: 8px 10px; color: #8d9aab; background: transparent; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.workspace-modes button:hover, .workspace-modes button.is-active { color: #8cebd3; background: #162a27; }
+.topbar__more { position: relative; }
+.topbar__more > summary { list-style: none; }
+.topbar__more > summary::-webkit-details-marker { display: none; }
+.topbar__more-menu { position: absolute; top: calc(100% + 10px); right: 0; display: grid; gap: 4px; width: 190px; border: 1px solid #344454; border-radius: 8px; padding: 7px; background: #151d27; box-shadow: 0 14px 30px rgba(0, 0, 0, .38); }
+.topbar__more-menu .button { width: 100%; text-align: left; }
+.app-shell .integration-strip, .app-shell .browser-queue { display: none; }
+.app-shell--browse .browser-queue, .app-shell--batch .browser-queue { display: grid; flex: 1 1 auto; min-height: 0; }
+.app-shell--integrations .integration-strip { display: grid; flex: 1 1 auto; min-height: 0; }
+.app-shell--browse .workspace, .app-shell--batch .workspace, .app-shell--integrations .workspace, .app-shell--integrations .viewer-section { display: none; }
+.app-shell .workspace { flex: 1 1 auto; min-height: 0; }
+.app-shell .viewer-section { flex: 0 0 42%; min-height: 280px; }
+.browser-queue--browse > .batch-panel, .browser-queue--batch > .browser-queue__body { display: none; }
+.browser-queue--batch > .batch-panel { min-height: 0; overflow: auto; padding: 18px 24px; }
+.browser-queue--batch .browser-queue__toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+.browser-queue--batch .browser-breadcrumbs { display: none; }
 .brand-mark, .topbar__actions, .panel__heading, .canvas-panel__toolbar, .canvas-panel__footer, .preview-strip { display: flex; align-items: center; }
 .brand-mark { gap: 10px; }
 .brand-mark__glyph { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid #58c6aa; border-radius: 9px; color: #8cebd3; font-size: 11px; font-weight: 800; letter-spacing: -.05em; }
 .brand-mark strong, .brand-mark small { display: block; }
 .brand-mark strong { font-size: 14px; letter-spacing: .01em; }
 .brand-mark small { margin-top: 2px; color: #768191; font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
-.topbar__actions { gap: 8px; }
+.topbar__actions { gap: 8px; white-space: nowrap; }
 .button { border: 1px solid #2b3645; border-radius: 7px; padding: 8px 13px; color: #dfe8f2; background: #151b24; font-size: 12px; font-weight: 700; }
 .button:hover { border-color: #526377; background: #1a2431; }
 .button--primary { border-color: #58c6aa; color: #07100e; background: #6ee7c7; }
@@ -475,6 +493,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 
 @media (max-width: 1100px) {
+  .topbar { gap: 8px; padding: 0 12px; }
+  .workspace-modes button { padding: 7px 6px; font-size: 10px; }
+  .topbar__actions .button { padding: 7px 8px; font-size: 10px; }
   .workspace { grid-template-columns: minmax(180px, 22%) minmax(0, 1fr) minmax(205px, 24%); }
   .preview-strip__hint { display: none; }
   .viewer-pane__target { min-width: 120px; }
@@ -483,8 +504,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 }
 
 @media (max-width: 820px) {
-  .topbar { flex-wrap: wrap; gap: 10px; padding: 10px 16px; }
+  .topbar { flex: 0 0 auto; flex-wrap: wrap; gap: 10px; padding: 10px 16px; }
   .topbar__actions { flex-wrap: wrap; justify-content: flex-end; }
+  .workspace-modes { order: 3; width: 100%; overflow-x: auto; }
   .integration-strip { grid-template-columns: minmax(0, 1fr); overflow: auto; }
   .source-metadata { flex-wrap: wrap; gap: 12px 18px; }
   .source-metadata dl { grid-template-columns: repeat(3, minmax(80px, 1fr)); }
@@ -501,7 +523,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 @media (max-width: 640px) {
   html, body, #root { height: auto; min-height: 100%; }
-  .app-shell { height: auto; min-height: 100vh; grid-template-rows: auto; }
+  body { overflow: auto; }
+  .app-shell { height: auto; min-height: 100vh; overflow: visible; }
   .topbar { align-items: flex-start; flex-direction: column; padding: 12px 16px; }
   .topbar__actions { width: 100%; justify-content: flex-start; }
   .integration-strip { overflow: visible; }
@@ -511,6 +534,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .source-metadata { align-items: flex-start; padding: 10px 16px; }
   .source-metadata dl { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .browser-queue { grid-template-rows: auto auto; }
+  .app-shell--browse .browser-queue, .app-shell--batch .browser-queue { min-height: 60vh; }
   .browser-queue__toolbar { grid-template-areas: 'title' 'breadcrumbs' 'actions'; grid-template-columns: minmax(0, 1fr); }
   .browser-queue__body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(400px, auto) minmax(500px, auto); overflow: visible; }
   .browser-panel, .queue-panel { overflow: visible; }

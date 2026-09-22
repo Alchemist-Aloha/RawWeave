@@ -301,6 +301,7 @@ function DependencySummary({
 }
 
 export default function App() {
+  const [workspaceMode, setWorkspaceMode] = useState<'build' | 'browse' | 'batch' | 'integrations'>('build');
   const [platform] = useState(() => createPlatform());
   const [batchPlatform] = useState(() => createBatchPlatform());
   const [controller] = useState(() => new EditorController(platform));
@@ -612,6 +613,7 @@ export default function App() {
         }
       },
     });
+    setWorkspaceMode('build');
   }, [controller, initializeEditor, setActiveImageSetId, setImageSets, viewerController]);
 
   const onImageSetsChange = useCallback((collections: ImageSetCollection[], activeId: string | null) => {
@@ -727,6 +729,7 @@ export default function App() {
         const image = await controller.openImage(path);
         viewerController.setSourceDimensions(image);
         setImageError(null);
+        setWorkspaceMode('build');
       } catch (error) {
         setImageError(error instanceof Error ? error.message : String(error));
       }
@@ -741,6 +744,7 @@ export default function App() {
         const firstMember = imageSet.members[0];
         if (firstMember) viewerController.setSourceDimensions({ width: firstMember.width, height: firstMember.height });
         setImageError(null);
+        setWorkspaceMode('build');
       } catch (error) {
         setImageError(error instanceof Error ? error.message : String(error));
         throw error;
@@ -838,7 +842,7 @@ export default function App() {
   const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell app-shell--${workspaceMode}`}>
       <header className="topbar">
         <div className="brand-mark">
           <span className="brand-mark__glyph">RW</span>
@@ -847,6 +851,19 @@ export default function App() {
             <small>node graph editor</small>
           </span>
         </div>
+        <nav aria-label="Workspace mode" className="workspace-modes">
+          {(['build', 'browse', 'batch', 'integrations'] as const).map((mode) => (
+            <button
+              aria-current={workspaceMode === mode ? 'page' : undefined}
+              className={workspaceMode === mode ? 'is-active' : ''}
+              key={mode}
+              onClick={() => setWorkspaceMode(mode)}
+              type="button"
+            >
+              {mode === 'build' ? 'Build / Preview' : mode === 'browse' ? 'Browse / Queue' : mode === 'batch' ? 'Batch' : 'Integrations'}
+            </button>
+          ))}
+        </nav>
         <div className="topbar__actions">
           <button className="button button--quiet" onClick={() => void openImage()} type="button">
             Open Image
@@ -877,44 +894,24 @@ export default function App() {
           >
             Redo
           </button>
-          <button
-            aria-expanded={showShortcuts}
-            aria-haspopup="dialog"
-            className="button button--quiet"
-            onClick={() => setShowShortcuts((visible) => !visible)}
-            type="button"
-          >
-            ? Shortcuts
-          </button>
-          <button
-            className="button button--quiet"
-            onClick={() => blueprintInput.current?.click()}
-            type="button"
-          >
-            Import blueprint
-          </button>
-          <button
-            className="button button--quiet"
-            onClick={() => void blueprintAction('save').catch(() => undefined)}
-            type="button"
-          >
-            Save blueprint
-          </button>
-          <button
-            className="button button--quiet"
-            onClick={() => void blueprintAction('export').catch(() => undefined)}
-            type="button"
-          >
-            Export blueprint
-          </button>
-          <button
-            className="button button--quiet"
-            disabled={!controller.state.blueprint}
-            onClick={instantiateBlueprint}
-            type="button"
-          >
-            Instantiate
-          </button>
+          <details className="topbar__more">
+            <summary className="button button--quiet">More</summary>
+            <div className="topbar__more-menu">
+              <button
+                aria-expanded={showShortcuts}
+                aria-haspopup="dialog"
+                className="button button--quiet"
+                onClick={() => setShowShortcuts((visible) => !visible)}
+                type="button"
+              >
+                Shortcuts
+              </button>
+              <button className="button button--quiet" onClick={() => blueprintInput.current?.click()} type="button">Import blueprint</button>
+              <button className="button button--quiet" onClick={() => void blueprintAction('save').catch(() => undefined)} type="button">Save blueprint</button>
+              <button className="button button--quiet" onClick={() => void blueprintAction('export').catch(() => undefined)} type="button">Export blueprint</button>
+              <button className="button button--quiet" disabled={!controller.state.blueprint} onClick={instantiateBlueprint} type="button">Instantiate</button>
+            </div>
+          </details>
           <input
             accept="application/json,.json"
             className="sr-only"
@@ -946,6 +943,7 @@ export default function App() {
 
       <SourceMetadata source={controller.state.source} />
       <BrowserQueue
+        mode={workspaceMode === 'batch' ? 'batch' : 'browse'}
         activeImageSetId={activeImageSetId}
         batchPlatform={batchPlatform}
         batchWorkflow={batchWorkflow}

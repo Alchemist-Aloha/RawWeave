@@ -1,9 +1,11 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ClippingOverlay, targetsFor } from './Viewer';
+import { ClippingOverlay, targetsFor, Viewer } from './Viewer';
 import { analyzeImageData } from '../viewer/analysis';
 import type { EditorNode } from '../editor/types';
+import { ViewerController } from '../viewer/controller';
+import type { PreviewTransport } from '../viewer/transport';
 
 function node(id: string, outputs: Array<{ id: string; name: string; dataType: string }>): EditorNode {
   return {
@@ -23,6 +25,72 @@ function node(id: string, outputs: Array<{ id: string; name: string; dataType: s
 }
 
 describe('Viewer', () => {
+  it('selects the ordinary workflow output when an image opens', async () => {
+    const requests: string[] = [];
+    const transport: PreviewTransport = {
+      requestPreview: (request) => {
+        requests.push(`${request.nodeId}:${request.outputPort}`);
+        return new Promise(() => undefined);
+      },
+      cancelPreview: async () => undefined,
+      releasePreview: async () => undefined,
+    };
+    const controller = new ViewerController(transport);
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    output.typeId = 'core.output';
+
+    await act(async () => root.render(
+      <Viewer
+        controller={controller}
+        nodes={[input, output]}
+        revision={1}
+        source={{ kind: 'ordinary', width: 640, height: 480, revision: 1, metadata: null }}
+      />,
+    ));
+
+    expect(controller.state.panes.A.target?.nodeId).toBe('output');
+    expect(requests).toContain('output:image');
+
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it('selects the RAW display transform when a RAW image opens', async () => {
+    const requests: string[] = [];
+    const controller = new ViewerController({
+      requestPreview: (request) => {
+        requests.push(`${request.nodeId}:${request.outputPort}`);
+        return new Promise(() => undefined);
+      },
+      cancelPreview: async () => undefined,
+      releasePreview: async () => undefined,
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const display = node('display', [{ id: 'display', name: 'Display', dataType: 'color.DisplayRGB' }]);
+    display.typeId = 'raw.display-transform';
+
+    await act(async () => root.render(
+      <Viewer
+        controller={controller}
+        nodes={[display]}
+        revision={1}
+        source={{ kind: 'raw', width: 640, height: 480, revision: 1, metadata: null }}
+      />,
+    ));
+
+    expect(controller.state.panes.A.target?.nodeId).toBe('display');
+    expect(requests).toContain('display:display');
+
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
   it('offers ordinary and spatial graph values as preview targets', () => {
     const targets = targetsFor([
       node('segmentation', [

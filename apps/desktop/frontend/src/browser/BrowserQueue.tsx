@@ -14,6 +14,7 @@ import { createImageSet } from '../imageset/model';
 import type { ImageSetCollection, ImageSetOrder } from '../imageset/model';
 
 export interface BrowserQueueProps {
+  mode?: 'browse' | 'batch';
   platform?: BrowserPlatform;
   initialFolder?: string;
   workflowBinding?: WorkflowBinding | null;
@@ -80,6 +81,7 @@ export function createBrowserSession(
 }
 
 export function BrowserQueue({
+  mode = 'browse',
   platform: providedPlatform,
   initialFolder = '',
   workflowBinding = null,
@@ -345,11 +347,11 @@ export function BrowserQueue({
   }, [currentOverrideCount, currentQueueItem, onPromoteOverrides, queueController, run]);
 
   return (
-    <section aria-label="File browser and working queue" className="browser-queue">
+    <section aria-label="File browser and working queue" className={`browser-queue browser-queue--${mode}`}>
       <header className="browser-queue__toolbar">
         <div className="browser-queue__title">
-          <span className="eyebrow">Browse → Queue</span>
-          <strong>{browser.currentFolder || 'Choose a photo folder'}</strong>
+          <span className="eyebrow">{mode === 'batch' ? 'Batch processing' : 'Browse → Queue'}</span>
+          <strong>{mode === 'batch' ? `${queue.items.length} queued image${queue.items.length === 1 ? '' : 's'}` : browser.currentFolder || 'Choose a photo folder'}</strong>
           {browser.loading && <small>Loading thumbnails and metadata…</small>}
         </div>
         <nav aria-label="Folder breadcrumbs" className="browser-breadcrumbs">
