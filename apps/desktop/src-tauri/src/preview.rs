@@ -354,6 +354,7 @@ impl PreviewManager {
                 .status(200)
                 .header("Content-Type", PREVIEW_MIME_TYPE)
                 .header("Cache-Control", "no-store")
+                .header("Access-Control-Allow-Origin", "*")
                 .body(bytes)
                 .expect("valid preview response"),
             None => Response::builder()
@@ -1396,6 +1397,10 @@ mod tests {
         assert_eq!(
             response.headers().get("Content-Type").unwrap(),
             PREVIEW_MIME_TYPE
+        );
+        assert_eq!(
+            response.headers().get("Access-Control-Allow-Origin").unwrap(),
+            "*"
         );
         assert_eq!(response.body(), &bytes);
     }

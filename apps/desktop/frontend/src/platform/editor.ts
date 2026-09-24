@@ -21,6 +21,7 @@ import type {
   CreateSubgraphOptions,
 } from '../editor/types';
 import { createTauriPlatform } from './tauri';
+import { isTauriRuntime } from './runtime';
 
 import { aiNodeDescriptors } from './ai-nodes';
 
@@ -1329,7 +1330,7 @@ export function createMemoryPlatform(): EditorPlatform {
 }
 
 export function createPlatform(): EditorPlatform {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+  if (isTauriRuntime()) {
     return createTauriPlatform();
   }
   return createMemoryPlatform();

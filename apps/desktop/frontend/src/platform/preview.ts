@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { PreviewRequest, PreviewResult } from '../viewer/types';
 import type { PreviewTransport } from '../viewer/transport';
+import { isTauriRuntime } from './runtime';
 
 interface PreviewReadyEvent extends PreviewResult {}
 interface PreviewProgressEvent {
@@ -95,7 +96,7 @@ class BrowserPreviewTransport implements PreviewTransport {
 }
 
 export function createPreviewTransport(): PreviewTransport {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+  if (isTauriRuntime()) {
     return createTauriPreviewTransport();
   }
   return new BrowserPreviewTransport();

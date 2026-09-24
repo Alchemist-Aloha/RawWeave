@@ -25,6 +25,7 @@ import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
 import type { ViewerState } from './viewer/types';
 import { createPreviewTransport } from './platform/preview';
+import { isTauriRuntime } from './platform/runtime';
 import { BrowserQueue } from './browser/BrowserQueue';
 import type { BrowserSession } from './browser/types';
 import type { ImageSetCollection, ImageSetOrder } from './imageset/model';
@@ -323,7 +324,7 @@ export default function App() {
   const imageInput = useRef<HTMLInputElement>(null);
   const nodeSearchInput = useRef<HTMLInputElement>(null);
   const editorInitialization = useRef<Promise<void> | null>(null);
-  const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  const isTauri = isTauriRuntime();
 
   const refreshEditorDescriptors = useCallback(
     () => controller.refreshDescriptors(),

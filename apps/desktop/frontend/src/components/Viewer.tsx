@@ -223,6 +223,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
           <img
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
             className={`viewer-pane__image${pane.zoomMode === 'fit' ? ' viewer-pane__image--fit' : ''}`}
+            crossOrigin="anonymous"
             height={pane.height ?? undefined}
             onError={() => controller.reportImageLoadFailure(viewer, imageUrl)}
             onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}

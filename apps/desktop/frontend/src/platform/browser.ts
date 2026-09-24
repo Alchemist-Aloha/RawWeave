@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import type { BrowserPlatform } from '../browser/controller';
 import { defaultSession, parseSession, serializeSession } from '../browser/session';
 import type { BrowserEntry, BrowserSession, DirectoryPage, FileOperationResult } from '../browser/types';
+import { isTauriRuntime } from './runtime';
 
 interface RustDirectoryEntry {
   path: string;
@@ -179,6 +180,6 @@ export function createMemoryBrowserPlatform(initialEntries: BrowserEntry[] = [])
 }
 
 export function createBrowserPlatform(): BrowserPlatform {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) return createTauriBrowserPlatform();
+  if (isTauriRuntime()) return createTauriBrowserPlatform();
   return createMemoryBrowserPlatform();
 }

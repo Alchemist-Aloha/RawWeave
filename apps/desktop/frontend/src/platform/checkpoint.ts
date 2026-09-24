@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { isTauriRuntime } from './runtime';
 import type {
   CheckpointGeneration,
   CheckpointPlatform,
@@ -236,6 +237,6 @@ export function createMemoryCheckpointPlatform(initial: CheckpointStatus[] = [])
 }
 
 export function createCheckpointPlatform(initial: CheckpointStatus[] = []): CheckpointPlatform {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) return createTauriCheckpointPlatform();
+  if (isTauriRuntime()) return createTauriCheckpointPlatform();
   return createMemoryCheckpointPlatform(initial);
 }

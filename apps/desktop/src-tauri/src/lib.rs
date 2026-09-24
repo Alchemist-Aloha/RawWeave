@@ -4068,7 +4068,7 @@ pub(crate) fn preview_diagnostics_enabled() -> bool {
 pub fn run() {
     let preview = Arc::new(preview::PreviewManager::default());
     let protocol_preview = Arc::clone(&preview);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("rawweave-preview", move |_ctx, request| {
             let response = protocol_preview.response(&request);
@@ -4182,7 +4182,12 @@ pub fn run() {
             browser::trash_file,
             browser::save_session,
             browser::load_session,
-        ])
+        ]);
+    #[cfg(feature = "wdio-e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .run(tauri::generate_context!())
         .expect("error while running RawWeave");
 }

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isTauriRuntime } from './runtime';
 import type { NodeDescriptor, ParameterType, ParameterValue, PortDescriptor, WorkflowDependency, WorkflowMetadata, WorkflowParameter, WorkflowPort } from '../editor/types';
 import type { BatchPlatform, BatchCreateOptions, BatchDependencies, BatchDiagnostic, BatchDryRunResult, BatchItem, BatchJob, BatchPreflightOptions, BatchPreflightReport, BatchRecipe, BatchSubset, BatchWorkflowDefinition } from '../batch/types';
 
@@ -485,7 +486,7 @@ export function createTauriBatchPlatform(): BatchPlatform {
 }
 
 export function createBatchPlatform(initialJobs: BatchJob[] = []): BatchPlatform {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) return createTauriBatchPlatform();
+  if (isTauriRuntime()) return createTauriBatchPlatform();
   return createMemoryBatchPlatform(initialJobs);
 }
 function itemCanRetry(state: BatchItem['state']): boolean {

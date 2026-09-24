@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isTauriRuntime } from './runtime';
 import type {
   AiProvider,
   AiProviderConfig,
@@ -116,6 +117,6 @@ export function createMemoryAiProviderPlatform(initial: AiProviderConfig[] = [])
 }
 
 export function createAiProviderPlatform(initial: AiProviderConfig[] = []): AiProviderPlatform {
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) return createTauriAiProviderPlatform();
+  if (isTauriRuntime()) return createTauriAiProviderPlatform();
   return createMemoryAiProviderPlatform(initial);
 }
