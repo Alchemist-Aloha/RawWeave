@@ -32,6 +32,64 @@ describe('real Tauri preview', () => {
     await expect($('section[aria-label="Image scopes"]')).toBeDisplayed();
   });
 
+  it('keeps a rendered preview on screen while the graph and layout change', async () => {
+    const image = await $('.viewer-pane__image');
+    await image.waitForDisplayed({ timeout: 20_000 });
+    await browser.waitUntil(async () => browser.execute(() => document.querySelector('.viewer-pane__image')?.complete === true), {
+      timeout: 20_000,
+      timeoutMsg: 'the restored preview did not finish loading',
+    });
+
+    await browser.execute(() => {
+      window.__flicker = { samples: 0, missing: 0 };
+      window.__flickerTimer = window.setInterval(() => {
+        window.__flicker.samples += 1;
+        const element = document.querySelector('.viewer-pane__image');
+        if (!element || !element.complete || element.naturalWidth === 0) window.__flicker.missing += 1;
+      }, 25);
+    });
+
+    // Adding a node changes the canvas height, and dragging one publishes
+    // editor state; both used to restart the preview and blank the pane.
+    const search = await $('input[placeholder="Search nodes"]');
+    await search.setValue('Exposure');
+    const item = await $('.node-library__item');
+    await item.waitForDisplayed();
+    await item.click();
+    await browser.pause(800);
+    await browser.execute(async () => {
+      const node = document.querySelector('.react-flow__node');
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + 12;
+      const fire = (target, type, at) => target.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, composed: true, view: window,
+        detail: 1, button: 0, buttons: type === 'mouseup' ? 0 : 1, clientX: at.x, clientY: at.y,
+      }));
+      fire(node, 'mousedown', { x, y });
+      for (let step = 1; step <= 10; step += 1) {
+        fire(window, 'mousemove', { x: x + step * 6, y: y + step * 4 });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      fire(window, 'mouseup', { x: x + 60, y: y + 40 });
+    });
+    await browser.pause(2500);
+
+    const flicker = await browser.execute(() => {
+      window.clearInterval(window.__flickerTimer);
+      return window.__flicker;
+    });
+    expect(flicker.samples).toBeGreaterThan(20);
+    expect(flicker.missing).toBe(0);
+    await expect($('.viewer-pane__image')).toBeDisplayed();
+
+    // Restore the shared graph for the specs that run after this one.
+    await $('[aria-label="Exposure node"]').click();
+    await $('[aria-label="Delete Exposure"]').click();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('2 nodes'));
+  });
+
   it('keeps the workflow graph visible after switching workspaces', async () => {
     const workspace = await $('section.workspace');
     const flow = await $('.react-flow');

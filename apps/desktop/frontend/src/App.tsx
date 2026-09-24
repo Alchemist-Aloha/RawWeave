@@ -146,6 +146,46 @@ export interface EditorErrorNotice {
   guidance: string;
 }
 
+const PANEL_STORAGE_KEY = 'rawweave.panels';
+type PanelId = 'library' | 'inspector' | 'viewer';
+type PanelVisibility = Record<PanelId, boolean>;
+
+const PANELS: Array<{ id: PanelId; label: string }> = [
+  { id: 'library', label: 'Library' },
+  { id: 'inspector', label: 'Inspector' },
+  { id: 'viewer', label: 'Viewer' },
+];
+
+const DEFAULT_PANELS: PanelVisibility = { library: true, inspector: true, viewer: true };
+
+export function readPanelVisibility(storage?: Pick<Storage, 'getItem'> | null): PanelVisibility {
+  try {
+    const raw = storage?.getItem(PANEL_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_PANELS };
+    const parsed = JSON.parse(raw) as Partial<PanelVisibility>;
+    return {
+      library: parsed.library !== false,
+      inspector: parsed.inspector !== false,
+      viewer: parsed.viewer !== false,
+    };
+  } catch {
+    return { ...DEFAULT_PANELS };
+  }
+}
+
+function loadPanelVisibility(): PanelVisibility {
+  return readPanelVisibility(typeof window === 'undefined' ? null : window.localStorage);
+}
+
+function savePanelVisibility(visibility: PanelVisibility): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(visibility));
+  } catch {
+    // Persisting the layout is a convenience; ignore storage failures.
+  }
+}
+
 export function compatibleDataTypesForNode(node: EditorNode | undefined): string[] {
   if (!node) return [];
   return [...new Set(node.descriptor.outputs.map((output) => output.dataType))];
@@ -345,6 +385,7 @@ export default function App() {
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
+  const [panels, setPanels] = useState<PanelVisibility>(loadPanelVisibility);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -402,6 +443,14 @@ export default function App() {
     controller.state.workflowOutputs,
     controller.state.workflowParameters,
   ]);
+
+  useEffect(() => {
+    savePanelVisibility(panels);
+  }, [panels]);
+
+  const togglePanel = useCallback((id: PanelId) => {
+    setPanels((current) => ({ ...current, [id]: !current[id] }));
+  }, []);
 
   useEffect(() => {
     const unsubscribe = checkpointController.subscribe(() => setCheckpointRevision((revision) => revision + 1));
@@ -874,7 +923,7 @@ export default function App() {
   const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
-    <main className={`app-shell app-shell--${workspaceMode}`}>
+    <main className={`app-shell app-shell--${workspaceMode}${panels.viewer ? '' : ' app-shell--no-viewer'}`}>
       <header className="topbar">
         <div className="brand-mark">
           <span className="brand-mark__glyph">RW</span>
@@ -993,7 +1042,7 @@ export default function App() {
         workflowParameters={controller.state.workflowParameters}
       />
 
-      <section className="workspace">
+      <section className={`workspace${panels.library ? '' : ' workspace--no-library'}${panels.inspector ? '' : ' workspace--no-inspector'}`}>
         <NodeLibrary
           compatibleDataTypes={compatibleDataTypes}
           descriptors={controller.state.descriptors}
@@ -1043,6 +1092,21 @@ export default function App() {
               <span className="canvas-panel__meta">
                 {controller.state.nodes.length} nodes&nbsp; · &nbsp;{controller.state.edges.length} links
               </span>
+              <div aria-label="Panel visibility" className="panel-toggles" role="group">
+                {PANELS.map((panel) => (
+                  <button
+                    aria-label={`${panels[panel.id] ? 'Hide' : 'Show'} ${panel.label}`}
+                    aria-pressed={panels[panel.id]}
+                    className={panels[panel.id] ? 'is-active' : ''}
+                    key={panel.id}
+                    onClick={() => togglePanel(panel.id)}
+                    title={`${panels[panel.id] ? 'Hide' : 'Show'} ${panel.label}`}
+                    type="button"
+                  >
+                    {panel.label}
+                  </button>
+                ))}
+              </div>
               <DependencySummary report={controller.state.dependencyReport} hash={controller.state.workflowHash} />
             </div>
           </div>
@@ -1057,6 +1121,7 @@ export default function App() {
               onEdgesChange={onEdgesChange}
               onNodeClick={(event, node) => toggleNodeSelection(event, node.id)}
               onNodesChange={onNodesChange}
+              onNodeDragStop={(_, node) => controller.updateNodePosition(node.id, node.position, false)}
               onPaneClick={() => controller.selectNode(null)}
               proOptions={{ hideAttribution: true }}
             >

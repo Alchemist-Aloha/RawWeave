@@ -81,6 +81,19 @@ export class EditorController {
     this.publish();
   }
 
+  /**
+   * Updates state without notifying subscribers.
+   *
+   * React Flow already moves the dragged node in its own store, so repainting
+   * the whole editor on every pointer move only starves the compositor: it
+   * re-renders the viewer, inspector and the hidden file browser/queue panels
+   * hundreds of times per gesture. The drag position is still tracked here so
+   * nothing is lost, and the gesture commits (and notifies) once it ends.
+   */
+  private setStateSilently(patch: Partial<EditorState>): void {
+    this.state = { ...this.state, ...patch };
+  }
+
   private cloneHistorySnapshot(snapshot: HistorySnapshot): HistorySnapshot {
     return {
       graph: snapshot.graph,
@@ -431,14 +444,25 @@ export class EditorController {
   }
 
   public updateNodePosition(nodeId: string, position: Position, dragging = false): void {
+    if (!this.state.nodes.some((node) => node.id === nodeId)) return;
+    const current = this.positions.get(nodeId);
+    if (current?.x === position.x && current.y === position.y) {
+      if (!dragging) this.commitPendingPositionHistory();
+      return;
+    }
     if (!this.pendingPositionHistory && this.currentHistorySnapshot) {
       this.pendingPositionHistory = this.cloneHistorySnapshot(this.currentHistorySnapshot);
     }
     this.positions.set(nodeId, { ...position });
-    this.setState({
-      nodes: this.state.nodes.map((node) => (node.id === nodeId ? { ...node, position: { ...position } } : node)),
-    });
-    if (!dragging) this.commitPendingPositionHistory();
+    const nodes = this.state.nodes.map((node) => (
+      node.id === nodeId ? { ...node, position: { ...position } } : node
+    ));
+    if (dragging) {
+      this.setStateSilently({ nodes });
+      return;
+    }
+    this.setState({ nodes });
+    this.commitPendingPositionHistory();
   }
 
   private async serializeWorkflowDocument(): Promise<string> {

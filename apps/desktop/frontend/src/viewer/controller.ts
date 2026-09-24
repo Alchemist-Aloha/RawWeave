@@ -128,6 +128,13 @@ export class ViewerController {
     for (const listener of this.sessionListeners) listener();
   }
 
+  /** Applies a new preview frame and releases the frame it replaces. */
+  private replacePanePreview(viewer: ViewerId, patch: Partial<ViewerPaneState>): void {
+    const previous = this.state.panes[viewer].imageUrl;
+    this.setPane(viewer, patch);
+    if (previous && previous !== patch.imageUrl) this.releasePreview(previous);
+  }
+
   private setPane(viewer: ViewerId, patch: Partial<ViewerPaneState>): void {
     this.state = {
       ...this.state,
@@ -171,12 +178,9 @@ export class ViewerController {
       this.active.delete(viewer);
       void this.transport.cancelPreview(current.request.requestId);
     }
-    this.releasePanePreview(viewer);
-    this.setPane(viewer, {
-      imageUrl: null,
-      width: null,
-      height: null,
-    });
+    // Keep the previous preview on screen while the replacement renders; the
+    // old URL is released once the new one is applied. Blanking here makes the
+    // pane flash on every viewport or revision change.
     this.startRequest(viewer, target);
   }
 
@@ -224,19 +228,25 @@ export class ViewerController {
     }
     for (const viewer of ['A', 'B'] as ViewerId[]) {
       this.cancelPanRender(viewer);
-      this.releasePanePreview(viewer);
       this.imageDimensions.delete(viewer);
       const target = this.state.panes[viewer].target;
-      this.setPane(viewer, {
-        status: target ? 'loading' : 'idle',
-        requestId: null,
-        progress: 0,
-        imageUrl: null,
-        width: null,
-        height: null,
-        error: null,
-      });
-      if (target) this.startRequest(viewer, target);
+      if (!target) {
+        this.releasePanePreview(viewer);
+        this.setPane(viewer, {
+          status: 'idle',
+          requestId: null,
+          progress: 0,
+          imageUrl: null,
+          width: null,
+          height: null,
+          error: null,
+        });
+        continue;
+      }
+      // The previous frame stays visible until the new revision arrives so the
+      // pane does not flash empty on every graph change.
+      this.setPane(viewer, { status: 'loading', requestId: null, progress: 0, error: null });
+      this.startRequest(viewer, target);
     }
     this.publish();
   }
@@ -348,11 +358,10 @@ export class ViewerController {
           (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip)
         ) {
           this.releasePreview(result.url);
-          this.setPane(viewer, { imageUrl: null, width: null, height: null });
           this.startRequest(viewer, target);
           return;
         }
-        this.setPane(viewer, {
+        this.replacePanePreview(viewer, {
           imageUrl: result.url,
           width: result.width,
           height: result.height,
@@ -380,6 +389,7 @@ export class ViewerController {
     if (!active) return;
     this.active.delete(viewer);
     await this.transport.cancelPreview(active.request.requestId);
+    this.releasePanePreview(viewer);
     this.setPane(viewer, {
       status: 'cancelled',
       requestId: null,

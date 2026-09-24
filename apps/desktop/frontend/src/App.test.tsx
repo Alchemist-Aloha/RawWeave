@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compatibleDataTypesForNode, describeEditorError, restoreBrowserSession, selectionFromNodeChanges } from './App';
+import { compatibleDataTypesForNode, describeEditorError, readPanelVisibility, restoreBrowserSession, selectionFromNodeChanges } from './App';
 import type { EditorNode, OpenImageResult } from './editor/types';
 import { defaultSession } from './browser/session';
 import type { NodeChange } from '@xyflow/react';
@@ -25,6 +25,20 @@ describe('canvas selection changes', () => {
   it('ignores non-selection changes', () => {
     const changes = [{ id: 'a', type: 'position', position: { x: 1, y: 2 } }] as NodeChange[];
     expect(selectionFromNodeChanges(['a'], changes)).toBeNull();
+  });
+});
+
+describe('panel visibility', () => {
+  const storage = (value: string | null) => ({ getItem: () => value });
+
+  it('shows every panel by default and recovers from bad stored values', () => {
+    expect(readPanelVisibility(null)).toEqual({ library: true, inspector: true, viewer: true });
+    expect(readPanelVisibility(storage('{ not json'))).toEqual({ library: true, inspector: true, viewer: true });
+  });
+
+  it('restores collapsed panels from storage', () => {
+    expect(readPanelVisibility(storage('{"library":false,"viewer":false}')))
+      .toEqual({ library: false, inspector: true, viewer: false });
   });
 });
 

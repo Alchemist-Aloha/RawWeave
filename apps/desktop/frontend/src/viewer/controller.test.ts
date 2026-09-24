@@ -287,6 +287,54 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.displayScale).toBe(1);
   });
 
+  it('keeps the current preview visible while a replacement renders', async () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.setTarget('A', target('output'));
+    const first = transport.requests[0];
+    transport.pending.get(first.requestId)!.resolve(result(first, { fullWidth: 400, fullHeight: 300 }));
+    await Promise.resolve();
+    const firstUrl = viewer.state.panes.A.imageUrl;
+    expect(firstUrl).toBeTruthy();
+
+    viewer.setZoom('A', 0.5);
+
+    // The old frame stays on screen and stays alive until the new one lands.
+    expect(viewer.state.panes.A.imageUrl).toBe(firstUrl);
+    expect(transport.releases).toEqual([]);
+
+    const second = transport.requests.at(-1)!;
+    transport.pending.get(second.requestId)!.resolve(result(second));
+    await Promise.resolve();
+
+    expect(viewer.state.panes.A.imageUrl).not.toBe(firstUrl);
+    expect(transport.releases).toEqual([firstUrl]);
+  });
+
+  it('keeps the current preview visible across a revision change', async () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setRevision(1);
+    viewer.setTarget('A', target('output'));
+    const first = transport.requests[0];
+    transport.pending.get(first.requestId)!.resolve(result(first));
+    await Promise.resolve();
+    const firstUrl = viewer.state.panes.A.imageUrl;
+
+    viewer.setRevision(2);
+
+    expect(viewer.state.panes.A.imageUrl).toBe(firstUrl);
+    expect(viewer.state.panes.A.status).toBe('loading');
+
+    const second = transport.requests.at(-1)!;
+    transport.pending.get(second.requestId)!.resolve(result(second));
+    await Promise.resolve();
+
+    expect(transport.releases).toEqual([firstUrl]);
+  });
+
   it('releases an old protocol URL when a pane replaces its preview', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);

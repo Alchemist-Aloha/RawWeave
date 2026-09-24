@@ -40,7 +40,14 @@ async function canvasGeometry() {
 describe('workflow canvas layout', () => {
   beforeEach(async () => {
     await browser.url('http://127.0.0.1:5178/');
+    await browser.execute(() => window.localStorage.removeItem('rawweave.panels'));
+    await browser.refresh();
     await $('.react-flow').waitForDisplayed();
+  });
+
+  afterEach(async () => {
+    // Panel visibility is persisted, so reset it between tests.
+    await browser.execute(() => window.localStorage.removeItem('rawweave.panels'));
   });
 
   it('keeps the graph visible after workspace changes and viewport resizes', async () => {
@@ -76,6 +83,28 @@ describe('workflow canvas layout', () => {
     for (const offset of offsets) expect(offset).toBeLessThan(3);
   });
 
+  it('collapses and restores the library, inspector, and viewer panels', async () => {
+    const canvasWidth = () => browser.execute(() => Math.round(document.querySelector('.flow-canvas')?.getBoundingClientRect().width ?? 0));
+    const initialWidth = await canvasWidth();
+
+    await $('button[aria-label="Hide Library"]').click();
+    await expect($('.panel--library')).not.toBeDisplayed();
+    expect(await canvasWidth()).toBeGreaterThan(initialWidth);
+
+    await $('button[aria-label="Hide Inspector"]').click();
+    await expect($('.panel--inspector')).not.toBeDisplayed();
+
+    await $('button[aria-label="Hide Viewer"]').click();
+    await expect($('.viewer-section')).not.toBeDisplayed();
+
+    await $('button[aria-label="Show Library"]').click();
+    await $('button[aria-label="Show Inspector"]').click();
+    await $('button[aria-label="Show Viewer"]').click();
+    await expect($('.panel--library')).toBeDisplayed();
+    await expect($('.panel--inspector')).toBeDisplayed();
+    await expect($('.viewer-section')).toBeDisplayed();
+  });
+
   it('keeps the workspace mounted while dragging a node in a multi-node graph', async () => {
     const inputs = await $$('.topbar__actions input[type="file"]');
     const image = await browser.uploadFile(imageFixture);
@@ -99,10 +128,19 @@ describe('workflow canvas layout', () => {
     }
     actions.push({ type: 'pointerUp', button: 0 });
     await browser.performActions([{ type: 'pointer', id: 'mouse', parameters: { pointerType: 'mouse' }, actions }]);
-    await browser.pause(800);
+    await browser.pause(300);
 
     await expect($('.flow-canvas')).toExist();
     await expect($$('.react-flow__node')).toBeElementsArrayOfSize(10);
+
+    // The drop must be committed: a later editor re-render (the debounced
+    // working-copy save) must not snap the node back to where it started.
+    const dropped = await node.getLocation();
+    expect(Math.abs(dropped.x - box.x) + Math.abs(dropped.y - box.y)).toBeGreaterThan(5);
+    await browser.pause(800);
+    const settled = await node.getLocation();
+    expect(Math.round(settled.x)).toBe(Math.round(dropped.x));
+    expect(Math.round(settled.y)).toBe(Math.round(dropped.y));
   });
 
   it('shows nodes after loading a workflow with distant saved positions', async () => {

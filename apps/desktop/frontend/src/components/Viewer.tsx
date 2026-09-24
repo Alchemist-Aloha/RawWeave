@@ -79,10 +79,16 @@ export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer 
     if (typeof ResizeObserver === 'undefined') {
       return () => window.removeEventListener('resize', update);
     }
-    const observer = new ResizeObserver(update);
+    let frame = 0;
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    };
+    const observer = new ResizeObserver(schedule);
     observer.observe(stage);
     observer.observe(image);
     return () => {
+      cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', update);
     };
@@ -157,20 +163,26 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
     const stage = stageRef.current;
     if (!stage) return;
 
-    const updateViewport = (width: number, height: number) => {
-      controller.setViewport(viewer, { width, height });
+    const updateViewport = () => {
+      // Integer client sizes: fractional observer values drift across integer
+      // boundaries during layout and fire repeated preview restarts.
+      controller.setViewport(viewer, { width: stage.clientWidth, height: stage.clientHeight });
     };
-    const measure = () => updateViewport(stage.clientWidth, stage.clientHeight);
-    measure();
+    updateViewport();
 
     if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(([entry]) => {
-      const width = entry?.contentRect.width ?? stage.clientWidth;
-      const height = entry?.contentRect.height ?? stage.clientHeight;
-      updateViewport(width, height);
+    // Defer to the next frame so writing layout from the callback cannot feed
+    // back into the observer ("ResizeObserver loop completed" warning).
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(updateViewport);
     });
     observer.observe(stage);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
   }, [controller, viewer]);
 
   return (

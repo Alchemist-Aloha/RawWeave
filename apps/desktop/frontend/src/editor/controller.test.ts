@@ -127,6 +127,29 @@ describe('editor controller', () => {
     ]);
   });
 
+  it('tracks drag positions without publishing and commits when the drag ends', async () => {
+    const editor = await controller();
+    await editor.createNode('core.image-input', 'input');
+    const start = editor.state.nodes[0].position;
+    let publishes = 0;
+    const unsubscribe = editor.subscribe(() => { publishes += 1; });
+
+    editor.updateNodePosition('input', { x: start.x + 40, y: start.y + 20 }, true);
+    editor.updateNodePosition('input', { x: start.x + 80, y: start.y + 40 }, true);
+
+    // Moving the pointer must not repaint the whole editor on every frame.
+    expect(publishes).toBe(0);
+    expect(editor.state.nodes[0].position).toEqual({ x: start.x + 80, y: start.y + 40 });
+
+    editor.updateNodePosition('input', { x: start.x + 80, y: start.y + 40 }, false);
+    expect(publishes).toBe(1);
+    expect(editor.state.nodes[0].position).toEqual({ x: start.x + 80, y: start.y + 40 });
+
+    await editor.undo();
+    expect(editor.state.nodes[0].position).toEqual(start);
+    unsubscribe();
+  });
+
   it('changes a selected node parameter through the platform command', async () => {
     const editor = await controller();
     await editor.createNode('core.exposure', 'exposure');
