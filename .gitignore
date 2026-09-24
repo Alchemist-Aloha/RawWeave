@@ -4,6 +4,7 @@ target/
 # Frontend dependencies and build output
 node_modules/
 dist/
+/bin/
 
 # Local tooling and generated files
 .vite/
