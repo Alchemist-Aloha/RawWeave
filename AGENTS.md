@@ -97,12 +97,28 @@ cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-ta
 
 ```sh
 cd apps/desktop/frontend
-npm ci
-npm test
-npm run build
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run build
 ```
 
-Do not run `npm audit fix --force`; dependency upgrades and breaking changes require deliberate review.
+Do not force dependency upgrades through an audit fix; breaking changes require deliberate review.
+
+### Desktop end-to-end tests
+
+Run these from `apps/desktop/frontend` after relevant frontend or desktop changes:
+
+```sh
+pnpm run test:e2e:browser
+pnpm run build:e2e:native
+pnpm run test:e2e:native
+```
+
+- Browser mode starts Vite and uses in-memory platform adapters in headless Chrome. Cover each workspace surface and its relevant controls here for fast UI regression checks.
+- The native suite runs the debug Tauri binary through `@wdio/tauri-service`. Use it for Rust command bridge, file/source restoration, preview protocol, image display, scopes, and other behavior that depends on the real WebView or backend.
+- Rebuild the native E2E binary after changing Rust, Tauri configuration, or frontend code that the binary embeds. Keep the `wdio-e2e` plugins and permissions gated to E2E builds.
+- Browser mode does not prove native integration, and component tests do not prove the actual display path. Add a native regression when fixing a native-only bug.
+- See `apps/desktop/frontend/e2e/README.md` for setup, coverage, and runner notes.
 
 ### Image dataset
 
@@ -126,6 +142,7 @@ Add regression coverage for every bug fix. Important areas include:
 - cancellation before/during preview work and stale-result rejection;
 - RAW-to-ordinary transitions and workflow source reattachment;
 - frontend controller behavior independently of React rendering.
+- visible frontend workspace behavior in WebdriverIO browser mode and backend-dependent preview behavior in the native Tauri suite.
 
 Use deterministic synthetic fixtures for precise algorithm assertions. Use the licensed online-derived dataset only for decoder/loader integration smoke tests.
 
