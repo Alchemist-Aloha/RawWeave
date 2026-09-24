@@ -1,6 +1,6 @@
 use rawweave_batch::{
     MAX_ORDINARY_ENCODED_BYTES, MAX_ORDINARY_IMAGE_EDGE, MAX_ORDINARY_IMAGE_PIXELS,
-    OrdinaryDecodeError, decode_ordinary_bytes,
+    OrdinaryDecodeError, decode_ordinary_bytes, validate_dimensions,
 };
 use std::io::Cursor;
 
@@ -70,14 +70,8 @@ fn ordinary_decode_rejects_declared_pixel_count_before_decoding_pixels() {
 }
 
 #[test]
-fn ordinary_decode_rejects_rgba32f_allocations_before_decoding_pixels() {
-    let error = decode_ordinary_bytes(&declared_png(3000, 3000))
-        .expect_err("declared RGBA32F allocation must be rejected");
-
-    assert!(
-        matches!(error, OrdinaryDecodeError::Rgba32fAllocationTooLarge { .. }),
-        "unexpected decode error: {error:?}"
-    );
+fn ordinary_decode_accepts_a_camera_image_within_the_pixel_budget() {
+    assert_eq!(validate_dimensions(4551, 3423), Ok(15_578_073));
 }
 
 #[test]

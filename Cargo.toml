@@ -30,6 +30,7 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
+bytemuck = { version = "1.25", features = ["extern_crate_alloc"] }
 rawweave-core = { path = "crates/core" }
 rawweave-image = { path = "crates/image" }
 rawweave-rendering = { path = "crates/rendering" }

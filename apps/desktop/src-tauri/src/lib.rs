@@ -983,13 +983,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    fn with_checkpoint_manager(checkpoint: Arc<CheckpointManager>) -> Self {
+    fn with_checkpoint_manager(
+        checkpoint: Arc<CheckpointManager>,
+        preview: Arc<preview::PreviewManager>,
+    ) -> Self {
         Self {
             editor: Arc::new(Mutex::new(EditorCore::default())),
             hosts: Arc::new(Mutex::new(
                 hosts::HostManager::load_default().unwrap_or_default(),
             )),
-            preview: Arc::new(preview::PreviewManager::default()),
+            preview,
             source_image: Mutex::new(None),
             source_selection: Mutex::new(SourceSelectionIntent::default()),
             blueprint: Mutex::new(None),
@@ -3088,6 +3091,9 @@ fn instantiate_loaded_blueprint(
     state: &AppState,
     serialized: Option<String>,
 ) -> Result<(), String> {
+    if preview_diagnostics_enabled() {
+        eprintln!("[preview] instantiate blueprint clears source");
+    }
     if let Some(serialized) = serialized {
         load_blueprint_command(state, &serialized)?;
     } else if current_blueprint(state).is_err() {
@@ -3246,6 +3252,9 @@ fn load_workflow(state: State<'_, AppState>, workflow: String) -> Result<(), Str
 }
 
 fn load_workflow_state(state: &AppState, workflow: &str) -> Result<(), String> {
+    if preview_diagnostics_enabled() {
+        eprintln!("[preview] load workflow clears source");
+    }
     let artifact_store = state.checkpoint.store.clone();
     lock_editor(&state.editor)?
         .load_workflow_with_artifact_store(workflow, artifact_store)
@@ -3272,6 +3281,17 @@ async fn request_preview(
     state: State<'_, AppState>,
     request: preview::PreviewRequest,
 ) -> Result<preview::PreviewMetadata, String> {
+    if preview_diagnostics_enabled() {
+        eprintln!(
+            "[preview] request id={} revision={} node={} output={} region={:?} mip={}",
+            request.request_id,
+            request.revision,
+            request.node_id,
+            request.output_port,
+            request.region,
+            request.mip
+        );
+    }
     let editor = lock_editor(&state.editor)?.clone();
     let current_editor = Arc::clone(&state.editor);
     let source_image = state
@@ -3279,6 +3299,9 @@ async fn request_preview(
         .lock()
         .map_err(|_| "source image state is unavailable".to_owned())?
         .clone();
+    if preview_diagnostics_enabled() {
+        eprintln!("[preview] request source present={}", source_image.is_some());
+    }
     let manager = Arc::clone(&state.preview);
     manager.begin(&request.request_id);
     let progress_app = app.clone();
@@ -3314,6 +3337,12 @@ async fn request_preview(
     let result = task
         .await
         .map_err(|error| format!("preview worker failed: {error}"))?;
+    if preview_diagnostics_enabled() {
+        match &result {
+            Ok(metadata) => eprintln!("[preview] rendered id={} metadata={metadata:?}", request.request_id),
+            Err(error) => eprintln!("[preview] render failed id={} error={error}", request.request_id),
+        }
+    }
     match &result {
         Ok(metadata) => {
             let _ = app.emit("preview-ready", metadata);
@@ -3535,8 +3564,15 @@ fn open_image(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<preview::OpenImageMetadata, String> {
-    let (metadata, _) = open_image_state(&state, Path::new(&path), &RawloaderDecoder::default())?;
-    Ok(metadata)
+    let result = open_image_state(&state, Path::new(&path), &RawloaderDecoder::default())
+        .map(|(metadata, _)| metadata);
+    if preview_diagnostics_enabled() {
+        match &result {
+            Ok(metadata) => eprintln!("[preview] opened path={path:?} metadata={metadata:?}"),
+            Err(error) => eprintln!("[preview] open failed path={path:?} error={error}"),
+        }
+    }
+    result
 }
 
 #[tauri::command]
@@ -4025,15 +4061,28 @@ fn cancel_checkpoint(
     Ok(status)
 }
 
+pub(crate) fn preview_diagnostics_enabled() -> bool {
+    std::env::var_os("RAWWEAVE_PREVIEW_DIAGNOSTICS").is_some()
+}
+
 pub fn run() {
     let preview = Arc::new(preview::PreviewManager::default());
     let protocol_preview = Arc::clone(&preview);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .register_uri_scheme_protocol("rawweave-preview", move |_ctx, request| {
-            protocol_preview.response(&request)
+            let response = protocol_preview.response(&request);
+            if preview_diagnostics_enabled() {
+                eprintln!(
+                    "[preview] fetch uri={} status={} bytes={}",
+                    request.uri(),
+                    response.status(),
+                    response.body().len()
+                );
+            }
+            response
         })
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app
                 .path()
                 .app_data_dir()
@@ -4042,7 +4091,7 @@ pub fn run() {
                 CheckpointManager::persistent(data_dir.join("checkpoints"))
                     .map_err(std::io::Error::other)?,
             );
-            app.manage(AppState::with_checkpoint_manager(checkpoint));
+            app.manage(AppState::with_checkpoint_manager(checkpoint, preview));
             let ai_providers = ai::AiProviderManager::persistent(
                 app.path()
                     .app_config_dir()
@@ -4143,6 +4192,28 @@ mod tests {
     use super::*;
     use png::{BitDepth, ColorType, Encoder};
     use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
+
+    #[test]
+    fn app_state_uses_preview_manager_registered_for_uri_requests() {
+        let protocol_preview = Arc::new(preview::PreviewManager::default());
+        let state = AppState::with_checkpoint_manager(
+            Arc::new(CheckpointManager::default()),
+            Arc::clone(&protocol_preview),
+        );
+        assert!(Arc::ptr_eq(&state.preview, &protocol_preview));
+        state
+            .preview
+            .store
+            .insert(preview::preview_path("shared"), 1, vec![1, 2, 3])
+            .unwrap();
+        let request = tauri::http::Request::builder()
+            .uri(preview::preview_url("shared"))
+            .body(Vec::new())
+            .unwrap();
+        let response = protocol_preview.response(&request);
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        assert_eq!(response.body(), &[1, 2, 3]);
+    }
 
     #[test]
     fn tauri_batch_request_rejects_worker_counts_above_the_engine_bound() {

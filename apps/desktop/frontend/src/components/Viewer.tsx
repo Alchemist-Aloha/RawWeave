@@ -143,6 +143,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
   const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const imageUrl = pane.imageUrl;
   const errorNotice = pane.status === 'error' && pane.error
     ? describeOperationError(pane.error, {
       nodeId: pane.target?.nodeId,
@@ -218,14 +219,15 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
           controller.adjustZoom(viewer, event.deltaY < 0 ? 1 : -1);
         }}
       >
-        {pane.imageUrl ? (
+        {imageUrl ? (
           <img
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
             className={`viewer-pane__image${pane.zoomMode === 'fit' ? ' viewer-pane__image--fit' : ''}`}
             height={pane.height ?? undefined}
+            onError={() => controller.reportImageLoadFailure(viewer, imageUrl)}
             onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}
             ref={imageRef}
-            src={pane.imageUrl}
+            src={imageUrl}
             style={{
               transform: `translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
             }}

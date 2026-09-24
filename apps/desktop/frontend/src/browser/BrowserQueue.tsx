@@ -172,7 +172,9 @@ export function BrowserQueue({
     return () => {
       cancelled = true;
     };
-  }, [batchController, browserController, initialFolder, onSessionLoaded, platform, providedImageSets, queueController]);
+  // Restoring the session mutates these parent props. Re-running would reload
+  // the workflow and clear the image source after it has been opened.
+  }, [batchController, browserController, platform, queueController]);
 
   useEffect(() => {
     if (!ready) return;

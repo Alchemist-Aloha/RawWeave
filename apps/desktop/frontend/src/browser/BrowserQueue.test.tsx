@@ -153,6 +153,22 @@ describe('BrowserQueue', () => {
     expect(events.indexOf('reattach-end')).toBeLessThan(events.indexOf('load-folder'));
   });
 
+  it('restores the saved session only once when parent state changes', async () => {
+    const saved = defaultSession('/photos');
+    const base = fakePlatform();
+    const loadSession = vi.fn(async () => saved);
+    const onSessionLoaded = vi.fn(async () => {});
+    const platform: BrowserPlatform = { ...base, loadSession };
+    await renderQueue(platform, { imageSets: [], onSessionLoaded });
+
+    await act(async () => {
+      root?.render(<BrowserQueue platform={platform} imageSets={[]} onSessionLoaded={onSessionLoaded} />);
+    });
+
+    expect(loadSession).toHaveBeenCalledTimes(1);
+    expect(onSessionLoaded).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the browser, navigates folders, and switches the selected preview', async () => {
     const view = await renderQueue(fakePlatform());
     await act(async () => {

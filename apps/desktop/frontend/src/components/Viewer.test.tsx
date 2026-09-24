@@ -91,6 +91,49 @@ describe('Viewer', () => {
     host.remove();
   });
 
+  it('reports a preview URL that the webview cannot load', async () => {
+    const releasePreview = vi.fn(async () => undefined);
+    const controller = new ViewerController({
+      requestPreview: async (request) => ({
+        requestId: request.requestId,
+        revision: request.revision,
+        url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
+        width: 1,
+        height: 1,
+        fullWidth: 1,
+        fullHeight: 1,
+        mimeType: 'image/png',
+      }),
+      cancelPreview: async () => undefined,
+      releasePreview,
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    output.typeId = 'core.output';
+
+    await act(async () => root.render(
+      <Viewer
+        controller={controller}
+        nodes={[output]}
+        revision={1}
+        source={{ kind: 'ordinary', width: 1, height: 1, revision: 1, metadata: null }}
+      />,
+    ));
+
+    const image = host.querySelector<HTMLImageElement>('.viewer-pane__image');
+    expect(image).not.toBeNull();
+    await act(async () => image?.dispatchEvent(new Event('error')));
+
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('preview image could not be loaded');
+    expect(controller.state.panes.A.status).toBe('error');
+    expect(releasePreview).toHaveBeenCalledWith(image?.src);
+
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
   it('offers ordinary and spatial graph values as preview targets', () => {
     const targets = targetsFor([
       node('segmentation', [

@@ -1026,6 +1026,7 @@ dependencies = [
 name = "rawweave-batch"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "exr",
  "image",
  "png 0.17.16",

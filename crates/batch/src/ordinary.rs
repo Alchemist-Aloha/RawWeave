@@ -13,7 +13,7 @@ pub const MAX_ORDINARY_IMAGE_EDGE: u32 = 16_384;
 /// Maximum number of decoded ordinary-image pixels.
 pub const MAX_ORDINARY_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 /// Maximum allocation reserved for the final RGBA32F image buffer.
-pub const MAX_ORDINARY_RGBA32F_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_ORDINARY_RGBA32F_BYTES: usize = 256 * 1024 * 1024;
 
 const RGBA32F_BYTES_PER_PIXEL: usize = size_of::<[f32; 4]>();
 
@@ -188,15 +188,20 @@ fn read_bounded_file(path: &Path) -> Result<Vec<u8>, OrdinaryDecodeError> {
 fn dynamic_image_to_rawweave(decoded: image::DynamicImage) -> Result<Image, OrdinaryDecodeError> {
     let expected = (decoded.width(), decoded.height());
     let pixel_count = validate_dimensions(expected.0, expected.1)?;
-    let rgba = decoded.to_rgba32f();
+    let rgba = decoded.into_rgba32f();
     if (rgba.width(), rgba.height()) != expected {
         return Err(OrdinaryDecodeError::DimensionsChanged {
             expected,
             actual: (rgba.width(), rgba.height()),
         });
     }
-    let mut pixels = Vec::with_capacity(pixel_count);
-    pixels.extend(rgba.pixels().map(|pixel| pixel.0));
+    let raw = rgba.into_raw();
+    let pixels = match bytemuck::try_cast_vec::<f32, [f32; 4]>(raw) {
+        Ok(pixels) => pixels,
+        Err((_, raw)) => bytemuck::try_cast_slice_box::<f32, [f32; 4]>(raw.into_boxed_slice())
+            .map_err(|_| OrdinaryDecodeError::PixelBufferLength)?
+            .into_vec(),
+    };
     if pixels.len() != pixel_count {
         return Err(OrdinaryDecodeError::PixelBufferLength);
     }

@@ -150,6 +150,18 @@ export class ViewerController {
     void this.transport.releasePreview(url).catch(() => undefined);
   }
 
+  public reportImageLoadFailure(viewer: ViewerId, url: string): void {
+    if (this.state.panes[viewer].imageUrl !== url) return;
+    this.releasePreview(url);
+    this.setPane(viewer, {
+      imageUrl: null,
+      width: null,
+      height: null,
+      status: 'error',
+      error: `preview image could not be loaded from ${url}`,
+    });
+  }
+
   private restartRequest(viewer: ViewerId): void {
     this.cancelPanRender(viewer);
     const target = this.state.panes[viewer].target;
