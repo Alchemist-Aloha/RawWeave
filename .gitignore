@@ -13,3 +13,10 @@ dist/
 apps/desktop/frontend/vite.config.js
 apps/desktop/frontend/vite.config.d.ts
 .DS_Store
+.agents/
+.claude/
+.hermes/
+.opencode/
+.pi/
+.codex/
+.impeccable/
