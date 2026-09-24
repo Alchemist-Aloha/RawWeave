@@ -29,6 +29,7 @@ node-packs/core-image/   ordinary image-processing nodes
 node-packs/raw/          RAW development nodes
 apps/desktop/src-tauri/  Tauri commands, source state, previews, URI protocol
 apps/desktop/frontend/   React editor, viewer, controllers, platform adapters
+scripts/build-all-in-one.sh  release desktop binary with embedded frontend
 docs/                    staged development plans
 test-data/images/        licensed image integration-test corpus
 scripts/                 repository validation scripts
@@ -76,6 +77,18 @@ scripts/                 repository validation scripts
 ## Testing
 
 Run focused tests first, then the relevant full gates.
+
+### All-in-one desktop release
+
+From the repository root, run:
+
+```sh
+./scripts/build-all-in-one.sh
+```
+
+The script uses pnpm to build the frontend, builds the Tauri release binary with `custom-protocol`, and copies it to `./bin/rawweave-desktop`. The `bin/` directory is ignored by Git. Use this script when delivering a desktop executable so the binary embeds the current frontend assets.
+
+On Linux systems affected by WebKitGTK's DMABUF renderer, launch the built binary with `./scripts/run-rawweave.sh`. This sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` only for RawWeave and preserves an explicit value already set by the caller.
 
 ### Root Rust workspace
 

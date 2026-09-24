@@ -7,7 +7,6 @@ import {
   type Connection,
   type Edge,
   type EdgeChange,
-  type Node,
   type NodeChange,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -150,6 +149,32 @@ export interface EditorErrorNotice {
 export function compatibleDataTypesForNode(node: EditorNode | undefined): string[] {
   if (!node) return [];
   return [...new Set(node.descriptor.outputs.map((output) => output.dataType))];
+}
+
+/**
+ * Reconciles React Flow's selection changes onto the editor selection.
+ *
+ * React Flow reports selection through the same `onNodesChange` action channel
+ * as positions. Applying it here keeps the canvas and the controller in a
+ * single direction of truth; echoing selection back through `onSelectionChange`
+ * instead makes the two sides fight and can loop until React unmounts the tree.
+ * Returns null when nothing changed so callers can skip a redundant publish.
+ */
+export function selectionFromNodeChanges(current: string[], changes: NodeChange[]): string[] | null {
+  const selection = new Set(current);
+  let changed = false;
+  for (const change of changes) {
+    if (change.type !== 'select') continue;
+    if (change.selected) {
+      if (!selection.has(change.id)) {
+        selection.add(change.id);
+        changed = true;
+      }
+    } else if (selection.delete(change.id)) {
+      changed = true;
+    }
+  }
+  return changed ? [...selection] : null;
 }
 
 export function describeEditorError(message: string, context: EditorErrorContext): EditorErrorNotice {
@@ -319,6 +344,7 @@ export default function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -334,6 +360,12 @@ export default function App() {
   const initializeEditor = useCallback(() => {
     if (!editorInitialization.current) editorInitialization.current = controller.initialize();
     return editorInitialization.current;
+  }, [controller]);
+
+  const loadWorkflow = useCallback(async (serialized: string) => {
+    await controller.loadWorkflow(serialized);
+    // A loaded graph can have saved positions far outside the previous view.
+    setWorkflowCanvasKey((key) => key + 1);
   }, [controller]);
 
   useEffect(() => {
@@ -528,6 +560,8 @@ export default function App() {
           void controller.removeNode(change.id).catch(() => undefined);
         }
       }
+      const selection = selectionFromNodeChanges(controller.state.selectedNodeIds, changes);
+      if (selection) controller.selectNodes(selection);
     },
     [controller],
   );
@@ -597,7 +631,7 @@ export default function App() {
       setImageSets,
       setActiveImageSetId,
       setPanelLayout: (layout) => viewerController.setLayout(layout),
-      loadWorkflow: (serialized) => controller.loadWorkflow(serialized),
+      loadWorkflow,
       openImage: (path) => controller.openImage(path),
       setSourceDimensions: (source) => viewerController.setSourceDimensions(source),
       setViewerTargets: (targets) => {
@@ -615,7 +649,7 @@ export default function App() {
       },
     });
     setWorkspaceMode('build');
-  }, [controller, initializeEditor, setActiveImageSetId, setImageSets, viewerController]);
+  }, [controller, initializeEditor, loadWorkflow, setActiveImageSetId, setImageSets, viewerController]);
 
   const onImageSetsChange = useCallback((collections: ImageSetCollection[], activeId: string | null) => {
     setImageSets(collections);
@@ -683,11 +717,6 @@ export default function App() {
     [controller],
   );
 
-  const onSelectionChange = useCallback(
-    ({ nodes }: { nodes: Node[] }) => controller.selectNodes(nodes.map((node) => node.id)),
-    [controller],
-  );
-
   const toggleNodeSelection = useCallback(
     (event: React.MouseEvent, nodeId: string) => {
       if (!event.metaKey && !event.ctrlKey && !event.shiftKey) {
@@ -719,9 +748,9 @@ export default function App() {
       const file = event.target.files?.[0];
       event.target.value = '';
       if (!file) return;
-      await controller.loadWorkflow(await file.text()).catch(() => undefined);
+      await loadWorkflow(await file.text()).catch(() => undefined);
     },
-    [controller],
+    [loadWorkflow],
   );
 
   const openImagePath = useCallback(
@@ -729,6 +758,7 @@ export default function App() {
       try {
         const image = await controller.openImage(path);
         viewerController.setSourceDimensions(image);
+        setWorkflowCanvasKey((key) => key + 1);
         setImageError(null);
         setWorkspaceMode('build');
       } catch (error) {
@@ -744,6 +774,7 @@ export default function App() {
         const imageSet = await controller.openImageSet(paths, order);
         const firstMember = imageSet.members[0];
         if (firstMember) viewerController.setSourceDimensions({ width: firstMember.width, height: firstMember.height });
+        setWorkflowCanvasKey((key) => key + 1);
         setImageError(null);
         setWorkspaceMode('build');
       } catch (error) {
@@ -1018,6 +1049,7 @@ export default function App() {
           <div className="flow-canvas">
             <ReactFlow
               fitView
+              key={workflowCanvasKey}
               nodes={flowNodes}
               edges={flowEdges}
               nodeTypes={nodeTypes}
@@ -1026,7 +1058,6 @@ export default function App() {
               onNodeClick={(event, node) => toggleNodeSelection(event, node.id)}
               onNodesChange={onNodesChange}
               onPaneClick={() => controller.selectNode(null)}
-              onSelectionChange={onSelectionChange}
               proOptions={{ hideAttribution: true }}
             >
               <Background color="#27303d" gap={22} size={1} />
@@ -1080,6 +1111,13 @@ export default function App() {
         revision={controller.state.revision}
         source={controller.state.source}
       />
+
+      {showSubgraphForm && (
+        <SubgraphForm
+          onCancel={() => setShowSubgraphForm(false)}
+          onCreate={createSubgraph}
+        />
+      )}
 
       {showShortcuts && (
         <div aria-label="Keyboard shortcuts" aria-modal="true" className="shortcut-dialog" role="dialog">

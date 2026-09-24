@@ -41,28 +41,18 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
       <div className="graph-node__type">{node.typeId}</div>
       <div className="graph-node__ports">
         <div className="graph-node__port-column">
-          {inputPorts.map((input, index) => (
+          {inputPorts.map((input) => (
             <div className="graph-node__port graph-node__port--input" key={input.id}>
-              <Handle
-                id={input.id}
-                type="target"
-                position={Position.Left}
-                style={{ top: 53 + index * 25 }}
-              />
+              <Handle id={input.id} type="target" position={Position.Left} />
               <span>{input.name}</span>
             </div>
           ))}
         </div>
         <div className="graph-node__port-column graph-node__port-column--output">
-          {node.descriptor.outputs.map((output, index) => (
+          {node.descriptor.outputs.map((output) => (
             <div className="graph-node__port graph-node__port--output" key={output.id}>
               <span>{output.name}</span>
-              <Handle
-                id={output.id}
-                type="source"
-                position={Position.Right}
-                style={{ top: 53 + index * 25 }}
-              />
+              <Handle id={output.id} type="source" position={Position.Right} />
             </div>
           ))}
         </div>

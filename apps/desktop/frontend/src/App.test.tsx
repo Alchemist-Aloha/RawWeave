@@ -1,7 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { compatibleDataTypesForNode, describeEditorError, restoreBrowserSession } from './App';
+import { compatibleDataTypesForNode, describeEditorError, restoreBrowserSession, selectionFromNodeChanges } from './App';
 import type { EditorNode, OpenImageResult } from './editor/types';
 import { defaultSession } from './browser/session';
+import type { NodeChange } from '@xyflow/react';
+
+describe('canvas selection changes', () => {
+  it('applies React Flow select changes to the editor selection', () => {
+    const changes = [
+      { id: 'b', type: 'select', selected: true },
+      { id: 'a', type: 'select', selected: false },
+    ] as NodeChange[];
+
+    expect(selectionFromNodeChanges(['a'], changes)).toEqual(['b']);
+  });
+
+  it('returns null for redundant selection changes so no publish loops', () => {
+    const selecting = [{ id: 'a', type: 'select', selected: true }] as NodeChange[];
+    expect(selectionFromNodeChanges(['a'], selecting)).toBeNull();
+
+    const deselectingMissing = [{ id: 'z', type: 'select', selected: false }] as NodeChange[];
+    expect(selectionFromNodeChanges(['a'], deselectingMissing)).toBeNull();
+  });
+
+  it('ignores non-selection changes', () => {
+    const changes = [{ id: 'a', type: 'position', position: { x: 1, y: 2 } }] as NodeChange[];
+    expect(selectionFromNodeChanges(['a'], changes)).toBeNull();
+  });
+});
 
 describe('editor error UX', () => {
   it('redacts secret-shaped details and gives contextual recovery guidance', () => {
