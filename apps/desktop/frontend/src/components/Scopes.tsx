@@ -1,8 +1,13 @@
-import { useEffect, useRef } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { samplePixel, type ImageAnalysis, type PixelSample } from '../viewer/analysis';
 
 export interface ScopesProps {
   analysis: ImageAnalysis;
+  /**
+   * Tabbed single-scope layout for the narrow right-hand dock. The default
+   * grid is kept for wide layouts and tests.
+   */
+  compact?: boolean;
 }
 
 type DrawScope = (context: CanvasRenderingContext2D, width: number, height: number) => void;
@@ -191,18 +196,64 @@ function PixelInspector({ sample }: { sample: PixelSample | null }) {
   );
 }
 
-export function Scopes({ analysis }: ScopesProps) {
+interface ScopeEntry {
+  id: string;
+  label: string;
+  short: string;
+  render: () => ReactNode;
+}
+
+function scopeEntries(analysis: ImageAnalysis): ScopeEntry[] {
   const centerSample = samplePixel(analysis, Math.floor(analysis.width / 2), Math.floor(analysis.height / 2));
+  return [
+    { id: 'histogram', label: 'Histogram', short: 'Hist', render: () => <ScopeCanvas draw={drawHistogram(analysis)} label="Histogram" /> },
+    { id: 'waveform', label: 'Waveform', short: 'Wave', render: () => <ScopeCanvas draw={drawWaveform(analysis, 'luma', '#dce6ed')} label="Waveform" /> },
+    { id: 'parade', label: 'RGB Parade', short: 'Parade', render: () => <ScopeCanvas draw={drawRgbParade(analysis)} label="RGB Parade" /> },
+    { id: 'vectorscope', label: 'Vectorscope', short: 'Vector', render: () => <ScopeCanvas draw={drawVectorscope(analysis)} label="Vectorscope" /> },
+    { id: 'false-color', label: 'False Color', short: 'False', render: () => <ScopeCanvas draw={drawRaster(analysis.falseColor)} label="False Color" /> },
+    { id: 'gamut', label: 'Gamut Warning', short: 'Gamut', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.gamutWarning, { on: '#ef737d', off: '#0b1016' })} label="Gamut Warning" /> },
+    { id: 'pixel', label: 'Pixel Inspector', short: 'Pixel', render: () => <PixelInspector sample={centerSample} /> },
+    { id: 'zebra', label: 'Zebra', short: 'Zebra', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.zebra, { on: '#f0cf82', off: '#0b1016' })} label="Zebra" /> },
+  ];
+}
+
+export function Scopes({ analysis, compact = false }: ScopesProps) {
+  const entries = useMemo(() => scopeEntries(analysis), [analysis]);
+  const [activeId, setActiveId] = useState(entries[0]?.id ?? '');
+
+  useEffect(() => {
+    if (!entries.some((entry) => entry.id === activeId)) setActiveId(entries[0]?.id ?? '');
+  }, [entries, activeId]);
+
+  if (!compact) {
+    return (
+      <section aria-label="Image scopes" className="viewer-scopes">
+        {entries.map((entry) => <Fragment key={entry.id}>{entry.render()}</Fragment>)}
+      </section>
+    );
+  }
+
+  const active = entries.find((entry) => entry.id === activeId) ?? entries[0];
   return (
-    <section aria-label="Image scopes" className="viewer-scopes">
-      <ScopeCanvas draw={drawHistogram(analysis)} label="Histogram" />
-      <ScopeCanvas draw={drawWaveform(analysis, 'luma', '#dce6ed')} label="Waveform" />
-      <ScopeCanvas draw={drawRgbParade(analysis)} label="RGB Parade" />
-      <ScopeCanvas draw={drawVectorscope(analysis)} label="Vectorscope" />
-      <ScopeCanvas draw={drawRaster(analysis.falseColor)} label="False Color" />
-      <ScopeCanvas draw={drawMask(analysis, analysis.gamutWarning, { on: '#ef737d', off: '#0b1016' })} label="Gamut Warning" />
-      <PixelInspector sample={centerSample} />
-      <ScopeCanvas draw={drawMask(analysis, analysis.zebra, { on: '#f0cf82', off: '#0b1016' })} label="Zebra" />
+    <section aria-label="Image scopes" className="viewer-scopes viewer-scopes--compact">
+      <div aria-label="Scope views" className="scope-tabs" role="tablist">
+        {entries.map((entry) => (
+          <button
+            aria-selected={entry.id === activeId}
+            className={`scope-tab${entry.id === activeId ? ' is-active' : ''}`}
+            key={entry.id}
+            onClick={() => setActiveId(entry.id)}
+            role="tab"
+            title={entry.label}
+            type="button"
+          >
+            {entry.short}
+          </button>
+        ))}
+      </div>
+      <div aria-label={active?.label} className="scope-tabs__panel" role="tabpanel">
+        {active?.render()}
+      </div>
     </section>
   );
 }

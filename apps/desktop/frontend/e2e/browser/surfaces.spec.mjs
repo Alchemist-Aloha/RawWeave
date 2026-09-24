@@ -21,13 +21,9 @@ async function clickTopbarAction(label) {
 }
 
 async function clickViewerAction(label) {
-  for (const button of await $$('.viewer-section button')) {
-    if (await button.getText() === label) {
-      await button.click();
-      return;
-    }
-  }
-  throw new Error(`viewer action ${label} was not found`);
+  const button = await $(`.viewer-section button[aria-label="${label}"]`);
+  if (!(await button.isExisting())) throw new Error(`viewer action ${label} was not found`);
+  await button.click();
 }
 
 describe('frontend surfaces in browser mode', () => {
@@ -48,8 +44,8 @@ describe('frontend surfaces in browser mode', () => {
     await expect($('[aria-label="blink comparison"]')).toBeDisplayed();
     await clickViewerAction('Difference');
     await expect($('[aria-label="difference comparison"]')).toBeDisplayed();
-    await clickViewerAction('Compare A / B');
-    await clickViewerAction('Compare A / B');
+    await clickViewerAction('Compare A and B');
+    await clickViewerAction('Compare A and B');
     await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
   });
 

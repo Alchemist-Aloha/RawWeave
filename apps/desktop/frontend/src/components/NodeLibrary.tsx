@@ -1,5 +1,6 @@
 import { useMemo, useState, type RefObject } from 'react';
 import type { NodeDescriptor } from '../editor/types';
+import { dataTypesCompatible } from '../editor/connections';
 
 interface NodeLibraryProps {
   descriptors: NodeDescriptor[];
@@ -8,17 +9,7 @@ interface NodeLibraryProps {
   onCreateSubgraph?: () => void;
   searchInputRef?: RefObject<HTMLInputElement | null>;
   compatibleDataTypes?: string[];
-}
-
-function dataTypesCompatible(expected: string, actual: string): boolean {
-  const wildcards = new Set(['*', 'Any', 'core.Any', 'value.Any']);
-  if (expected === actual || wildcards.has(expected) || wildcards.has(actual)) return true;
-  return (
-    (expected === 'value.Float' && actual === 'value.Integer')
-    || (expected === 'value.Integer' && actual === 'value.Float')
-    || (expected === 'value.Condition' && actual === 'value.Boolean')
-    || (expected === 'value.Boolean' && actual === 'value.Condition')
-  );
+  onCollapse?: () => void;
 }
 
 export function NodeLibrary({
@@ -28,6 +19,7 @@ export function NodeLibrary({
   onCreateSubgraph,
   searchInputRef,
   compatibleDataTypes,
+  onCollapse,
 }: NodeLibraryProps) {
   const [query, setQuery] = useState('');
   const [compatibleOnly, setCompatibleOnly] = useState(true);
@@ -53,6 +45,17 @@ export function NodeLibrary({
           <h2>Nodes</h2>
         </div>
         <span className="count-badge">{filtered.length}</span>
+        {onCollapse && (
+          <button
+            aria-label="Collapse Nodes panel"
+            className="icon-button"
+            onClick={onCollapse}
+            title="Collapse Nodes panel"
+            type="button"
+          >
+            ‹
+          </button>
+        )}
       </div>
       <label className="search-field">
         <span className="sr-only">Search nodes</span>

@@ -7,12 +7,26 @@ import {
   type Connection,
   type Edge,
   type EdgeChange,
+  type Node,
   type NodeChange,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { EditorController } from './editor/controller';
+import { checkConnection } from './editor/connections';
 import type { EditorNode, OpenImageResult, ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
+import { CanvasContextMenu, type ContextMenuState } from './components/CanvasContextMenu';
+import { WorkflowEdge, type WorkflowFlowEdge } from './components/WorkflowEdge';
 import { createPlatform } from './platform/editor';
+import { Splitter } from './components/Splitter';
+import {
+  DEFAULT_DOCK_LAYOUT,
+  DOCK_STORAGE_KEY,
+  parseDockLayout,
+  resizeDock,
+  serializeDockLayout,
+  type DockLayout,
+} from './ui/layout';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
 import { Inspector } from './components/Inspector';
 import type {
@@ -40,6 +54,7 @@ import { describeOperationError, redactErrorDetails } from './ui/errors';
 import { shortcutAction } from './ui/shortcuts';
 
 const nodeTypes = { rawweave: GraphNode };
+const edgeTypes = { rawweave: WorkflowEdge };
 
 type ViewerSessionState = {
   layout: ViewerState['layout'];
@@ -146,41 +161,21 @@ export interface EditorErrorNotice {
   guidance: string;
 }
 
-const PANEL_STORAGE_KEY = 'rawweave.panels';
-type PanelId = 'library' | 'inspector' | 'viewer';
-type PanelVisibility = Record<PanelId, boolean>;
+const PANEL_STORAGE_KEY = DOCK_STORAGE_KEY;
 
-const PANELS: Array<{ id: PanelId; label: string }> = [
-  { id: 'library', label: 'Library' },
-  { id: 'inspector', label: 'Inspector' },
-  { id: 'viewer', label: 'Viewer' },
-];
-
-const DEFAULT_PANELS: PanelVisibility = { library: true, inspector: true, viewer: true };
-
-export function readPanelVisibility(storage?: Pick<Storage, 'getItem'> | null): PanelVisibility {
+function loadDockLayout(): DockLayout {
+  if (typeof window === 'undefined') return { ...DEFAULT_DOCK_LAYOUT };
   try {
-    const raw = storage?.getItem(PANEL_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_PANELS };
-    const parsed = JSON.parse(raw) as Partial<PanelVisibility>;
-    return {
-      library: parsed.library !== false,
-      inspector: parsed.inspector !== false,
-      viewer: parsed.viewer !== false,
-    };
+    return parseDockLayout(window.localStorage.getItem(PANEL_STORAGE_KEY));
   } catch {
-    return { ...DEFAULT_PANELS };
+    return { ...DEFAULT_DOCK_LAYOUT };
   }
 }
 
-function loadPanelVisibility(): PanelVisibility {
-  return readPanelVisibility(typeof window === 'undefined' ? null : window.localStorage);
-}
-
-function savePanelVisibility(visibility: PanelVisibility): void {
+function saveDockLayout(layout: DockLayout): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(visibility));
+    window.localStorage.setItem(PANEL_STORAGE_KEY, serializeDockLayout(layout));
   } catch {
     // Persisting the layout is a convenience; ignore storage failures.
   }
@@ -253,7 +248,6 @@ function SourceMetadata({ source }: { source: SourceResult | null }) {
     return (
       <section aria-label="Source metadata" className="source-metadata">
         <div>
-          <span className="eyebrow">Source</span>
           <strong>ImageSet</strong>
         </div>
         <dl>
@@ -296,7 +290,6 @@ function SourceMetadata({ source }: { source: SourceResult | null }) {
   return (
     <section aria-label="Source metadata" className="source-metadata">
       <div>
-        <span className="eyebrow">Source</span>
         <strong>{source.kind === 'raw' ? 'RAW image' : 'Image'}</strong>
       </div>
       <dl>
@@ -385,7 +378,7 @@ export default function App() {
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
-  const [panels, setPanels] = useState<PanelVisibility>(loadPanelVisibility);
+  const [dock, setDock] = useState<DockLayout>(loadDockLayout);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -445,11 +438,15 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    savePanelVisibility(panels);
-  }, [panels]);
+    saveDockLayout(dock);
+  }, [dock]);
 
-  const togglePanel = useCallback((id: PanelId) => {
-    setPanels((current) => ({ ...current, [id]: !current[id] }));
+  const toggleDock = useCallback((key: 'libraryCollapsed' | 'rightCollapsed' | 'previewCollapsed' | 'inspectorCollapsed' | 'sourceCollapsed') => {
+    setDock((current) => ({ ...current, [key]: !current[key] }));
+  }, []);
+
+  const resizeDockBy = useCallback((key: 'libraryWidth' | 'rightWidth' | 'previewSize' | 'sourceSize', delta: number) => {
+    setDock((current) => resizeDock(current, key, delta));
   }, []);
 
   useEffect(() => {
@@ -475,18 +472,132 @@ export default function App() {
       })),
     [checkpointController, checkpointController.state.statuses, controller, controller.state.nodes, controller.state.selectedNodeIds],
   );
-  const flowEdges = useMemo<Edge[]>(
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const flowInstance = useRef<ReactFlowInstance<RawWeaveFlowNode, WorkflowFlowEdge> | null>(null);
+  const reconnectingEdgeId = useRef<string | null>(null);
+
+  const disconnectEdges = useCallback(async (edgeIds: string[]) => {
+    for (const edgeId of edgeIds) {
+      const edge = controller.state.edges.find((candidate) => candidate.id === edgeId);
+      if (!edge) continue;
+      await controller.disconnect(edge.fromNode, edge.fromPort, edge.toNode, edge.toPort);
+    }
+  }, [controller]);
+
+  const disconnectEdge = useCallback((edgeId: string) => {
+    void disconnectEdges([edgeId]).catch(() => undefined);
+  }, [disconnectEdges]);
+
+  // Refuse anything the backend would reject (type, duplicate input, cycle).
+  const isValidConnection = useCallback((connection: Connection | Edge) => (
+    checkConnection(controller.state.nodes, controller.state.edges, {
+      source: connection.source,
+      sourceHandle: connection.sourceHandle ?? null,
+      target: connection.target,
+      targetHandle: connection.targetHandle ?? null,
+      id: reconnectingEdgeId.current,
+    }).valid
+  ), [controller]);
+
+  const onReconnect = useCallback((oldEdge: Edge, connection: Connection) => {
+    void (async () => {
+      const existing = controller.state.edges.find((edge) => edge.id === oldEdge.id);
+      if (existing) {
+        await controller.disconnect(existing.fromNode, existing.fromPort, existing.toNode, existing.toPort);
+      }
+      if (connection.source && connection.sourceHandle && connection.target && connection.targetHandle) {
+        await controller.connect(connection.source, connection.sourceHandle, connection.target, connection.targetHandle);
+      }
+    })().catch(() => undefined);
+  }, [controller]);
+
+  const openEdgeMenu = useCallback((event: React.MouseEvent, edge: Edge) => {
+    event.preventDefault();
+    const model = controller.state.edges.find((candidate) => candidate.id === edge.id);
+    if (!model) return;
+    const sourceName = controller.state.nodes.find((node) => node.id === model.fromNode)?.descriptor.name ?? model.fromNode;
+    const targetName = controller.state.nodes.find((node) => node.id === model.toNode)?.descriptor.name ?? model.toNode;
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      title: `${sourceName} → ${targetName}`,
+      items: [
+        { id: 'disconnect', label: 'Disconnect', danger: true, onSelect: () => disconnectEdge(edge.id) },
+      ],
+    });
+  }, [controller, disconnectEdge]);
+
+  const openNodeMenu = useCallback((event: React.MouseEvent, node: Node) => {
+    event.preventDefault();
+    const incident = controller.state.edges.filter((edge) => edge.fromNode === node.id || edge.toNode === node.id);
+    const inputs = incident.filter((edge) => edge.toNode === node.id);
+    const outputs = incident.filter((edge) => edge.fromNode === node.id);
+    const label = controller.state.nodes.find((candidate) => candidate.id === node.id)?.descriptor.name ?? node.id;
+    const disconnect = (edges: typeof incident) => () => {
+      void disconnectEdges(edges.map((edge) => edge.id)).catch(() => undefined);
+    };
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      title: label,
+      items: [
+        {
+          id: 'disconnect-inputs',
+          label: `Disconnect ${inputs.length} input${inputs.length === 1 ? '' : 's'}`,
+          disabled: inputs.length === 0,
+          onSelect: disconnect(inputs),
+        },
+        {
+          id: 'disconnect-outputs',
+          label: `Disconnect ${outputs.length} output${outputs.length === 1 ? '' : 's'}`,
+          disabled: outputs.length === 0,
+          onSelect: disconnect(outputs),
+        },
+        { id: 'disconnect-all', label: 'Disconnect all', disabled: incident.length === 0, onSelect: disconnect(incident) },
+        { id: 'delete-node', label: 'Delete node', danger: true, onSelect: () => { void controller.removeNode(node.id).catch(() => undefined); } },
+      ],
+    });
+  }, [controller, disconnectEdges]);
+
+  const openPaneMenu = useCallback((event: React.MouseEvent | MouseEvent) => {
+    event.preventDefault();
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY,
+      title: 'Canvas',
+      items: [
+        { id: 'fit-view', label: 'Fit view', onSelect: () => flowInstance.current?.fitView({ padding: 0.2, duration: 250 }) },
+        { id: 'add-node', label: 'Add node…', onSelect: () => nodeSearchInput.current?.focus() },
+      ],
+    });
+  }, []);
+
+  const flowEdges = useMemo<WorkflowFlowEdge[]>(
     () =>
-      controller.state.edges.map((edge) => ({
-        id: edge.id,
-        source: edge.source,
-        sourceHandle: edge.sourceHandle,
-        target: edge.target,
-        targetHandle: edge.targetHandle,
-        animated: false,
-        type: 'smoothstep',
-      })),
-    [controller, controller.state.edges],
+      controller.state.edges.map((edge) => {
+        const sourceNode = controller.state.nodes.find((node) => node.id === edge.fromNode);
+        const dataType = sourceNode?.descriptor.outputs.find((output) => output.id === edge.fromPort)?.dataType ?? null;
+        return {
+          id: edge.id,
+          source: edge.source,
+          sourceHandle: edge.sourceHandle,
+          target: edge.target,
+          targetHandle: edge.targetHandle,
+          animated: false,
+          type: 'rawweave' as const,
+          reconnectable: true,
+          // A wide invisible hit area makes the thin edge easy to select.
+          interactionWidth: 24,
+          data: {
+            dataType,
+            actionsVisible: hoveredEdgeId === edge.id,
+            onDisconnect: disconnectEdge,
+          },
+        };
+      }),
+    [controller.state.edges, controller.state.nodes, disconnectEdge, hoveredEdgeId],
   );
 
   const selectedNode = controller.state.nodes.find(
@@ -892,11 +1003,15 @@ export default function App() {
         void (async () => {
           for (const nodeId of selectedNodeIds) await controller.removeNode(nodeId);
         })().catch(() => undefined);
+      } else if (action === 'delete-selection' && selectedEdgeId) {
+        event.preventDefault();
+        disconnectEdge(selectedEdgeId);
+        setSelectedEdgeId(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [controller, fileInput, nodeSearchInput, openImage]);
+  }, [controller, disconnectEdge, fileInput, nodeSearchInput, openImage, selectedEdgeId]);
 
   const editorErrorNotice = controller.state.error
     ? describeEditorError(controller.state.error, {
@@ -923,7 +1038,7 @@ export default function App() {
   const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
-    <main className={`app-shell app-shell--${workspaceMode}${panels.viewer ? '' : ' app-shell--no-viewer'}`}>
+    <main className={`app-shell app-shell--${workspaceMode}`}>
       <header className="topbar">
         <div className="brand-mark">
           <span className="brand-mark__glyph">RW</span>
@@ -1022,7 +1137,6 @@ export default function App() {
         <AiProviderManager />
       </section>
 
-      <SourceMetadata source={controller.state.source} />
       <BrowserQueue
         mode={workspaceMode === 'batch' ? 'batch' : 'browse'}
         activeImageSetId={activeImageSetId}
@@ -1042,15 +1156,38 @@ export default function App() {
         workflowParameters={controller.state.workflowParameters}
       />
 
-      <section className={`workspace${panels.library ? '' : ' workspace--no-library'}${panels.inspector ? '' : ' workspace--no-inspector'}`}>
-        <NodeLibrary
-          compatibleDataTypes={compatibleDataTypes}
-          descriptors={controller.state.descriptors}
-          onAdd={(typeId) => void controller.createNode(typeId).catch(() => undefined)}
-          onCreateSubgraph={() => setShowSubgraphForm(true)}
-          searchInputRef={nodeSearchInput}
-          selectedCount={controller.state.selectedNodeIds.length}
-        />
+      <div className="workbench">
+        <aside
+          className={`dock dock--left${dock.libraryCollapsed ? ' dock--rail' : ''}`}
+          style={dock.libraryCollapsed ? undefined : { width: dock.libraryWidth }}
+        >
+          {dock.libraryCollapsed ? (
+            <button
+              aria-label="Expand Nodes panel"
+              className="dock__rail"
+              onClick={() => toggleDock('libraryCollapsed')}
+              title="Expand Nodes panel"
+              type="button"
+            >
+              <span className="dock__rail-label">Nodes</span>
+              <span aria-hidden="true">›</span>
+            </button>
+          ) : (
+            <NodeLibrary
+              compatibleDataTypes={compatibleDataTypes}
+              descriptors={controller.state.descriptors}
+              onAdd={(typeId) => void controller.createNode(typeId).catch(() => undefined)}
+              onCollapse={() => toggleDock('libraryCollapsed')}
+              onCreateSubgraph={() => setShowSubgraphForm(true)}
+              searchInputRef={nodeSearchInput}
+              selectedCount={controller.state.selectedNodeIds.length}
+            />
+          )}
+        </aside>
+        {!dock.libraryCollapsed && (
+          <Splitter axis="width" label="Resize Nodes panel" onResize={(delta) => resizeDockBy('libraryWidth', delta)} />
+        )}
+
         <section className="canvas-panel">
           <div className="canvas-panel__toolbar">
             <div className="scope-header">
@@ -1092,38 +1229,40 @@ export default function App() {
               <span className="canvas-panel__meta">
                 {controller.state.nodes.length} nodes&nbsp; · &nbsp;{controller.state.edges.length} links
               </span>
-              <div aria-label="Panel visibility" className="panel-toggles" role="group">
-                {PANELS.map((panel) => (
-                  <button
-                    aria-label={`${panels[panel.id] ? 'Hide' : 'Show'} ${panel.label}`}
-                    aria-pressed={panels[panel.id]}
-                    className={panels[panel.id] ? 'is-active' : ''}
-                    key={panel.id}
-                    onClick={() => togglePanel(panel.id)}
-                    title={`${panels[panel.id] ? 'Hide' : 'Show'} ${panel.label}`}
-                    type="button"
-                  >
-                    {panel.label}
-                  </button>
-                ))}
-              </div>
               <DependencySummary report={controller.state.dependencyReport} hash={controller.state.workflowHash} />
             </div>
           </div>
           <div className="flow-canvas">
             <ReactFlow
+              connectionLineStyle={{ stroke: '#8cebd3', strokeWidth: 2 }}
+              connectionRadius={30}
+              deleteKeyCode={null}
+              edgeTypes={edgeTypes}
+              edgesReconnectable
               fitView
+              isValidConnection={isValidConnection}
               key={workflowCanvasKey}
               nodes={flowNodes}
               edges={flowEdges}
               nodeTypes={nodeTypes}
               onConnect={onConnect}
+              onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); controller.selectNode(null); }}
+              onEdgeContextMenu={openEdgeMenu}
+              onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
+              onEdgeMouseLeave={() => setHoveredEdgeId(null)}
               onEdgesChange={onEdgesChange}
-              onNodeClick={(event, node) => toggleNodeSelection(event, node.id)}
+              onInit={(instance) => { flowInstance.current = instance; }}
+              onNodeClick={(event, node) => { setSelectedEdgeId(null); toggleNodeSelection(event, node.id); }}
+              onNodeContextMenu={openNodeMenu}
               onNodesChange={onNodesChange}
               onNodeDragStop={(_, node) => controller.updateNodePosition(node.id, node.position, false)}
-              onPaneClick={() => controller.selectNode(null)}
+              onPaneClick={() => { setSelectedEdgeId(null); controller.selectNode(null); }}
+              onPaneContextMenu={openPaneMenu}
+              onReconnect={onReconnect}
+              onReconnectEnd={() => { reconnectingEdgeId.current = null; }}
+              onReconnectStart={(_, edge) => { reconnectingEdgeId.current = edge.id; }}
               proOptions={{ hideAttribution: true }}
+              reconnectRadius={18}
             >
               <Background color="#27303d" gap={22} size={1} />
               <Controls />
@@ -1147,35 +1286,99 @@ export default function App() {
             <span className="footer-hint">Drag from an output handle to an input handle</span>
           </div>
         </section>
-        <Inspector
-          imageSet={activeImageSet}
-          onImageSetAlignmentChange={setActiveImageSetReference}
-          onImageSetReorder={reorderActiveImageSetMember}
-          node={selectedNode}
-          selectedNodeIds={controller.state.selectedNodeIds}
-          workflowInputs={controller.state.workflowInputs}
-          workflowOutputs={controller.state.workflowOutputs}
-          onChange={onParameterChange}
-          onToggleExposed={onToggleExposed}
-          onToggleInput={onToggleInput}
-          onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
-          checkpointLoading={checkpointController.state.loading}
-          checkpointOutputPorts={checkpointOutputPorts}
-          checkpointStatus={selectedCheckpointStatus}
-          onCancelCheckpoint={cancelCheckpoint}
-          onGenerateCheckpoint={generateCheckpoint}
-          checkpointPreviewActions={checkpointPreviewActions}
-        />
-      </section>
 
-      <Viewer
-        controller={viewerController}
-        nodes={controller.state.nodes}
-        onPaintedMaskChange={onPaintedMaskChange}
-        paintedNode={selectedNode?.typeId === 'core.mask-painted' ? selectedNode : undefined}
-        revision={controller.state.revision}
-        source={controller.state.source}
-      />
+        {!dock.rightCollapsed && (
+          <Splitter axis="width" label="Resize right panel" onResize={(delta) => resizeDockBy('rightWidth', -delta)} />
+        )}
+
+        <aside
+          className={`dock dock--right${dock.rightCollapsed ? ' dock--rail' : ''}`}
+          style={dock.rightCollapsed ? undefined : { width: dock.rightWidth }}
+        >
+          {dock.rightCollapsed ? (
+            <button
+              aria-label="Expand right panel"
+              className="dock__rail"
+              onClick={() => toggleDock('rightCollapsed')}
+              title="Expand right panel"
+              type="button"
+            >
+              <span className="dock__rail-label">Preview · Inspector</span>
+              <span aria-hidden="true">‹</span>
+            </button>
+          ) : (
+            <>
+              <section
+                className={`dock-section dock-section--preview${dock.previewCollapsed ? ' dock-section--collapsed' : ''}`}
+                style={dock.previewCollapsed ? undefined : { flexBasis: dock.previewSize }}
+              >
+                <Viewer
+                  collapsed={dock.previewCollapsed}
+                  controller={viewerController}
+                  docked
+                  nodes={controller.state.nodes}
+                  onPaintedMaskChange={onPaintedMaskChange}
+                  onToggleCollapsed={() => toggleDock('previewCollapsed')}
+                  paintedNode={selectedNode?.typeId === 'core.mask-painted' ? selectedNode : undefined}
+                  revision={controller.state.revision}
+                  source={controller.state.source}
+                />
+              </section>
+              {!dock.previewCollapsed && (
+                <Splitter axis="height" label="Resize preview panel" onResize={(delta) => resizeDockBy('previewSize', delta)} />
+              )}
+
+              <section className={`dock-section dock-section--inspector${dock.inspectorCollapsed ? ' dock-section--collapsed' : ''}`}>
+                <Inspector
+                  checkpointLoading={checkpointController.state.loading}
+                  checkpointOutputPorts={checkpointOutputPorts}
+                  checkpointPreviewActions={checkpointPreviewActions}
+                  checkpointStatus={selectedCheckpointStatus}
+                  collapsed={dock.inspectorCollapsed}
+                  imageSet={activeImageSet}
+                  node={selectedNode}
+                  onCancelCheckpoint={cancelCheckpoint}
+                  onChange={onParameterChange}
+                  onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
+                  onGenerateCheckpoint={generateCheckpoint}
+                  onImageSetAlignmentChange={setActiveImageSetReference}
+                  onImageSetReorder={reorderActiveImageSetMember}
+                  onToggleCollapsed={() => toggleDock('inspectorCollapsed')}
+                  onToggleExposed={onToggleExposed}
+                  onToggleInput={onToggleInput}
+                  selectedNodeIds={controller.state.selectedNodeIds}
+                  workflowInputs={controller.state.workflowInputs}
+                  workflowOutputs={controller.state.workflowOutputs}
+                />
+              </section>
+              {!dock.inspectorCollapsed && !dock.sourceCollapsed && (
+                <Splitter axis="height" label="Resize source panel" onResize={(delta) => resizeDockBy('sourceSize', -delta)} />
+              )}
+
+              <section
+                className={`dock-section dock-section--source${dock.sourceCollapsed ? ' dock-section--collapsed' : ''}`}
+                style={dock.sourceCollapsed ? undefined : { flexBasis: dock.sourceSize }}
+              >
+                <div className="dock-section__header">
+                  <span className="eyebrow">Source</span>
+                  <button
+                    aria-label={dock.sourceCollapsed ? 'Expand source panel' : 'Collapse source panel'}
+                    className="icon-button"
+                    onClick={() => toggleDock('sourceCollapsed')}
+                    title={dock.sourceCollapsed ? 'Expand source panel' : 'Collapse source panel'}
+                    type="button"
+                  >
+                    {dock.sourceCollapsed ? '▸' : '▾'}
+                  </button>
+                </div>
+                {!dock.sourceCollapsed && <SourceMetadata source={controller.state.source} />}
+              </section>
+            </>
+          )}
+        </aside>
+      </div>
+
+      <CanvasContextMenu menu={contextMenu} onClose={() => setContextMenu(null)} />
 
       {showSubgraphForm && (
         <SubgraphForm

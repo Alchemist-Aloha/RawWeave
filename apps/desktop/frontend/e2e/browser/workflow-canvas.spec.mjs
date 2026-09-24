@@ -40,14 +40,14 @@ async function canvasGeometry() {
 describe('workflow canvas layout', () => {
   beforeEach(async () => {
     await browser.url('http://127.0.0.1:5178/');
-    await browser.execute(() => window.localStorage.removeItem('rawweave.panels'));
+    await browser.execute(() => window.localStorage.removeItem('rawweave.dock'));
     await browser.refresh();
     await $('.react-flow').waitForDisplayed();
   });
 
   afterEach(async () => {
     // Panel visibility is persisted, so reset it between tests.
-    await browser.execute(() => window.localStorage.removeItem('rawweave.panels'));
+    await browser.execute(() => window.localStorage.removeItem('rawweave.dock'));
   });
 
   it('keeps the graph visible after workspace changes and viewport resizes', async () => {
@@ -83,26 +83,73 @@ describe('workflow canvas layout', () => {
     for (const offset of offsets) expect(offset).toBeLessThan(3);
   });
 
-  it('collapses and restores the library, inspector, and viewer panels', async () => {
+  it('fills the preview panel without leaving a blank gap', async () => {
+    // Browser mode has no decoded preview, so the scope strip is absent; the
+    // image row must then take the whole panel instead of leaving a gap.
+    const geometry = await browser.execute(() => {
+      const section = document.querySelector('.viewer-section');
+      const style = section ? getComputedStyle(section) : null;
+      const grid = document.querySelector('.viewer-grid');
+      return {
+        rows: style?.gridTemplateRows ?? '',
+        sectionHeight: Math.round(section?.getBoundingClientRect().height ?? 0),
+        toolbar: Math.round(document.querySelector('.viewer-section__toolbar')?.getBoundingClientRect().height ?? 0),
+        grid: Math.round(grid?.getBoundingClientRect().height ?? 0),
+        scopes: document.querySelectorAll('.viewer-scopes').length,
+      };
+    });
+    // A single compact toolbar row instead of a wrapped block.
+    expect(geometry.toolbar).toBeLessThan(60);
+    expect(geometry.scopes).toBe(0);
+    // The image fills everything the toolbar and padding do not use.
+    expect(geometry.grid).toBeGreaterThan(geometry.sectionHeight - geometry.toolbar - 30);
+    const rows = geometry.rows.split(' ').map((value) => Number.parseFloat(value));
+    expect(rows.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(geometry.sectionHeight);
+    expect(rows[0]).toBeLessThan(60);
+  });
+
+  it('hosts the preview in the right dock and collapses every section', async () => {
     const canvasWidth = () => browser.execute(() => Math.round(document.querySelector('.flow-canvas')?.getBoundingClientRect().width ?? 0));
-    const initialWidth = await canvasWidth();
+    const rightWidth = () => browser.execute(() => Math.round(document.querySelector('.dock--right')?.getBoundingClientRect().width ?? 0));
 
-    await $('button[aria-label="Hide Library"]').click();
-    await expect($('.panel--library')).not.toBeDisplayed();
-    expect(await canvasWidth()).toBeGreaterThan(initialWidth);
+    expect(await browser.execute(() => Boolean(document.querySelector('.dock--right .viewer-section')))).toBe(true);
 
-    await $('button[aria-label="Hide Inspector"]').click();
-    await expect($('.panel--inspector')).not.toBeDisplayed();
+    const initialCanvas = await canvasWidth();
+    await $('[aria-label="Collapse Nodes panel"]').click();
+    await expect($('[aria-label="Expand Nodes panel"]')).toBeDisplayed();
+    await expect($('.panel--library')).not.toExist();
+    expect(await canvasWidth()).toBeGreaterThan(initialCanvas);
 
-    await $('button[aria-label="Hide Viewer"]').click();
-    await expect($('.viewer-section')).not.toBeDisplayed();
+    await $('[aria-label="Collapse preview panel"]').click();
+    await $('[aria-label="Collapse inspector panel"]').click();
+    await $('[aria-label="Collapse source panel"]').click();
+    await expect($('.viewer-section')).toHaveElementClass(expect.stringContaining('viewer-section--collapsed'));
 
-    await $('button[aria-label="Show Library"]').click();
-    await $('button[aria-label="Show Inspector"]').click();
-    await $('button[aria-label="Show Viewer"]').click();
+    // The right dock is resizable by dragging its splitter.
+    const before = await rightWidth();
+    const splitter = await $('[aria-label="Resize right panel"]');
+    const box = await splitter.getLocation();
+    const start = { x: Math.round(box.x + 2), y: Math.round(box.y + 120) };
+    await browser.performActions([{
+      type: 'pointer',
+      id: 'mouse',
+      parameters: { pointerType: 'mouse' },
+      actions: [
+        { type: 'pointerMove', duration: 0, x: start.x, y: start.y, origin: 'viewport' },
+        { type: 'pointerDown', button: 0 },
+        { type: 'pointerMove', duration: 120, x: start.x - 80, y: start.y, origin: 'viewport' },
+        { type: 'pointerUp', button: 0 },
+      ],
+    }]);
+    expect(await rightWidth()).not.toBe(before);
+
+    await $('[aria-label="Expand Nodes panel"]').click();
+    await $('[aria-label="Expand preview panel"]').click();
+    await $('[aria-label="Expand inspector panel"]').click();
+    await $('[aria-label="Expand source panel"]').click();
     await expect($('.panel--library')).toBeDisplayed();
     await expect($('.panel--inspector')).toBeDisplayed();
-    await expect($('.viewer-section')).toBeDisplayed();
+    await expect($('.viewer-section')).not.toHaveElementClass(expect.stringContaining('viewer-section--collapsed'));
   });
 
   it('keeps the workspace mounted while dragging a node in a multi-node graph', async () => {

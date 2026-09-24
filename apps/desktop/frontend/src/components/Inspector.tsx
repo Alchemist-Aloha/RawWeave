@@ -26,6 +26,8 @@ interface InspectorProps {
   imageSet?: ImageSetCollection | null;
   onImageSetReorder?: (memberId: string, targetIndex: number) => void;
   onImageSetAlignmentChange?: (referenceMember: string | null) => void;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 export function Inspector({
@@ -46,7 +48,20 @@ export function Inspector({
   imageSet = null,
   onImageSetReorder,
   onImageSetAlignmentChange,
+  collapsed = false,
+  onToggleCollapsed,
 }: InspectorProps) {
+  const collapseButton = onToggleCollapsed ? (
+    <button
+      aria-label={collapsed ? 'Expand inspector panel' : 'Collapse inspector panel'}
+      className="icon-button"
+      onClick={onToggleCollapsed}
+      title={collapsed ? 'Expand inspector panel' : 'Collapse inspector panel'}
+      type="button"
+    >
+      {collapsed ? '▸' : '▾'}
+    </button>
+  ) : null;
   const imageSetPanel = imageSet && onImageSetReorder && onImageSetAlignmentChange ? (
     <ImageSetInspector
       collection={imageSet}
@@ -57,26 +72,38 @@ export function Inspector({
   if (selectedNodeIds.length > 1) {
     return (
       <aside className="panel panel--inspector">
-        {imageSetPanel}
-        <div className="panel__heading">
-          <div>
-            <span className="eyebrow">Inspector</span>
-            <h2>{selectedNodeIds.length} nodes selected</h2>
+        {collapsed ? (
+          <div className="panel__heading">
+            <div><span className="eyebrow">Inspector</span><h2>{selectedNodeIds.length} nodes selected</h2></div>
+            {collapseButton}
           </div>
-        </div>
-        <p className="empty-state">Create a reusable subgraph from this selection, or select one node to edit its parameters.</p>
-        <ul className="selection-list">
-          {selectedNodeIds.map((id) => <li key={id}><code>{id}</code></li>)}
-        </ul>
+        ) : (
+          <>
+            {imageSetPanel}
+            <div className="panel__heading">
+              <div>
+                <span className="eyebrow">Inspector</span>
+                <h2>{selectedNodeIds.length} nodes selected</h2>
+              </div>
+              {collapseButton}
+            </div>
+            <p className="empty-state">Create a reusable subgraph from this selection, or select one node to edit its parameters.</p>
+            <ul className="selection-list">
+              {selectedNodeIds.map((id) => <li key={id}><code>{id}</code></li>)}
+            </ul>
+          </>
+        )}
       </aside>
     );
   }
   if (!node) {
     return (
       <aside className="panel panel--inspector inspector-empty">
-        {imageSetPanel}
-        <span className="eyebrow">Inspector</span>
-        <p>Select a node to edit its parameters.</p>
+        <div className="panel__heading">
+          <div><span className="eyebrow">Inspector</span><h2>Nothing selected</h2></div>
+          {collapseButton}
+        </div>
+        {!collapsed && <p>Select a node to edit its parameters.</p>}
       </aside>
     );
   }
@@ -104,7 +131,14 @@ export function Inspector({
 
   return (
     <aside className="panel panel--inspector">
-      {imageSetPanel}
+      {collapsed ? (
+        <div className="panel__heading">
+          <div><span className="eyebrow">Inspector</span><h2>{node.descriptor.name}</h2></div>
+          {collapseButton}
+        </div>
+      ) : (
+        <>
+          {imageSetPanel}
       <div className="panel__heading">
         <div>
           <span className="eyebrow">Inspector</span>
@@ -119,6 +153,7 @@ export function Inspector({
         >
           ×
         </button>
+        {collapseButton}
       </div>
       <div className="inspector__identity">
         <span>{node.id}</span>
@@ -215,6 +250,8 @@ export function Inspector({
           nodeLabel={node.descriptor.name}
           status={checkpointStatus}
         />
+      )}
+        </>
       )}
     </aside>
   );

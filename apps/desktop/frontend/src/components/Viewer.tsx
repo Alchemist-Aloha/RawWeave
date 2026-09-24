@@ -14,7 +14,17 @@ interface ViewerProps {
   source: SourceResult | null;
   paintedNode?: EditorNode;
   onPaintedMaskChange?: (nodeId: string, parameterId: string, value: ParameterValue) => void;
+  docked?: boolean;
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
+
+const COMPARISON_BUTTONS: Array<{ id: ViewerComparison; label: string; short: string }> = [
+  { id: 'side-by-side', label: 'Compare A and B', short: 'A/B' },
+  { id: 'wipe', label: 'Wipe', short: 'Wipe' },
+  { id: 'blink', label: 'Blink', short: 'Blink' },
+  { id: 'difference', label: 'Difference', short: 'Diff' },
+];
 
 const PREVIEWABLE_DATA_TYPES = new Set([
   'core.Image',
@@ -405,13 +415,14 @@ function ComparisonSurface({
   );
 }
 
-export function Viewer({ controller, nodes, revision, source, paintedNode, onPaintedMaskChange }: ViewerProps) {
+export function Viewer({ controller, nodes, revision, source, paintedNode, onPaintedMaskChange, docked = false, collapsed = false, onToggleCollapsed }: ViewerProps) {
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
   const [wipePosition, setWipePosition] = useState(50);
   const [showCompare, setShowCompare] = useState(false);
   const [blinkViewer, setBlinkViewer] = useState<ViewerId>('A');
   const [analyses, setAnalyses] = useState<Record<ViewerId, ImageAnalysis | null>>({ A: null, B: null });
+  const [scopesVisible, setScopesVisible] = useState(true);
   const handleAnalysis = useCallback((viewer: ViewerId, analysis: ImageAnalysis | null) => {
     setAnalyses((current) => current[viewer] === analysis ? current : { ...current, [viewer]: analysis });
   }, []);
@@ -462,46 +473,88 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
   }, [controller, nodes, options, source?.kind, source?.revision]);
 
   return (
-    <section className="viewer-section" aria-label="Image viewers">
+    <section
+      aria-label="Image viewers"
+      className={`viewer-section${docked ? ' viewer-section--docked' : ''}${collapsed ? ' viewer-section--collapsed' : ''}`}
+    >
       <div className="viewer-section__toolbar">
-        <div>
-          <span className="eyebrow">Viewer</span>
-          <strong>Image preview</strong>
-        </div>
-        {showCompare && <div className="viewer-section__layout" role="group" aria-label="Viewer layout">
-          <button className={controller.state.layout === 'side-by-side' ? 'is-active' : ''} onClick={() => controller.setLayout('side-by-side')} type="button">
-            Side by side
-          </button>
-          <button className={controller.state.layout === 'split' ? 'is-active' : ''} onClick={() => controller.setLayout('split')} type="button">
-            Split
-          </button>
-        </div>}
         <div aria-label="Viewer comparison" className="viewer-section__comparison" role="group">
-          {(['side-by-side', 'wipe', 'blink', 'difference'] as ViewerComparison[]).map((comparison) => (
-            <button
-              aria-pressed={showCompare && controller.state.comparison === comparison}
-              className={showCompare && controller.state.comparison === comparison ? 'is-active' : ''}
-              key={comparison}
-              onClick={() => {
-                controller.setComparison(comparison);
-                setShowCompare(comparison === 'side-by-side' ? !showCompare : true);
-              }}
-              type="button"
-            >
-              {comparison === 'side-by-side' ? 'Compare A / B' : comparison[0].toUpperCase() + comparison.slice(1)}
-            </button>
-          ))}
-          <label className="viewer-section__clipping">
+          {COMPARISON_BUTTONS.map(({ id, label, short }) => {
+            const active = showCompare && controller.state.comparison === id;
+            return (
+              <button
+                aria-label={label}
+                aria-pressed={active}
+                className={active ? 'is-active' : ''}
+                key={id}
+                onClick={() => {
+                  controller.setComparison(id);
+                  setShowCompare(id === 'side-by-side' ? !showCompare : true);
+                }}
+                title={label}
+                type="button"
+              >
+                {short}
+              </button>
+            );
+          })}
+          {showCompare && (
+            <>
+              <button
+                aria-label="Viewer layout: side by side"
+                aria-pressed={controller.state.layout === 'side-by-side'}
+                className={controller.state.layout === 'side-by-side' ? 'is-active' : ''}
+                onClick={() => controller.setLayout('side-by-side')}
+                title="Stack the two viewers horizontally"
+                type="button"
+              >
+                ⇋
+              </button>
+              <button
+                aria-label="Viewer layout: stacked"
+                aria-pressed={controller.state.layout === 'split'}
+                className={controller.state.layout === 'split' ? 'is-active' : ''}
+                onClick={() => controller.setLayout('split')}
+                title="Stack the two viewers vertically"
+                type="button"
+              >
+                ⇅
+              </button>
+            </>
+          )}
+          <button
+            aria-label={scopesVisible ? 'Hide scopes' : 'Show scopes'}
+            aria-pressed={scopesVisible}
+            className={`viewer-section__scopes-toggle${scopesVisible ? ' is-active' : ''}`}
+            onClick={() => setScopesVisible((visible) => !visible)}
+            title={scopesVisible ? 'Hide scopes' : 'Show scopes'}
+            type="button"
+          >
+            Scopes
+          </button>
+          <label className="viewer-section__clipping" title="Highlight clipped highlights and shadows">
             <input
+              aria-label="Clipping"
               checked={controller.state.clippingOverlay}
               onChange={(event) => controller.setClippingOverlay(event.target.checked)}
               type="checkbox"
             />
-            Clipping
+            Clip
           </label>
         </div>
+        {onToggleCollapsed && (
+          <button
+            aria-label={collapsed ? 'Expand preview panel' : 'Collapse preview panel'}
+            className="icon-button"
+            onClick={onToggleCollapsed}
+            title={collapsed ? 'Expand preview panel' : 'Collapse preview panel'}
+            type="button"
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
+        )}
       </div>
-      {controller.state.comparison === 'side-by-side' ? (
+      {!collapsed && (controller.state.comparison === 'side-by-side' ? (
         <div className={`viewer-grid viewer-grid--${showCompare ? controller.state.layout : 'single'}`}>
           <Pane
             analysis={analyses.A}
@@ -538,8 +591,8 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
           paintedNode={paintedNode}
           wipePosition={wipePosition}
         />
-      )}
-      {paneAnalysis && <Scopes analysis={paneAnalysis} />}
+      ))}
+      {!collapsed && scopesVisible && paneAnalysis && <Scopes analysis={paneAnalysis} compact={docked} />}
     </section>
   );
 }

@@ -90,8 +90,32 @@ describe('real Tauri preview', () => {
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('2 nodes'));
   });
 
+  it('lays the preview out without dead space', async () => {
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
+    await browser.pause(1500);
+
+    const layout = await browser.execute(() => {
+      const section = document.querySelector('.viewer-section');
+      const rows = getComputedStyle(section).gridTemplateRows.split(' ').map(Number.parseFloat);
+      return {
+        section: Math.round(section.getBoundingClientRect().height),
+        rows,
+        toolbar: Math.round(document.querySelector('.viewer-section__toolbar')?.getBoundingClientRect().height ?? 0),
+        stage: Math.round(document.querySelector('.viewer-pane__stage')?.getBoundingClientRect().height ?? 0),
+        scopes: Math.round(document.querySelector('.viewer-scopes')?.getBoundingClientRect().height ?? 0),
+        tabs: document.querySelectorAll('.scope-tab').length,
+      };
+    });
+
+    // One compact toolbar row, a tabbed scope strip, and no unused track.
+    expect(layout.toolbar).toBeLessThan(60);
+    expect(layout.tabs).toBe(8);
+    expect(layout.stage).toBeGreaterThan(120);
+    expect(layout.rows.reduce((total, value) => total + value, 0)).toBeGreaterThan(layout.section - 14);
+  });
+
   it('keeps the workflow graph visible after switching workspaces', async () => {
-    const workspace = await $('section.workspace');
+    const workspace = await $('.workbench');
     const flow = await $('.react-flow');
     await flow.waitForDisplayed();
     await $('.react-flow__node').waitForDisplayed();

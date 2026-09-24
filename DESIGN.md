@@ -177,7 +177,7 @@ RawWeave is a darkroom instrument: a dark, calibrated surface where the photogra
 
 The system is calibrated rather than expressive. One accent carries every active, selected, and live signal; everything else is a neutral from the same blue-black family, differentiated by lightness alone. Restraint here is discipline, not absence — the mint is rare precisely so that it always means the same thing. The dark ground is functional too: it keeps the viewer honest about exposure, which is the entire job of a RAW editor.
 
-Density is deliberate. Rows run 22–32px, type runs 9–12px, and panels are expected to pack information rather than breathe. This is the incumbent behavior and it suits a graph editor, where the canvas — not the chrome — is the subject. It is constrained below by the Legibility Floor: chrome may be small, but words a user must read to work never are. The density budget is spent on rows and panels, not on shrinking prose.
+Density is deliberate. Rows run 22–32px, type runs 9–12px, and panels are expected to pack information rather than breathe. This is the incumbent behavior and it suits a graph editor, where the canvas — not the chrome — is the subject. It is constrained from below by the Legibility Floor: a hard 9px minimum enforced by test, and an 11px target for anything a user must read to work. The density budget is spent on rows and panels, not on shrinking prose.
 
 **Key Characteristics:**
 - Near-black blue ground (`#0b0d12`) with a five-step surface ladder read by lightness, not hue.
@@ -244,7 +244,7 @@ A single blue-black neutral family, one mint accent family, and three status col
 ### Named Rules
 **The Two-Voice Rule.** Manrope speaks to the user; DM Mono speaks about the data. Anything the system reports (identifiers, node types, metadata, counts, states, timings, file paths) is mono. Anything the user acts on (labels, titles, buttons, prose) is Manrope. Never swap them for variety.
 
-**The Legibility Floor Rule.** Nothing a user must read to do work renders below 11px. Mono chrome — badges, status chips, unit labels, table keys — may go to 9px and never below it; 10px is the preferred size for mono detail inside dense cards. The incumbent `styles.css` contains 7–8px mono and 8px card body text (`.host-card__details dt` 7px, `.host-card__heading small` 8px, `.ai-provider-card__heading strong` 10px with 8px siblings, `.browser-tile__open small` 7px, `.scope-card--inspector dt` 7px); those values are drift below this floor, not a system trait. Raise them to 9px (chrome) or 11px (reading text) as the surrounding component is touched. Density is spent on row heights and panel layout, never on shrinking words.
+**The Legibility Floor Rule.** No type renders below 9px, and `apps/desktop/frontend/src/styles.test.ts` fails if any declaration does. Above that hard floor the targets are: 11px for prose, names, field labels and control text; 10px for mono values inside dense cards; 9px for badges, status chips, metadata keys and identifiers. Compact one-token controls in tight grids (browser-tile rating and flag buttons, the dock rail) are the deliberate exception and stay at 9px — they are glyph-sized, not sentences. The file still sets several names, breadcrumbs and field values at 9–10px (`.browser-tile__open strong`, `.queue-item__preview strong`, `.browser-breadcrumbs`, `.browser-panel__controls input`, `.parameter`, `.context-menu__item`); those sit below the 11px target and should be raised as their components are touched. Density is spent on row heights and panel layout, never on shrinking words.
 
 ## Layout
 
@@ -320,7 +320,7 @@ The ladder is deliberate and reused: 3px micro chips and thumbnails, 4px badges 
 - **Style:** `Field Sunk` background, 1px `Field Border`, 6px radius, `padding: 8px`, mono text, no inner shadow.
 - **Focus:** the border turns Mint Border (`#58c6aa`). Inputs do **not** receive the global 2px outline — that is reserved for buttons and controls without their own border treatment.
 - **Global focus:** `outline: 2px solid #6ee7c7; outline-offset: 2px` on buttons, inputs, and selects. Focus is never removed and never replaced by color alone.
-- **Dense fields:** the host/AI forms drop to 4px radius, 5px padding, and 8px mono text; the same colors apply so a field always looks like a field.
+- **Dense fields:** the host/AI forms drop to 4px radius, 5px padding, and 10px mono text; the same colors apply so a field always looks like a field.
 - **Checkbox/range:** native controls with `accent-color: #6ee7c7` — never rebuilt as custom widgets.
 
 ### Navigation
@@ -330,10 +330,10 @@ The ladder is deliberate and reused: 3px micro chips and thumbnails, 4px badges 
 - **Dock rails:** 32px vertical strips with a rotated uppercase label; hovering tints them mint. They are the primary way to reclaim canvas space.
 
 ### Graph Node (signature)
-A 168px-minimum card on the canvas: 9px radius, `Surface Raised` background, a 1px `Control Border` outline, and the `Float low` shadow. The title is 11px/800, the node type is 8–9px DM Mono beneath it, and the body is a two-column port grid (inputs left, outputs right) under a hairline. Ports are 10px circles with a 2px `Canvas Black` ring, each wrapped in an invisible 999px hit area so grabbing a dot is never fiddly — a targeted accessibility decision worth preserving. Status badges sit top-right as 4px chips (checkpoint, fresh, stale, failed, generating, cancelled). Selected state replaces the border with mint and adds the mint ring. Connection feedback uses React Flow's own handle state classes to paint expanding pale-mint rings on valid targets and amber on the source — feedback is a ring, never a moving element.
+A 168px-minimum card on the canvas: 9px radius, `Surface Raised` background, a 1px `Control Border` outline, and the `Float low` shadow. The title is 11px/800, the node type is 9px DM Mono beneath it, and the body is a two-column port grid (inputs left, outputs right) under a hairline with 11px port labels. Ports are 10px circles with a 2px `Canvas Black` ring, each wrapped in an invisible 999px hit area so grabbing a dot is never fiddly — a targeted accessibility decision worth preserving. Status badges sit top-right as 4px chips (checkpoint, fresh, stale, failed, generating, cancelled). Selected state replaces the border with mint and adds the mint ring. Connection feedback uses React Flow's own handle state classes to paint expanding pale-mint rings on valid targets and amber on the source — feedback is a ring, never a moving element.
 
 ### Viewer Pane and Scopes (signature)
-Panes are 8px-radius containers over a 16px transparency checkerboard (`repeating-conic-gradient(#141a22 0% 25%, #11161d 0% 50%)`), with a header (target selector + label), a grab-cursor stage, and a bottom control row. Comparison modes overlay two panes in the same box; the difference mode applies `mix-blend-mode: difference`. Scopes are 4–5px-radius cards reading `#111720`, each with a DM Mono uppercase caption and a pixelated `<canvas>`. Inspector readouts are DM Mono key/value rows in the 7–8px range — the clearest case for the Legibility Floor's 9px minimum.
+Panes are 8px-radius containers over a 16px transparency checkerboard (`repeating-conic-gradient(#141a22 0% 25%, #11161d 0% 50%)`), with a header (target selector + label), a grab-cursor stage, and a bottom control row. Comparison modes overlay two panes in the same box; the difference mode applies `mix-blend-mode: difference`. Scopes are 4–5px-radius cards reading `#111720`, each with a DM Mono uppercase caption and a pixelated `<canvas>`. Inspector readouts are DM Mono key/value rows at 9px keys and 10px values.
 
 ### Error Surfaces
 Every failure renders in the same visual grammar: `danger-tint` background, rose border, rose heading, lighter rose body, and — where retry is possible — a small bordered rose button. Errors appear inline in the pane that owns them (viewer, queue, provider card, checkpoint panel) or as a single toast; batch and checkpoint failures never open modals. Identifiers, provider names, and reasons are DM Mono; the human sentence is Manrope.
@@ -348,7 +348,7 @@ Every failure renders in the same visual grammar: `danger-tint` background, rose
 - **Do** keep row heights tight (22–32px) and let panels scroll internally under a fixed 100vh shell.
 - **Do** use the established radius ladder (3/4/5/6/7/8/9px) rather than inventing new values.
 - **Do** pair every accent-tinted surface with `Mint Bright` text or a `Mint Border` outline so contrast survives the dark ground.
-- **Do** raise 7–8px text as you touch it: 9px floor for mono chrome, 11px floor for anything a user reads.
+- **Do** hold the Legibility Floor: 9px is the hard minimum, 11px is the target for anything a user reads, and the test in `src/styles.test.ts` enforces the floor.
 
 ### Don't:
 - **Don't** add a second accent hue. Rose, amber, and lavender are status colors; if something is neither an error, a warning, nor in-flight, it wears a neutral.
@@ -357,6 +357,6 @@ Every failure renders in the same visual grammar: `danger-tint` background, rose
 - **Don't** let the document scroll or grow past the viewport; a new pane scrolls inside itself.
 - **Don't** put a shadow on an element that sits inside a pane.
 - **Don't** use solid `#000` or a pure grey — every neutral here is blue-shifted and belongs to the `#0b0d12` family.
-- **Don't** set prose, form labels, or error sentences in the 7–8px mono sizes.
+- **Don't** set prose, form labels, or error sentences at the 9px chrome size; that size is for badges, keys and identifiers.
 - **Don't** replace native checkbox, range, or select behavior with custom widgets, or remove the 2px mint focus outline.
 - **Don't** style the 640px mobile branch as a canonical layout; this is a desktop-only product and that branch is inherited.

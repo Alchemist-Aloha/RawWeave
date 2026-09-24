@@ -88,6 +88,118 @@ describe('workflow editing in browser mode', () => {
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 links'));
   });
 
+  it('refuses a connection whose data types do not match', async () => {
+    // The library hides nodes with no matching inputs, so show every node.
+    const addAnyNode = async (name) => {
+      const compatibleOnly = await $('[aria-label="Compatible nodes only"]');
+      if (await compatibleOnly.isExisting() && await compatibleOnly.isSelected()) await compatibleOnly.click();
+      await addNode(name);
+    };
+    await addAnyNode('Image Input');
+    await addAnyNode('Constant Float');
+    await addAnyNode('Exposure');
+    const source = await $('.react-flow__handle.source[data-nodeid="constant-float"][data-handleid="value"]');
+    const target = await $('.react-flow__handle.target[data-nodeid="exposure"][data-handleid="image"]');
+    await source.waitForDisplayed();
+    await target.waitForDisplayed();
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: source })
+      .down()
+      .move({ origin: target, duration: 250 })
+      .up()
+      .perform();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 links'));
+  });
+
+  it('reveals the disconnect action when an edge is hovered', async () => {
+    await addNode('Image Input');
+    await addNode('Exposure');
+    const source = await $('.react-flow__handle.source[data-nodeid="image-input"][data-handleid="image"]');
+    const target = await $('.react-flow__handle.target[data-nodeid="exposure"][data-handleid="image"]');
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: source })
+      .down()
+      .move({ origin: target, duration: 250 })
+      .up()
+      .perform();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 links'));
+
+    await expect($('.edge-disconnect')).not.toHaveElementClass(expect.stringContaining('is-visible'));
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: await $('.react-flow__edge-interaction') })
+      .perform();
+    await expect($('.edge-disconnect')).toHaveElementClass(expect.stringContaining('is-visible'));
+
+    // The action is a real button, so it also works without a context menu.
+    await $('.edge-disconnect').click();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 links'));
+  });
+
+  it('disconnects an edge from its right-click menu', async () => {
+    await addNode('Image Input');
+    await addNode('Exposure');
+    const source = await $('.react-flow__handle.source[data-nodeid="image-input"][data-handleid="image"]');
+    const target = await $('.react-flow__handle.target[data-nodeid="exposure"][data-handleid="image"]');
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: source })
+      .down()
+      .move({ origin: target, duration: 250 })
+      .up()
+      .perform();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 links'));
+
+    const edge = await $('.react-flow__edge');
+    await edge.waitForExist();
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: edge })
+      .down({ button: 'right' })
+      .up({ button: 'right' })
+      .perform();
+
+    const menu = await $('.context-menu');
+    await menu.waitForDisplayed();
+    await expect(menu).toHaveText(expect.stringContaining('Disconnect'));
+    await clickByText('.context-menu__item', 'Disconnect');
+    await expect($('.context-menu')).not.toExist();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 links'));
+  });
+
+  it('disconnects every edge of a node from its right-click menu', async () => {
+    await addNode('Image Input');
+    await addNode('Exposure');
+    const source = await $('.react-flow__handle.source[data-nodeid="image-input"][data-handleid="image"]');
+    const target = await $('.react-flow__handle.target[data-nodeid="exposure"][data-handleid="image"]');
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: source })
+      .down()
+      .move({ origin: target, duration: 250 })
+      .up()
+      .perform();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 links'));
+
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: await nodeElement('Image Input') })
+      .down({ button: 'right' })
+      .up({ button: 'right' })
+      .perform();
+    await $('.context-menu').waitForDisplayed();
+    await clickByText('.context-menu__item', 'Disconnect 1 output');
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 links'));
+  });
+
+  it('offers canvas actions on right-click', async () => {
+    await browser.action('pointer', { parameters: { pointerType: 'mouse' } })
+      .move({ origin: await $('.react-flow__pane') })
+      .down({ button: 'right' })
+      .up({ button: 'right' })
+      .perform();
+    const menu = await $('.context-menu');
+    await menu.waitForDisplayed();
+    await expect(menu).toHaveText(expect.stringContaining('Fit view'));
+    await browser.keys('Escape');
+    await expect($('.context-menu')).not.toExist();
+  });
+
   it('creates a subgraph from the selection and navigates between scopes', async () => {
     await addNode('Exposure');
     await selectedNode('Exposure');

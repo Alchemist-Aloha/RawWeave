@@ -1,6 +1,8 @@
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode } from '../editor/types';
+import { inputDataType } from '../editor/connections';
 import type { CheckpointStatus } from '../checkpoint/types';
+import { dataTypeColor } from '../ui/data-type-colors';
 
 export interface RawWeaveNodeData extends Record<string, unknown> {
   node: EditorNode;
@@ -18,9 +20,10 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
     .map((parameterId) => ({
       id: parameterId,
       name: node.descriptor.parameters.find((parameter) => parameter.id === parameterId)?.name ?? parameterId,
+      dataType: inputDataType(node, parameterId) ?? 'value.String',
     }));
   const inputPorts = [
-    ...node.descriptor.inputs.map((input) => ({ id: input.id, name: input.name })),
+    ...node.descriptor.inputs.map((input) => ({ id: input.id, name: input.name, dataType: input.dataType })),
     ...exposedPorts,
   ];
   return (
@@ -43,7 +46,14 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
         <div className="graph-node__port-column">
           {inputPorts.map((input) => (
             <div className="graph-node__port graph-node__port--input" key={input.id}>
-              <Handle id={input.id} type="target" position={Position.Left} />
+              <Handle
+                data-datatype={input.dataType}
+                id={input.id}
+                position={Position.Left}
+                style={{ background: dataTypeColor(input.dataType) }}
+                title={`${input.name} · ${input.dataType}`}
+                type="target"
+              />
               <span>{input.name}</span>
             </div>
           ))}
@@ -52,7 +62,14 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
           {node.descriptor.outputs.map((output) => (
             <div className="graph-node__port graph-node__port--output" key={output.id}>
               <span>{output.name}</span>
-              <Handle id={output.id} type="source" position={Position.Right} />
+              <Handle
+                data-datatype={output.dataType}
+                id={output.id}
+                position={Position.Right}
+                style={{ background: dataTypeColor(output.dataType) }}
+                title={`${output.name} · ${output.dataType}`}
+                type="source"
+              />
             </div>
           ))}
         </div>
