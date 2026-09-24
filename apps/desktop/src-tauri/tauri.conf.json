@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.rawweave.editor",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "pnpm run dev",
     "beforeBuildCommand": {
-      "script": "npm run build",
+      "script": "pnpm run build",
       "cwd": "../frontend"
     },
     "devUrl": "http://localhost:5173",

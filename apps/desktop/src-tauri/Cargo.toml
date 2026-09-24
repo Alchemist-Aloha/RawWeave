@@ -37,3 +37,6 @@ tauri-plugin-dialog = "2.7.3"
 tempfile = "3.27"
 
 [workspace]
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
