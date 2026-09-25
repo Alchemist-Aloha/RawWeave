@@ -14,8 +14,7 @@ colors:
   border-field: "#293543"
   text-primary: "#e8edf4"
   text-body: "#cdd8e3"
-  text-muted: "#7b8999"
-  text-faint: "#6f8092"
+  text-muted: "#8a94a2"
   calibration-mint: "#6ee7c7"
   mint-border: "#58c6aa"
   mint-bright: "#8cebd3"
@@ -216,10 +215,11 @@ A single blue-black neutral family, one mint accent family, and three status col
 - **Field Border** (`#293543`): input, select, and textarea outlines.
 - **Text Primary** (`#e8edf4`): the root foreground and the highest-emphasis text.
 - **Text Body** (`#cdd8e3`): default reading text in panels and cards.
-- **Text Muted** (`#7b8999`): eyebrow labels, secondary metadata, inactive controls.
-- **Text Faint** (`#6f8092`): identifiers, units, and third-level detail inside dense cards.
+- **Text Muted** (`#8a94a2`): the one secondary tier — eyebrow labels, metadata, identifiers, units, hints, empty-state guidance, inactive controls, third-level detail. There is no dimmer tier below it on purpose: everything the system says is said at AA or better.
 
 ### Named Rules
+**The One Grey Rule.** Secondary text is a single value (`#8a94a2`), not a family of near-duplicates. It must clear 4.5:1 on the lightest surface it can sit on — including hovered rows and tiles, which are lighter than the panels they sit in — so the tier is safe wherever it lands, not merely where it currently happens to be used. `src/styles.test.ts` computes this for every text colour in the stylesheet and fails on a violation, with a named exemption list for the three cases where the text rule does not apply (text on a mint fill, a large placeholder glyph, and a control glyph).
+
 **The One Emitter Rule.** Calibration Mint is the only accent the resting interface spends. It marks primary action, active state, focus, and live status, and nothing else — so its presence always means the same thing. Fault Rose, Hold Amber, and Generating Lavender are status colors, never decoration, and never a second brand accent.
 
 **The Readout Rule.** State is shown by border color and tinted fill, not by filling a control with solid color. A solid mint fill is reserved for one thing per view: the primary action.
@@ -256,6 +256,7 @@ The shell is a fixed frame: `.app-shell` is a flex column at 100% width and heig
 - **Browse/queue** is a 48px toolbar plus a two-column body at `minmax(0, 1fr) / minmax(285px, 31%)` with a 1px gutter drawn by the background showing through.
 - **Integration strip** is `minmax(0, 1.6fr) / minmax(360px, 0.9fr)`; the host manager is `180px / 1fr / minmax(300px, 34%)`.
 - **Spacing rhythm** is tight and near-uniform: 3–4px inside chips and marks, 6–8px between related controls, 12–16px panel padding, 18–24px between panel sections, 48px only on crash/empty screens. Vertical rhythm inside cards is 3–7px.
+- **Section rhythm** in a long form is three-step and deliberate: 5px from a caption to its control, 12px between elements inside one section, 22px between sections. That contrast is what separates groups — not borders or cards.
 - **Responsive behavior** collapses by reflow, not by hiding: at 1100px paddings and gaps tighten; at 820px the topbar wraps and the integration strip becomes single-column; at 640px the fixed frame is deliberately relaxed to document scroll. That 640px branch exists for browser-shaped viewing and is **not** a target of this desktop-only product — treat it as inherited, not canonical.
 - **Scopes** run a 4-column grid (`.viewer-scopes`), collapsing to 2 columns at 820px and 1 at 640px; the compact dock variant is a tabbed single view capped at 168px tall so the panel never has dead space.
 - **Grids over fixed widths**: the browser grid uses `repeat(auto-fill, minmax(106px, 1fr))` with small/medium/large/list variants (84/106/154px) rather than breakpoint-specific column counts.
@@ -322,6 +323,9 @@ The ladder is deliberate and reused: 3px micro chips and thumbnails, 4px badges 
 - **Global focus:** `outline: 2px solid #6ee7c7; outline-offset: 2px` on buttons, inputs, and selects. Focus is never removed and never replaced by color alone.
 - **Dense fields:** the host/AI forms drop to 4px radius, 5px padding, and 10px mono text; the same colors apply so a field always looks like a field.
 - **Checkbox/range:** native controls with `accent-color: #6ee7c7` — never rebuilt as custom widgets.
+
+### Forms and Field Grids
+A form is a sequence of labelled sections, not a wall of inline fields. Fields lay out in a grid that auto-fills at a 200px minimum (`grid-template-columns: repeat(auto-fill, minmax(200px, 1fr))`), so one markup order yields six columns at 1440px, four at 1024px, and one in a narrow dock. Every field is a `<label>` with its caption above the control (5px gap), every control is at least 28px tall, and a single-decision control — a policy select — caps at 420px rather than stretching across the panel. Long lists of choices (per-item checkboxes) get a bounded scrolling box (`max-height: 216px`) so they cannot push the action below the fold. Section separation is rhythm, not containers: the recipe, checkpoint policy, dry run and diagnostics sections of the Batch workspace carry no borders or cards between them.
 
 ### Navigation
 - **Topbar:** brand glyph (32px, 9px radius, mint border, mint initials) plus the product name, a workspace-mode switcher (Library / canvas workbench / Browse / Batch / Integrations), and a right-aligned action cluster with a `More` overflow menu (190px popover).

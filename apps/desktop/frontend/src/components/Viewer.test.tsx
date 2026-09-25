@@ -129,6 +129,8 @@ describe('Viewer', () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('preview image could not be loaded');
     expect(controller.state.panes.A.status).toBe('error');
     expect(releasePreview).toHaveBeenCalledWith(image?.src);
+    // The idle hint must not sit behind the error card when a render fails.
+    expect(host.querySelector('.viewer-pane__empty')).toBeNull();
 
     await act(async () => root.unmount());
     host.remove();
@@ -209,5 +211,43 @@ describe('Viewer', () => {
     host.remove();
     stage.remove();
     getContext.mockRestore();
+  });
+
+  it('does not request a render when a node is moved or the viewer is navigated', async () => {
+    const requests: string[] = [];
+    const controller = new ViewerController({
+      requestPreview: (request) => {
+        requests.push(`${request.nodeId}:${request.outputPort}`);
+        return new Promise(() => undefined);
+      },
+      cancelPreview: async () => undefined,
+      releasePreview: async () => undefined,
+    });
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    output.typeId = 'core.output';
+    const source = { kind: 'ordinary' as const, width: 640, height: 480, revision: 1, metadata: null };
+
+    await act(async () => root.render(
+      <Viewer controller={controller} nodes={[input, output]} revision={1} source={source} />,
+    ));
+    expect(requests).toEqual(['output:image']);
+
+    const movedInput = { ...input, position: { x: 120, y: 60 } };
+    await act(async () => root.render(
+      <Viewer controller={controller} nodes={[movedInput, output]} revision={1} source={source} />,
+    ));
+    await act(async () => {
+      controller.setZoom('A', 2);
+      controller.updatePan('A', { x: 30, y: 20 });
+    });
+
+    expect(requests).toEqual(['output:image']);
+
+    await act(async () => root.unmount());
+    host.remove();
   });
 });

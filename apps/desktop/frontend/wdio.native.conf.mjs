@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 const frontend = dirname(fileURLToPath(import.meta.url));
 const binary = resolve(frontend, '../src-tauri/target/debug', process.platform === 'win32' ? 'rawweave-desktop.exe' : 'rawweave-desktop');
 const appHome = mkdtempSync(join(tmpdir(), 'rawweave-wdio-'));
-const imagePath = resolve(frontend, '../../../test-data/images/common/pngsuite-rgb8.png');
+// A large, non-square source so the preview fit and scope layout are exercised
+// against a realistic image rather than a 32x32 icon.
+const imagePath = resolve(frontend, '../../../test-data/images/common/gracie-allen-portrait.jpg');
 const sessionPath = join(appHome, 'config', 'com.rawweave.editor', 'browser-session.json');
 mkdirSync(dirname(sessionPath), { recursive: true });
 writeFileSync(sessionPath, JSON.stringify({

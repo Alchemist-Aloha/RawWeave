@@ -114,6 +114,39 @@ describe('real Tauri preview', () => {
     expect(layout.rows.reduce((total, value) => total + value, 0)).toBeGreaterThan(layout.section - 14);
   });
 
+  it('fits the preview image and scope canvas inside the panel', async () => {
+    // The fit contract: the rendered image and every scope drawing sit inside
+    // their panel. Regression: a large frame overflowed the stage and the scope
+    // card overflowed its tab panel, both clipped by the panel's overflow.
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
+    await browser.waitUntil(async () => browser.execute(() => document.querySelector('.viewer-pane__image')?.complete === true), {
+      timeout: 20_000,
+      timeoutMsg: 'the restored preview did not finish loading',
+    });
+    await browser.pause(1200);
+
+    const fits = await browser.execute(() => {
+      const within = (selector, parentSelector, tolerance = 2) => {
+        const child = document.querySelector(selector)?.getBoundingClientRect();
+        const parent = document.querySelector(parentSelector)?.getBoundingClientRect();
+        if (!child || !parent) return false;
+        return child.left >= parent.left - tolerance
+          && child.top >= parent.top - tolerance
+          && child.right <= parent.right + tolerance
+          && child.bottom <= parent.bottom + tolerance;
+      };
+      return {
+        image: within('.viewer-pane__image', '.viewer-pane__stage'),
+        card: within('.scope-card', '.scope-tabs__panel'),
+        canvas: within('.scope-canvas', '.scope-tabs__panel'),
+      };
+    });
+
+    expect(fits.image).toBe(true);
+    expect(fits.card).toBe(true);
+    expect(fits.canvas).toBe(true);
+  });
+
   it('keeps the workflow graph visible after switching workspaces', async () => {
     const workspace = await $('.workbench');
     const flow = await $('.react-flow');

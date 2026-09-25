@@ -127,7 +127,7 @@ describe('viewer controller', () => {
     viewer.setTarget('A', target('resize', 'Resize'));
     viewer.setTarget('B', target('blur', 'Blur'));
     viewer.setZoom('A', 2);
-    viewer.setPan('B', { x: 18, y: -6 });
+    viewer.updatePan('B', { x: 18, y: -6 });
     viewer.fitToWindow('A');
     viewer.viewAt100('B');
 
@@ -162,7 +162,7 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.progress).toBe(0.25);
   });
 
-  it('requests the visible region and a lower mip while navigating a large image', () => {
+  it('renders the full frame once and navigates zoom without another render', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -170,24 +170,21 @@ describe('viewer controller', () => {
     viewer.viewAt100('A');
     viewer.setTarget('A', target('output'));
 
+    expect(transport.requests).toHaveLength(1);
     expect(transport.requests[0]).toMatchObject({
-      region: { x: 150, y: 110, width: 100, height: 80 },
-      mip: 0,
-      tile: { x: 4, y: 3 },
-      quality: 'preview',
-    });
-
-    viewer.setZoom('A', 0.5);
-    const navigationRequest = transport.requests.at(-1)!;
-    expect(navigationRequest).toMatchObject({
-      region: { x: 100, y: 70, width: 200, height: 160 },
-      mip: 1,
-      tile: { x: 3, y: 2 },
+      region: { x: 0, y: 0, width: 400, height: 300 },
+      mip: 2,
       quality: 'draft',
     });
+
+    // Zooming transforms the loaded preview; it must not ask for a new render.
+    viewer.setZoom('A', 0.5);
+    expect(transport.requests).toHaveLength(1);
+    expect(viewer.state.panes.A.zoom).toBe(0.5);
+    expect(viewer.state.panes.A.displayScale).toBe(2);
   });
 
-  it('coalesces pointer pan updates into one preview request when the gesture ends', () => {
+  it('pans without starting a render', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -195,38 +192,46 @@ describe('viewer controller', () => {
     viewer.viewAt100('A');
     viewer.setTarget('A', target('output'));
 
-    viewer.beginPan('A');
     viewer.updatePan('A', { x: 10, y: 4 });
     viewer.updatePan('A', { x: 24, y: -8 });
     viewer.updatePan('A', { x: 31, y: -12 });
 
     expect(viewer.state.panes.A.pan).toEqual({ x: 31, y: -12 });
     expect(transport.requests).toHaveLength(1);
-
-    viewer.endPan('A');
-
-    expect(transport.requests).toHaveLength(2);
-    expect(transport.requests.at(-1)).toMatchObject({
-      region: { x: 119, y: 122, width: 100, height: 80 },
-    });
   });
 
-  it('renders a settled pan after the debounce when no pointer-up arrives', () => {
-    vi.useFakeTimers();
+  it('refits the loaded preview when the viewport changes without starting a render', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
     viewer.setViewport('A', { width: 100, height: 80 });
-    viewer.viewAt100('A');
     viewer.setTarget('A', target('output'));
 
-    viewer.beginPan('A');
-    viewer.updatePan('A', { x: 20, y: 10 });
-    viewer.updatePan('A', { x: 25, y: 15 });
+    viewer.setViewport('A', { width: 200, height: 160 });
+
+    expect(transport.requests).toHaveLength(1);
+    expect(viewer.state.panes.A.zoom).toBe(0.5);
+    expect(viewer.state.panes.A.displayScale).toBe(2);
+  });
+
+  it('renders again only when the graph revision changes', () => {
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setRevision(1);
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 100, height: 80 });
+    viewer.setTarget('A', target('output'));
     expect(transport.requests).toHaveLength(1);
 
-    vi.advanceTimersByTime(100);
+    // Pure viewer navigation is not a reason to render.
+    viewer.setZoom('A', 2);
+    viewer.updatePan('A', { x: 40, y: -15 });
+    viewer.setViewport('A', { width: 120, height: 90 });
+    viewer.fitToWindow('A');
+    viewer.viewAt100('A');
+    expect(transport.requests).toHaveLength(1);
 
+    viewer.setRevision(2);
     expect(transport.requests).toHaveLength(2);
   });
 
@@ -246,26 +251,41 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.displayScale).toBe(1);
   });
 
-  it('compensates a zoomed-out mip in the image display scale', async () => {
+  it('does not clamp a fit below the interactive zoom floor', () => {
+    const viewer = new ViewerController(new FakeTransport());
+    viewer.setSourceDimensions({ width: 6000, height: 4000 });
+    viewer.setViewport('A', { width: 300, height: 150 });
+    viewer.setTarget('A', target('output'));
+
+    // 150 / 4000 = 0.0375, below the 0.1 interactive floor. Clamping it there
+    // made the "fit" preview overflow a small panel.
+    expect(Math.min(300 / 6000, 150 / 4000)).toBeLessThan(0.1);
+    expect(viewer.state.panes.A.zoomMode).toBe('fit');
+    expect(viewer.state.panes.A.zoom).toBeCloseTo(150 / 4000, 6);
+  });
+
+  it('compensates the loaded mip in the image display scale when zooming', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
     viewer.setViewport('A', { width: 100, height: 80 });
-    viewer.viewAt100('A');
     viewer.setTarget('A', target('output'));
-    viewer.setZoom('A', 0.5);
 
-    const request = transport.requests.at(-1)!;
+    const request = transport.requests[0];
     expect(request).toMatchObject({
-      region: { x: 100, y: 70, width: 200, height: 160 },
-      mip: 1,
+      region: { x: 0, y: 0, width: 400, height: 300 },
+      mip: 2,
     });
-    transport.pending.get(request.requestId)!.resolve(result(request, { width: 100, height: 80, fullWidth: 400, fullHeight: 300 }));
+    transport.pending.get(request.requestId)!.resolve(result(request, { width: 100, height: 75, fullWidth: 400, fullHeight: 300 }));
     await Promise.resolve();
 
     expect(viewer.state.panes.A.width).toBe(100);
-    expect(viewer.state.panes.A.height).toBe(80);
+    expect(viewer.state.panes.A.height).toBe(75);
     expect(viewer.state.panes.A.displayScale).toBe(1);
+
+    viewer.setZoom('A', 0.5);
+    expect(transport.requests).toHaveLength(1);
+    expect(viewer.state.panes.A.displayScale).toBe(2);
   });
 
   it('re-fits and keeps true output dimensions for an intermediate resize', async () => {
@@ -287,9 +307,10 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.displayScale).toBe(1);
   });
 
-  it('keeps the current preview visible while a replacement renders', async () => {
+  it('keeps the loaded preview visible across navigation and replaces it on a node setting change', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
+    viewer.setRevision(1);
     viewer.setSourceDimensions({ width: 400, height: 300 });
     viewer.setViewport('A', { width: 100, height: 80 });
     viewer.setTarget('A', target('output'));
@@ -299,11 +320,16 @@ describe('viewer controller', () => {
     const firstUrl = viewer.state.panes.A.imageUrl;
     expect(firstUrl).toBeTruthy();
 
+    // Navigation keeps the same frame on screen and starts no render.
     viewer.setZoom('A', 0.5);
-
-    // The old frame stays on screen and stays alive until the new one lands.
+    viewer.updatePan('A', { x: 40, y: -20 });
     expect(viewer.state.panes.A.imageUrl).toBe(firstUrl);
     expect(transport.releases).toEqual([]);
+    expect(transport.requests).toHaveLength(1);
+
+    // A node setting change (new graph revision) does replace the frame.
+    viewer.setRevision(2);
+    expect(viewer.state.panes.A.imageUrl).toBe(firstUrl);
 
     const second = transport.requests.at(-1)!;
     transport.pending.get(second.requestId)!.resolve(result(second));

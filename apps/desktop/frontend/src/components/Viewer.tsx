@@ -211,7 +211,6 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         ref={stageRef}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
-          controller.beginPan(viewer);
           dragStart.current = {
             x: event.clientX,
             y: event.clientY,
@@ -228,12 +227,10 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         }}
         onPointerUp={(event) => {
           dragStart.current = null;
-          controller.endPan(viewer);
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
         onPointerCancel={(event) => {
           dragStart.current = null;
-          controller.endPan(viewer);
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
         onWheel={(event) => {
@@ -244,7 +241,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         {imageUrl ? (
           <img
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
-            className={`viewer-pane__image${pane.zoomMode === 'fit' ? ' viewer-pane__image--fit' : ''}`}
+            className="viewer-pane__image"
             crossOrigin="anonymous"
             height={pane.height ?? undefined}
             onError={() => controller.reportImageLoadFailure(viewer, imageUrl)}
@@ -252,15 +249,18 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             ref={imageRef}
             src={imageUrl}
             style={{
-              transform: `translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
+              // Absolute positioning pins the image to the stage center, so its
+              // intrinsic size never inflates the grid track; the centring
+              // translate then scales it about that same centre for fit/zoom.
+              transform: `translate(-50%, -50%) translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
             }}
             width={pane.width ?? undefined}
           />
-        ) : (
+        ) : pane.status === 'idle' || pane.status === 'cancelled' ? (
           <div className="viewer-pane__empty">
-            {pane.status === 'loading' ? 'Rendering preview…' : 'Select an intermediate node output'}
+            {pane.status === 'cancelled' ? 'Preview cancelled' : 'Select an intermediate node output'}
           </div>
-        )}
+        ) : null}
         <ClippingOverlay
           analysis={analysis}
           enabled={clippingOverlay}
@@ -301,10 +301,20 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         )}
       </div>
       {!surface && <div className="viewer-pane__controls">
-        <button onClick={() => controller.fitToWindow(viewer)} type="button">Fit</button>
-        <button onClick={() => controller.viewAt100(viewer)} type="button">100%</button>
+        <button
+          aria-pressed={pane.zoomMode === 'fit'}
+          className={pane.zoomMode === 'fit' ? 'is-active' : ''}
+          onClick={() => controller.fitToWindow(viewer)}
+          type="button"
+        >Fit</button>
+        <button
+          aria-pressed={pane.zoomMode === '100%'}
+          className={pane.zoomMode === '100%' ? 'is-active' : ''}
+          onClick={() => controller.viewAt100(viewer)}
+          type="button"
+        >100%</button>
         <button aria-label={`Zoom out Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, -1)} type="button">−</button>
-        <span className="viewer-pane__zoom">{pane.zoomMode === 'fit' ? 'Fit' : `${Math.round(pane.zoom * 100)}%`}</span>
+        <span className="viewer-pane__zoom">{Math.round(pane.zoom * 100)}%</span>
         <button aria-label={`Zoom in Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, 1)} type="button">+</button>
         {pane.target?.dataType === 'core.Mask' && (
           <div className="viewer-pane__mask-display" role="group" aria-label={`Viewer ${viewer} mask display`}>
@@ -475,7 +485,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
   return (
     <section
       aria-label="Image viewers"
-      className={`viewer-section${docked ? ' viewer-section--docked' : ''}${collapsed ? ' viewer-section--collapsed' : ''}`}
+      className={`viewer-section${docked ? ' viewer-section--docked' : ''}${collapsed ? ' viewer-section--collapsed' : ''}${!collapsed && scopesVisible && paneAnalysis ? ' viewer-section--scopes' : ''}`}
     >
       <div className="viewer-section__toolbar">
         <div aria-label="Viewer comparison" className="viewer-section__comparison" role="group">

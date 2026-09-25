@@ -16,7 +16,6 @@ interface ActiveRequest {
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 8;
-export const PAN_RENDER_DEBOUNCE_MS = 80;
 
 function paneState(): ViewerPaneState {
   return {
@@ -34,6 +33,7 @@ function paneState(): ViewerPaneState {
     pan: { x: 0, y: 0 },
     maskDisplay: 'grayscale',
     imageRegion: null,
+    imageMip: 0,
     imageOrigin: { x: 0, y: 0 },
   };
 }
@@ -53,27 +53,17 @@ interface RequestPlan {
   zoom: number;
 }
 
-function clampInteger(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, Math.floor(value)));
-}
-
-function visibleRegion(
-  dimensions: ImageDimensions,
-  viewport: ImageDimensions,
-  zoom: number,
-  pan: { x: number; y: number },
-): PreviewRegion {
-  const width = clampInteger(Math.ceil(viewport.width / zoom), 1, dimensions.width);
-  const height = clampInteger(Math.ceil(viewport.height / zoom), 1, dimensions.height);
-  const centerX = dimensions.width / 2 - pan.x / zoom;
-  const centerY = dimensions.height / 2 - pan.y / zoom;
-  const x = clampInteger(Math.floor(centerX - width / 2), 0, dimensions.width - width);
-  const y = clampInteger(Math.floor(centerY - height / 2), 0, dimensions.height - height);
-  return { x, y, width, height };
-}
-
+/**
+ * The scale that fits the whole frame inside the viewport.
+ *
+ * Fit is deliberately not clamped to the interactive zoom range: a large image
+ * in a small panel needs a scale below `MIN_ZOOM`, and clamping it there is what
+ * let the "fit" image overflow the panel. `mipForZoom` still caps the render
+ * resolution and `displayScale` compensates for whatever mip is loaded.
+ */
 function fitZoom(dimensions: ImageDimensions, viewport: ImageDimensions): number {
-  return clampZoom(Math.min(viewport.width / dimensions.width, viewport.height / dimensions.height));
+  const fit = Math.min(viewport.width / dimensions.width, viewport.height / dimensions.height);
+  return Number.isFinite(fit) && fit > 0 ? fit : 1;
 }
 
 function mipForZoom(zoom: number): number {
@@ -103,8 +93,6 @@ export class ViewerController {
   private readonly active = new Map<ViewerId, ActiveRequest>();
   private readonly viewports = new Map<ViewerId, ImageDimensions>();
   private readonly imageDimensions = new Map<ViewerId, ImageDimensions>();
-  private readonly panTimers = new Map<ViewerId, ReturnType<typeof setTimeout>>();
-  private readonly dirtyPans = new Set<ViewerId>();
   private sourceDimensions: ImageDimensions = DEFAULT_DIMENSIONS;
   private sequence = 0;
 
@@ -170,7 +158,6 @@ export class ViewerController {
   }
 
   private restartRequest(viewer: ViewerId): void {
-    this.cancelPanRender(viewer);
     const target = this.state.panes[viewer].target;
     if (!target) return;
     const current = this.active.get(viewer);
@@ -180,21 +167,29 @@ export class ViewerController {
     }
     // Keep the previous preview on screen while the replacement renders; the
     // old URL is released once the new one is applied. Blanking here makes the
-    // pane flash on every viewport or revision change.
+    // pane flash on every source or revision change.
     this.startRequest(viewer, target);
   }
 
+  /**
+   * Plans the render for a target/revision change.
+   *
+   * The complete frame is always requested so that viewer navigation (pan,
+   * zoom, viewport resize) is a client-side transform of the loaded preview and
+   * never triggers another render. The mip level is chosen for the current
+   * fit-to-viewport scale, which is the resolution the viewer can actually show.
+   */
   private requestPlan(viewer: ViewerId): RequestPlan {
     const pane = this.state.panes[viewer];
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
     const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
-    const zoom = pane.zoomMode === 'fit' ? fitZoom(dimensions, viewport) : pane.zoom;
-    const mip = mipForZoom(zoom);
-    const region =
-      pane.zoomMode === 'fit'
-        ? { x: 0, y: 0, width: dimensions.width, height: dimensions.height }
-        : visibleRegion(dimensions, viewport, zoom, pane.pan);
-    return { region, mip, zoom };
+    const fit = fitZoom(dimensions, viewport);
+    const zoom = pane.zoomMode === 'fit' ? fit : pane.zoom;
+    return {
+      region: { x: 0, y: 0, width: dimensions.width, height: dimensions.height },
+      mip: mipForZoom(fit),
+      zoom,
+    };
   }
 
   public setSourceDimensions(dimensions: ImageDimensions): void {
@@ -216,7 +211,11 @@ export class ViewerController {
     const previous = this.viewports.get(viewer);
     if (previous?.width === next.width && previous.height === next.height) return;
     this.viewports.set(viewer, next);
-    if (this.state.panes[viewer].target) this.restartRequest(viewer);
+    // Resizing only refits the loaded preview; it must not start another render.
+    if (!this.state.panes[viewer].target || this.state.panes[viewer].zoomMode !== 'fit') return;
+    const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
+    const zoom = fitZoom(dimensions, next);
+    this.setPane(viewer, { zoom, displayScale: this.displayScaleFor(viewer, zoom) });
   }
 
   public setRevision(revision: number): void {
@@ -227,7 +226,6 @@ export class ViewerController {
       void this.transport.cancelPreview(active.request.requestId);
     }
     for (const viewer of ['A', 'B'] as ViewerId[]) {
-      this.cancelPanRender(viewer);
       this.imageDimensions.delete(viewer);
       const target = this.state.panes[viewer].target;
       if (!target) {
@@ -278,7 +276,6 @@ export class ViewerController {
   }
 
   public setTarget(viewer: ViewerId, target: PreviewTarget | null): void {
-    this.cancelPanRender(viewer);
     const current = this.active.get(viewer);
     if (current) {
       this.active.delete(viewer);
@@ -325,6 +322,7 @@ export class ViewerController {
       zoom: plan.zoom,
       displayScale: plan.zoom * 2 ** plan.mip,
       imageRegion: request.region,
+      imageMip: plan.mip,
       status: 'loading',
       requestId: request.requestId,
       progress: 0,
@@ -384,7 +382,6 @@ export class ViewerController {
   }
 
   public async cancel(viewer: ViewerId): Promise<void> {
-    this.cancelPanRender(viewer);
     const active = this.active.get(viewer);
     if (!active) return;
     this.active.delete(viewer);
@@ -401,13 +398,21 @@ export class ViewerController {
     });
   }
 
+  private displayScaleFor(viewer: ViewerId, zoom: number): number {
+    return zoom * 2 ** this.state.panes[viewer].imageMip;
+  }
+
+  /** Zoom changes are applied to the loaded preview; they never start a render. */
   public setZoom(viewer: ViewerId, zoom: number): void {
     const nextZoom = clampZoom(zoom);
     if (nextZoom === this.state.panes[viewer].zoom && this.state.panes[viewer].zoomMode === 'custom') {
       return;
     }
-    this.setPane(viewer, { zoom: nextZoom, zoomMode: 'custom' });
-    this.restartRequest(viewer);
+    this.setPane(viewer, {
+      zoom: nextZoom,
+      zoomMode: 'custom',
+      displayScale: this.displayScaleFor(viewer, nextZoom),
+    });
   }
 
   public adjustZoom(viewer: ViewerId, delta: number): void {
@@ -415,72 +420,30 @@ export class ViewerController {
   }
 
   public fitToWindow(viewer: ViewerId): void {
-    this.setPane(viewer, { zoom: 1, zoomMode: 'fit', pan: { x: 0, y: 0 } });
-    this.restartRequest(viewer);
+    const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
+    const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
+    const zoom = fitZoom(dimensions, viewport);
+    this.setPane(viewer, {
+      zoom,
+      zoomMode: 'fit',
+      pan: { x: 0, y: 0 },
+      displayScale: this.displayScaleFor(viewer, zoom),
+    });
   }
 
   public viewAt100(viewer: ViewerId): void {
-    this.setPane(viewer, { zoom: 1, zoomMode: '100%' });
-    this.restartRequest(viewer);
+    this.setPane(viewer, {
+      zoom: 1,
+      zoomMode: '100%',
+      displayScale: this.displayScaleFor(viewer, 1),
+    });
   }
 
-  private cancelPanRender(viewer: ViewerId): void {
-    const timer = this.panTimers.get(viewer);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.panTimers.delete(viewer);
-    }
-    this.dirtyPans.delete(viewer);
-  }
-
-  private schedulePanRender(viewer: ViewerId): void {
-    const timer = this.panTimers.get(viewer);
-    if (timer !== undefined) clearTimeout(timer);
-    this.panTimers.set(viewer, setTimeout(() => {
-      this.panTimers.delete(viewer);
-      if (!this.dirtyPans.delete(viewer)) return;
-      this.restartRequest(viewer);
-    }, PAN_RENDER_DEBOUNCE_MS));
-  }
-
-  /** Start a gesture whose intermediate positions should stay client-side. */
-  public beginPan(viewer: ViewerId): void {
-    const timer = this.panTimers.get(viewer);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.panTimers.delete(viewer);
-    }
-  }
-
-  /** Update the visual pan without restarting the preview render. */
+  /** Pans the loaded preview without starting a render. */
   public updatePan(viewer: ViewerId, pan: { x: number; y: number }): void {
     const current = this.state.panes[viewer].pan;
     if (current.x === pan.x && current.y === pan.y) return;
     this.setPane(viewer, { pan });
-    this.dirtyPans.add(viewer);
-    this.schedulePanRender(viewer);
-  }
-
-  /** Commit the final gesture position immediately. */
-  public endPan(viewer: ViewerId): void {
-    const timer = this.panTimers.get(viewer);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.panTimers.delete(viewer);
-    }
-    if (!this.dirtyPans.delete(viewer)) return;
-    this.restartRequest(viewer);
-  }
-
-  public setPan(viewer: ViewerId, pan: { x: number; y: number }): void {
-    this.cancelPanRender(viewer);
-    this.setPane(viewer, { pan });
-    this.restartRequest(viewer);
-  }
-
-  public panBy(viewer: ViewerId, delta: { x: number; y: number }): void {
-    const current = this.state.panes[viewer].pan;
-    this.setPan(viewer, { x: current.x + delta.x, y: current.y + delta.y });
   }
 
   public setMaskDisplay(viewer: ViewerId, display: ViewerPaneState['maskDisplay']): void {

@@ -18,15 +18,33 @@ function ScopeCanvas({ label, draw }: { label: string; draw: DrawScope }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    let context: CanvasRenderingContext2D | null = null;
-    try {
-      context = canvas.getContext('2d');
-    } catch {
-      // Canvas is optional in non-browser test environments.
-    }
-    if (!context) return;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    draw(context, canvas.width, canvas.height);
+    // Size the backing store to the panel the scope is actually rendered in so
+    // histograms, waveforms and the vectorscope fill it at native crispness
+    // instead of being stretched from a fixed 256x128 buffer.
+    const render = () => {
+      let context: CanvasRenderingContext2D | null = null;
+      try {
+        context = canvas.getContext('2d');
+      } catch {
+        // Canvas is optional in non-browser test environments.
+        return;
+      }
+      if (!context) return;
+      const bounds = canvas.getBoundingClientRect();
+      const scale = Math.min(2, window.devicePixelRatio || 1);
+      const width = Math.max(1, Math.round((bounds.width || canvas.width) * scale));
+      const height = Math.max(1, Math.round((bounds.height || canvas.height) * scale));
+      if (canvas.width !== width) canvas.width = width;
+      if (canvas.height !== height) canvas.height = height;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, width, height);
+      draw(context, width, height);
+    };
+    render();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(render);
+    observer.observe(canvas);
+    return () => observer.disconnect();
   }, [draw]);
 
   return (
