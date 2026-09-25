@@ -508,7 +508,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
               </button>
             );
           })}
-          {showCompare && (
+          {showCompare && controller.state.comparison === 'side-by-side' && (
             <>
               <button
                 aria-label="Viewer layout: side by side"

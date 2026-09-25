@@ -42,11 +42,54 @@ export class BatchController {
   private statePath: string | null = null;
   private draftRecipe: BatchRecipe = defaultBatchRecipe();
   private draftCheckpointPolicy: BatchCheckpointPolicy = 'after_each_item';
+  private progressTimer: ReturnType<typeof setInterval> | null = null;
 
   public constructor(
     private readonly platform: BatchPlatform,
     private readonly idFactory: IdFactory = defaultId,
+    /** How often a running job is re-read from the backend. */
+    private readonly progressIntervalMs = 500,
   ) {}
+
+  /** Stops background progress polling. */
+  public dispose(): void {
+    this.stopProgressTimer();
+  }
+
+  /**
+   * The backend runs a job asynchronously and pushes no events, so a running job
+   * must be re-read from the platform; otherwise the panel stays on the start
+   * snapshot and never shows progress, failures, or written outputs.
+   */
+  private syncProgressTimer(): void {
+    const running = this.state.job?.state === 'running';
+    if (!running) {
+      this.stopProgressTimer();
+      return;
+    }
+    if (this.progressTimer !== null) return;
+    this.progressTimer = setInterval(() => void this.pollProgress(), this.progressIntervalMs);
+  }
+
+  private stopProgressTimer(): void {
+    if (this.progressTimer === null) return;
+    clearInterval(this.progressTimer);
+    this.progressTimer = null;
+  }
+
+  private async pollProgress(): Promise<void> {
+    const job = this.state.job;
+    // Never race a user command: its own response publishes the authoritative job.
+    if (!job || job.state !== 'running' || this.state.loading) return;
+    try {
+      const snapshot = await this.platform.snapshot(job.id);
+      if (this.state.job?.id !== job.id) return;
+      this.applyJob(snapshot, false);
+    } catch (error) {
+      this.stopProgressTimer();
+      this.setState({ error: errorMessage(error) });
+    }
+  }
 
   public subscribe(listener: BatchControllerListener): () => void {
     this.listeners.add(listener);
@@ -71,6 +114,7 @@ export class BatchController {
 
   private setState(patch: Partial<BatchState>): void {
     this.state = { ...this.state, ...patch };
+    this.syncProgressTimer();
     this.publish();
   }
 
@@ -92,8 +136,12 @@ export class BatchController {
   }
 
   private setJob(job: BatchJob): void {
+    this.applyJob(job, true);
+  }
+
+  private applyJob(job: BatchJob, resetOpenedItem: boolean): void {
     this.draftCheckpointPolicy = job.checkpointPolicy;
-    this.setState({ job, openedItem: null });
+    this.setState(resetOpenedItem ? { job, openedItem: null } : { job });
   }
 
   public async createFromQueue(

@@ -33,13 +33,27 @@ async function clickByText(selector, label) {
   throw new Error(`${selector} with text "${label}" was not found`);
 }
 
-async function addNode(name) {
+/**
+ * Sets the node search box so React observes the change. See the browser spec for
+ * why `setValue('')` is not enough: WebDriver's element clear command is hidden
+ * from React's value tracker, which leaves the library silently filtered.
+ */
+async function setNodeSearch(value) {
   const search = await $('input[placeholder="Search nodes"]');
-  await search.setValue(name);
+  await browser.execute((element, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(element, next);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }, search, value);
+  await expect(search).toHaveValue(value);
+}
+
+async function addNode(name) {
+  await setNodeSearch(name);
   const item = await $('.node-library__item');
   await item.waitForExist();
   await item.click();
-  await search.setValue('');
+  await setNodeSearch('');
 }
 
 async function selectedNode(name) {

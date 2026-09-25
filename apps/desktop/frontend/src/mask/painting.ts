@@ -53,7 +53,22 @@ export function serializePoints(points: PaintPoint[]): string {
   return points.map((point) => `${point.x},${point.y}`).join(';');
 }
 
-export function parseSerializedPoints(serialized: string): PaintPoint[] {
+/**
+ * Strokes are separated by `|` and points within a stroke by `;`.
+ *
+ * A serialized value without `|` is a single stroke, which keeps every mask
+ * painted before multi-stroke support parseable.
+ */
+export const STROKE_SEPARATOR = '|';
+
+export function serializeStrokes(strokes: PaintPoint[][]): string {
+  return strokes
+    .filter((points) => points.length > 0)
+    .map((points) => serializePoints(points))
+    .join(STROKE_SEPARATOR);
+}
+
+function parseStroke(serialized: string): PaintPoint[] {
   return serialized
     .split(';')
     .map((pair) => pair.trim())
@@ -62,6 +77,17 @@ export function parseSerializedPoints(serialized: string): PaintPoint[] {
       const [x, y] = pair.split(',').map((value) => Number(value.trim()));
       return Number.isFinite(x) && Number.isFinite(y) ? [{ x, y }] : [];
     });
+}
+
+export function parseSerializedStrokes(serialized: string): PaintPoint[][] {
+  return serialized
+    .split(STROKE_SEPARATOR)
+    .map(parseStroke)
+    .filter((points) => points.length > 0);
+}
+
+export function parseSerializedPoints(serialized: string): PaintPoint[] {
+  return parseSerializedStrokes(serialized).flat();
 }
 
 export function serializePaintedMaskState(state: PaintedMaskState): string {
@@ -150,16 +176,14 @@ export function paintedMaskStateFromParameters(parameters: Record<string, unknow
     opacity: typeof parameters.opacity === 'number' ? parameters.opacity : 1,
     mode,
   });
-  const points = typeof parameters.points === 'string' ? parseSerializedPoints(parameters.points) : [];
+  // The node carries a single brush, so every restored stroke takes the current
+  // brush settings. Geometry is preserved for the whole painting history.
+  const strokes = parseSerializedStrokes(typeof parameters.points === 'string' ? parameters.points : '');
   return {
     brush,
-    strokes: points.length > 0 ? [{ ...brush, points }] : [],
+    strokes: strokes.map((points) => ({ ...brush, points })),
     redo: [],
   };
-}
-
-export function latestStrokePoints(state: PaintedMaskState): string {
-  return serializePoints(state.strokes.at(-1)?.points ?? []);
 }
 
 export function serializePaintedMaskParameters(state: PaintedMaskState): Record<string, PaintParameterValue> {
@@ -168,7 +192,7 @@ export function serializePaintedMaskParameters(state: PaintedMaskState): Record<
     hardness: state.brush.hardness,
     opacity: state.brush.opacity,
     mode: state.brush.mode,
-    points: latestStrokePoints(state),
+    points: serializeStrokes(state.strokes.map((stroke) => stroke.points)),
   };
 }
 
@@ -269,7 +293,14 @@ export class PaintedMaskController {
   private queueParameters(): void {
     const state = this.history.snapshot();
     const parameters = serializePaintedMaskParameters(state);
-    if (this.activePoints.length > 0) parameters.points = serializePoints(this.activePoints);
+    // The in-progress stroke is appended so the committed strokes stay visible
+    // in the rendered preview while a new one is being painted.
+    if (this.activePoints.length > 0) {
+      parameters.points = serializeStrokes([
+        ...state.strokes.map((stroke) => stroke.points),
+        this.activePoints,
+      ]);
+    }
     this.pending = { ...(this.pending ?? {}), ...parameters };
     if (this.scheduled) return;
     this.scheduled = true;

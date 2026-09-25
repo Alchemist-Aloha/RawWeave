@@ -1,4 +1,11 @@
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { $, $$, browser, expect } from '@wdio/globals';
+
+async function invoke(command, args) {
+  return browser.tauri.execute((tauri, command, args) => tauri.core.invoke(command, args), command, args);
+}
 
 async function selectMode(label) {
   for (const button of await $$('nav[aria-label="Workspace mode"] button')) {
@@ -180,5 +187,89 @@ describe('real Tauri preview', () => {
       expect(geometry.canvasHeight).toBeGreaterThan(100);
       expect(geometry.nodeWidth).toBeGreaterThan(100);
     }
+  });
+});
+
+
+const batchDestination = mkdtempSync(join(tmpdir(), 'rawweave-batch-'));
+
+async function batchState() {
+  return browser.execute(() => document.querySelector('.batch-state')?.textContent ?? null);
+}
+
+/**
+ * Selects an option on a React-controlled `<select>`.
+ *
+ * The embedded WebKitGTK driver does not deliver the pointer action that
+ * `selectByAttribute` uses to activate an option, so the change is dispatched
+ * through the native value setter instead.
+ */
+async function selectOption(selector, value) {
+  const select = await $(selector);
+  await browser.execute((element, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+    setter.call(element, next);
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }, select, value);
+  await expect(select).toHaveValue(value);
+}
+
+describe('real Tauri batch processing', () => {
+  after(() => {
+    rmSync(batchDestination, { recursive: true, force: true });
+  });
+
+  it('creates, preflights, dry runs, and completes a job for the restored workflow', async () => {
+    await $('nav[aria-label="Workspace mode"]').waitForDisplayed();
+    await selectMode('Batch');
+    await expect($('section[aria-label="Batch"]')).toBeDisplayed();
+
+    // The restored fixture is queued, so a job can be built without a folder dialog.
+    await expect($('input[aria-label="Batch destination"]')).toBeDisplayed();
+    await $('input[aria-label="Batch destination"]').setValue(batchDestination);
+    await selectOption('select[aria-label="Batch output format"]', 'png');
+    await expect($('input[aria-label="Batch destination"]')).toHaveValue(batchDestination);
+
+    const create = await $('[aria-label="Create batch"]');
+    await create.waitForEnabled();
+    await create.click();
+
+    // Pinning must accept the definition the frontend builds from the active
+    // workflow; a hash or identity mismatch surfaces here as an error banner.
+    await browser.waitUntil(async () => (await batchState()) === 'draft', {
+      timeout: 15_000,
+      timeoutMsg: 'the batch job was not created',
+    });
+    await expect($('.batch-panel__error')).not.toExist();
+
+    await $('[aria-label="Run batch preflight"]').click();
+    await browser.waitUntil(async () => (await batchState()) === 'draft', { timeout: 15_000 });
+    await expect($('.batch-panel__error')).not.toExist();
+
+    await $('[aria-label="Run dry run"]').click();
+    await browser.waitUntil(async () => (await $('.batch-panel__result')).isExisting(), {
+      timeout: 15_000,
+      timeoutMsg: 'the dry run returned no plan',
+    });
+    await expect($('.batch-panel__result')).toHaveText(expect.stringContaining('1 item'));
+
+    await $('[aria-label="Start batch"]').click();
+    await browser.waitUntil(async () => {
+      const state = await batchState();
+      return state === 'completed' || state === 'failed' || state === 'cancelled';
+    }, { timeout: 60_000, timeoutMsg: 'the batch job did not settle' });
+    await expect($('.batch-state')).toHaveText('completed');
+    await expect($('section[aria-label="Batch progress"]')).toHaveText(expect.stringContaining('1 / 1 items complete'));
+
+    const written = readdirSync(batchDestination);
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatch(/\.png$/);
+    const page = await invoke('list_directory', { path: batchDestination, offset: 0, limit: 25 });
+    expect(page.entries.map((entry) => entry.name)).toEqual(written.sort());
+
+    // The native workers share one application instance, so leave the workspace
+    // where the next spec file expects it.
+    await selectMode('Build / Preview');
+    await expect($('.canvas-panel')).toBeDisplayed();
   });
 });

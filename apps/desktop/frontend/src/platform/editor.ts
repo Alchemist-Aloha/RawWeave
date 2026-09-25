@@ -928,8 +928,8 @@ export function createMemoryPlatform(): EditorPlatform {
     definition.hash = '';
   };
   const scopePath = (): ScopeBreadcrumb[] =>
-    scopeStack.map((definition, index) => ({
-      id: index === 0 ? 'root' : definition.identity.id,
+    scopeStack.map((definition) => ({
+      id: definition.identity.id,
       name: definition.metadata.name,
       version: definition.identity.version,
       hash: definition.hash,

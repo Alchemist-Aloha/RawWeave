@@ -133,6 +133,8 @@ export function BrowserQueue({
     setBatchReference(batchController.sessionReference);
   }), [batchController]);
 
+  useEffect(() => () => batchController.dispose(), [batchController]);
+
   useEffect(() => {
     let cancelled = false;
     const initialize = async () => {

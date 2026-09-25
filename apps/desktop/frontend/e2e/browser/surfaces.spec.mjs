@@ -49,6 +49,21 @@ describe('frontend surfaces in browser mode', () => {
     await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
   });
 
+  it('only offers the side-by-side layout toggle where it applies', async () => {
+    await clickViewerAction('Compare A and B');
+    await expect($('[aria-label="Viewer layout: side by side"]')).toBeDisplayed();
+    await expect($('.viewer-grid--side-by-side')).toBeDisplayed();
+    await $('[aria-label="Viewer layout: stacked"]').click();
+    await expect($('.viewer-grid--split')).toBeDisplayed();
+
+    // Wipe/blink/difference render their own surface, so a layout toggle there
+    // would be a control with no effect.
+    await clickViewerAction('Wipe');
+    await expect($('[aria-label="wipe comparison"]')).toBeDisplayed();
+    await expect($('[aria-label="Viewer layout: side by side"]')).not.toExist();
+    await expect($('[aria-label="Viewer layout: stacked"]')).not.toExist();
+  });
+
   it('adds a graph node and supports undo and redo', async () => {
     await $('.node-library__item').waitForExist();
     await $('input[placeholder="Search nodes"]').setValue('Exposure');
@@ -104,6 +119,14 @@ describe('frontend surfaces in browser mode', () => {
 
   it('opens and closes the keyboard shortcut surface', async () => {
     await $('details.topbar__more summary').click();
+    await clickTopbarAction('Shortcuts');
+    await expect($('[role="dialog"][aria-label="Keyboard shortcuts"]')).toBeDisplayed();
+
+    // A modal surface must be dismissible from the keyboard.
+    await browser.keys('Escape');
+    await expect($('[role="dialog"][aria-label="Keyboard shortcuts"]')).not.toExist();
+
+    // The same dialog reopens from the menu and closes from its own button.
     await clickTopbarAction('Shortcuts');
     await expect($('[role="dialog"][aria-label="Keyboard shortcuts"]')).toBeDisplayed();
     await $('button[aria-label="Close keyboard shortcuts"]').click();

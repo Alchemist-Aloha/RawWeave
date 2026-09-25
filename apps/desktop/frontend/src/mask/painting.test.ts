@@ -4,6 +4,7 @@ import {
   PaintedMaskHistory,
   imagePointFromPointer,
   parseSerializedPoints,
+  paintedMaskStateFromParameters,
   serializePaintedMaskState,
   serializePaintedMaskParameters,
   serializePoints,
@@ -97,6 +98,44 @@ describe('painted mask model', () => {
     history.applyStroke([{ x: 4, y: 5 }]);
     const restored = JSON.parse(serializePaintedMaskState(history.snapshot())) as ReturnType<PaintedMaskHistory['snapshot']>;
     expect(restored).toEqual(history.snapshot());
+  });
+
+  it('serializes every stroke so a painted mask survives multi-stroke editing', () => {
+    const history = new PaintedMaskHistory({ size: 12, hardness: 1, opacity: 1, mode: 'add' });
+    history.applyStroke([{ x: 4, y: 5 }, { x: 6, y: 7 }]);
+    history.applyStroke([{ x: 8, y: 9 }]);
+
+    const parameters = serializePaintedMaskParameters(history.snapshot());
+    expect(parameters.points).toBe('4,5;6,7|8,9');
+
+    const restored = paintedMaskStateFromParameters(parameters);
+    expect(restored.strokes.map((stroke) => stroke.points)).toEqual([
+      [{ x: 4, y: 5 }, { x: 6, y: 7 }],
+      [{ x: 8, y: 9 }],
+    ]);
+  });
+
+  it('keeps committed strokes visible while a new stroke is painted', () => {
+    const scheduled: Array<() => void> = [];
+    const writes: Array<[string, string | number]> = [];
+    const controller = new PaintedMaskController(
+      { size: 20, hardness: 1, opacity: 1, mode: 'add' },
+      (parameter, value) => writes.push([parameter, value]),
+      (callback) => {
+        scheduled.push(callback);
+        return scheduled.length;
+      },
+    );
+
+    controller.beginStroke({ x: 1, y: 1 });
+    controller.endStroke();
+    scheduled.shift()?.();
+    expect(writes.at(-1)).toEqual(['points', '1,1']);
+
+    controller.beginStroke({ x: 2, y: 2 });
+    controller.appendPoint({ x: 3, y: 3 });
+    scheduled.shift()?.();
+    expect(writes.at(-1)).toEqual(['points', '1,1|2,2;3,3']);
   });
 });
 

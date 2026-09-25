@@ -520,20 +520,22 @@ impl NodeInstance for PaintedMaskNode {
         context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let bounds = spatial_bounds(inputs, context, parameters)?;
-        let points = paint_points(parameters)?;
-        let stroke = PaintStroke::new(
-            points,
-            float_parameter_alias(parameters, &["size", "brush_size"], 1.0)?,
-            float_parameter_alias(parameters, &["hardness"], 1.0)?,
-            float_parameter_alias(parameters, &["opacity"], 1.0)?,
-            paint_mode(parameters),
-        )
-        .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        let strokes = paint_strokes(parameters)?;
+        let size = float_parameter_alias(parameters, &["size", "brush_size"], 1.0)?;
+        let hardness = float_parameter_alias(parameters, &["hardness"], 1.0)?;
+        let opacity = float_parameter_alias(parameters, &["opacity"], 1.0)?;
+        let mode = paint_mode(parameters);
         let mut painted = PaintedMask::new(bounds.dimensions(), (bounds.x, bounds.y))
             .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
-        painted
-            .apply(stroke)
-            .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        // Every stroke shares the node's brush, matching the single size /
+        // hardness / opacity / mode parameter set in the node schema.
+        for points in strokes {
+            let stroke = PaintStroke::new(points, size, hardness, opacity, mode)
+                .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+            painted
+                .apply(stroke)
+                .map_err(|error| NodeError::InvalidParameter(error.to_string()))?;
+        }
         let rendered = painted
             .render()
             .map_err(|error| NodeError::Message(error.to_string()))?;
@@ -1305,29 +1307,40 @@ fn mask_pixel_clamped(mask: &Mask, x: i64, y: i64) -> f32 {
     mask.pixel_global(x, y).unwrap_or(0.0)
 }
 
-fn paint_points(parameters: &Parameters) -> Result<Vec<PaintPoint>, NodeError> {
+/// Splits the serialized paint parameter into strokes.
+///
+/// Strokes are separated by `|` and points within a stroke by `;`. A value with
+/// no `|` is a single stroke, so masks painted before multi-stroke support keep
+/// rendering unchanged.
+fn paint_strokes(parameters: &Parameters) -> Result<Vec<Vec<PaintPoint>>, NodeError> {
     if let Some(ParameterValue::String(serialized)) = parameters.get("points") {
-        let mut points = Vec::new();
-        for pair in serialized.split(';').filter(|pair| !pair.trim().is_empty()) {
-            let mut values = pair.split(',').map(str::trim);
-            let x = values
-                .next()
-                .and_then(|value| value.parse::<f32>().ok())
-                .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
-            let y = values
-                .next()
-                .and_then(|value| value.parse::<f32>().ok())
-                .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
-            points.push(PaintPoint::new(x, y));
+        let mut strokes = Vec::new();
+        for stroke in serialized.split('|') {
+            let mut points = Vec::new();
+            for pair in stroke.split(';').filter(|pair| !pair.trim().is_empty()) {
+                let mut values = pair.split(',').map(str::trim);
+                let x = values
+                    .next()
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
+                let y = values
+                    .next()
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .ok_or_else(|| NodeError::InvalidParameter("points".to_owned()))?;
+                points.push(PaintPoint::new(x, y));
+            }
+            if !points.is_empty() {
+                strokes.push(points);
+            }
         }
-        if !points.is_empty() {
-            return Ok(points);
+        if !strokes.is_empty() {
+            return Ok(strokes);
         }
     }
-    Ok(vec![PaintPoint::new(
+    Ok(vec![vec![PaintPoint::new(
         float_parameter_alias(parameters, &["x", "center_x"], 0.0)?,
         float_parameter_alias(parameters, &["y", "center_y"], 0.0)?,
-    )])
+    )]])
 }
 
 fn paint_mode(parameters: &Parameters) -> PaintMode {

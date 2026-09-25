@@ -5,13 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 const frontend = dirname(fileURLToPath(import.meta.url));
 const binary = resolve(frontend, '../src-tauri/target/debug', process.platform === 'win32' ? 'rawweave-desktop.exe' : 'rawweave-desktop');
-const appHome = mkdtempSync(join(tmpdir(), 'rawweave-wdio-'));
 // A large, non-square source so the preview fit and scope layout are exercised
 // against a realistic image rather than a 32x32 icon.
 const imagePath = resolve(frontend, '../../../test-data/images/common/gracie-allen-portrait.jpg');
-const sessionPath = join(appHome, 'config', 'com.rawweave.editor', 'browser-session.json');
-mkdirSync(dirname(sessionPath), { recursive: true });
-writeFileSync(sessionPath, JSON.stringify({
+const imageName = imagePath.replace(/^.*[\\/]/, '');
+
+const sessionFixture = {
   version: 1,
   browser: {
     currentFolder: '',
@@ -22,7 +21,36 @@ writeFileSync(sessionPath, JSON.stringify({
     },
     selectedPaths: [],
   },
-  queue: { items: [], currentPath: imagePath, selectedPaths: [] },
+  // One queued fixture so the batch suite can build a real job without a folder dialog.
+  queue: {
+    items: [{
+      id: 'fixture-1',
+      path: imagePath,
+      name: imageName,
+      source: {
+        path: imagePath,
+        name: imageName,
+        kind: 'file',
+        extension: 'jpg',
+        size: 0,
+        modifiedTime: null,
+        rating: null,
+        flag: 'none',
+        metadata: null,
+        thumbnail: null,
+      },
+      rating: null,
+      flag: 'none',
+      order: 0,
+      workflowBinding: null,
+      overrides: {},
+      processingStatus: 'pending',
+      outputStatus: 'not-started',
+      errors: [],
+    }],
+    currentPath: imagePath,
+    selectedPaths: [],
+  },
   testSet: { currentPath: null },
   workflow: { selected: null, unsavedWorkingCopy: null },
   viewer: { targets: { A: { nodeId: 'output', outputPort: 'image' }, B: null } },
@@ -30,7 +58,24 @@ writeFileSync(sessionPath, JSON.stringify({
   imageSets: [],
   activeImageSetId: null,
   panelLayout: 'default',
-}));
+};
+
+/**
+ * Writes the shared starting state for the native run.
+ *
+ * A large, non-square source so the preview fit and scope layout are exercised
+ * against a realistic image rather than a 32x32 icon, plus one queued fixture so
+ * the batch spec can build a real job without opening a folder dialog.
+ */
+function createAppHome() {
+  const home = mkdtempSync(join(tmpdir(), 'rawweave-wdio-'));
+  const sessionPath = join(home, 'config', 'com.rawweave.editor', 'browser-session.json');
+  mkdirSync(dirname(sessionPath), { recursive: true });
+  writeFileSync(sessionPath, JSON.stringify(sessionFixture));
+  return home;
+}
+
+const appHome = createAppHome();
 process.env.XDG_DATA_HOME = join(appHome, 'data');
 process.env.XDG_CONFIG_HOME = join(appHome, 'config');
 process.env.WEBKIT_DISABLE_DMABUF_RENDERER = '1';

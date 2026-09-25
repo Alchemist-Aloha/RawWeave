@@ -43,7 +43,9 @@ export class EditorController {
     source: null,
     selectedNodeId: null,
     selectedNodeIds: [],
-    scopePath: [{ id: 'root', name: 'Workflow', version: '1.0.0' }],
+    // Matches the identity the backend gives a flat, blueprint-less workflow in
+    // `current_or_flat_blueprint`, so batch pins hash a definition the backend agrees with.
+    scopePath: [{ id: 'workflow', name: 'Workflow', version: '1.0.0' }],
     workflowInputs: [],
     workflowOutputs: [],
     workflowParameters: [],

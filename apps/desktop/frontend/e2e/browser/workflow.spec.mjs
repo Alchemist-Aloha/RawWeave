@@ -15,13 +15,32 @@ async function clickByText(selector, label) {
   throw new Error(`${selector} with text "${label}" was not found`);
 }
 
-async function addNode(name) {
+/**
+ * Sets the node search box so React observes the change.
+ *
+ * WebdriverIO's `setValue('')` clears the input through the WebDriver element
+ * clear command, which React's value tracker swallows. The DOM then looks empty
+ * while React still holds the previous query, so the library stays silently
+ * filtered and a later `setValue(name)` can race with React restoring the stale
+ * query into the input. Writing through the native value setter and dispatching
+ * an input event keeps the DOM and React state in sync.
+ */
+async function setNodeSearch(value) {
   const search = await $('input[placeholder="Search nodes"]');
-  await search.setValue(name);
+  await browser.execute((element, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(element, next);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  }, search, value);
+  await expect(search).toHaveValue(value);
+}
+
+async function addNode(name) {
+  await setNodeSearch(name);
   const item = await $('.node-library__item');
   await item.waitForExist();
   await item.click();
-  await search.setValue('');
+  await setNodeSearch('');
 }
 
 async function selectedNode(name) {
@@ -198,6 +217,23 @@ describe('workflow editing in browser mode', () => {
     await expect(menu).toHaveText(expect.stringContaining('Fit view'));
     await browser.keys('Escape');
     await expect($('.context-menu')).not.toExist();
+  });
+
+  it('cancels the subgraph dialog from the keyboard', async () => {
+    await addNode('Exposure');
+    await selectedNode('Exposure');
+    await clickByText('.library-selection button', 'Create subgraph');
+    await expect($('form.subgraph-form')).toBeDisplayed();
+
+    await browser.keys('Escape');
+    await expect($('form.subgraph-form')).not.toExist();
+
+    // The dialog can be reopened after the keyboard cancel. Re-query the form:
+    // the handle captured before the unmount points at a detached element.
+    await clickByText('.library-selection button', 'Create subgraph');
+    await expect($('form.subgraph-form')).toBeDisplayed();
+    await clickByText('form.subgraph-form button', 'Cancel');
+    await expect($('form.subgraph-form')).not.toExist();
   });
 
   it('creates a subgraph from the selection and navigates between scopes', async () => {

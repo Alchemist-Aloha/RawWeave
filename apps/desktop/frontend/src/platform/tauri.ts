@@ -422,7 +422,7 @@ const nodeTypes = new Map<string, string>();
 async function readSnapshot(
   activeDefinition: WorkflowDefinition | null = null,
   scopePath: Array<{ id: string; name: string; version?: string; hash?: string }> = [
-    { id: 'root', name: 'Workflow', version: '1.0.0' },
+    { id: 'workflow', name: 'Workflow', version: '1.0.0' },
   ],
 ): Promise<PlatformSnapshot> {
   const serialized = await invoke<string>('save_workflow');
@@ -451,7 +451,7 @@ export function createTauriPlatform(): EditorPlatform {
   let cachedDescriptors: NodeDescriptor[] = [];
   let activeDefinition: WorkflowDefinition | null = null;
   let scopePath: Array<{ id: string; name: string; version?: string; hash?: string }> = [
-    { id: 'root', name: 'Workflow', version: '1.0.0' },
+    { id: 'workflow', name: 'Workflow', version: '1.0.0' },
   ];
   const rememberDefinition = (definition: WorkflowDefinition): void => {
     activeDefinition = definition;
@@ -498,7 +498,7 @@ export function createTauriPlatform(): EditorPlatform {
       try {
         const result = await invoke<RustOpenImageResult>('open_image', { path });
         activeDefinition = null;
-        scopePath = [{ id: 'root', name: 'Workflow', version: '1.0.0' }];
+        scopePath = [{ id: 'workflow', name: 'Workflow', version: '1.0.0' }];
         return mapOpenImageResult(result);
       } catch (error) {
         throw message(error);
@@ -508,7 +508,7 @@ export function createTauriPlatform(): EditorPlatform {
       try {
         const result = await invoke<RustOpenImageSetResult>('open_image_set', { paths, order });
         activeDefinition = null;
-        scopePath = [{ id: 'root', name: 'Workflow', version: '1.0.0' }];
+        scopePath = [{ id: 'workflow', name: 'Workflow', version: '1.0.0' }];
         return mapOpenImageSetResult(result);
       } catch (error) {
         throw message(error);
@@ -731,7 +731,7 @@ export function createTauriPlatform(): EditorPlatform {
       try {
         await invoke('load_workflow', { workflow: serialized });
         activeDefinition = null;
-        scopePath = [{ id: 'root', name: 'Workflow', version: '1.0.0' }];
+        scopePath = [{ id: 'workflow', name: 'Workflow', version: '1.0.0' }];
       } catch (error) {
         throw message(error);
       }

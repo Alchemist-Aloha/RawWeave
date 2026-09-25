@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BatchController } from './controller';
 import { buildBatchJob, defaultBatchRecipe } from './model';
 import { createMemoryBatchPlatform } from '../platform/batch';
+import type { BatchJob, BatchPlatform } from './types';
 import type { EditorNode } from '../editor/types';
 import type { BrowserEntry, QueueItem } from '../browser/types';
 
@@ -32,6 +33,10 @@ const context = {
 };
 
 describe('batch controller', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('creates a pinned job from the exact test-set queue subset and recipe', () => {
     const job = buildBatchJob([queueItem('/photos/one.jpg'), queueItem('/photos/two.jpg', true)], context, {
       kind: 'test-set',
@@ -56,6 +61,42 @@ describe('batch controller', () => {
     );
 
     expect(controller.state.job?.checkpointPolicy).toBe('fail_if_stale');
+  });
+
+  it('polls a running job until it settles so the panel can show progress', async () => {
+    vi.useFakeTimers();
+    try {
+      const job = buildBatchJob([queueItem('/photos/one.jpg')], context, { kind: 'all' }, defaultBatchRecipe('/exports'), 'job-3');
+      const running: BatchJob = { ...job, state: 'running' };
+      let snapshots = 0;
+      const platform: BatchPlatform = {
+        ...createMemoryBatchPlatform(),
+        async start() { return running; },
+        async snapshot() {
+          snapshots += 1;
+          return snapshots >= 2
+            ? { ...job, state: 'completed', items: [{ ...job.items[0], state: 'completed' }] }
+            : running;
+        },
+      };
+      const controller = new BatchController(platform, () => 'job-3');
+      await controller.createFromQueue([queueItem('/photos/one.jpg')], context, { kind: 'all' }, defaultBatchRecipe('/exports'));
+      await controller.start();
+      expect(controller.state.job?.state).toBe('running');
+
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(snapshots).toBeGreaterThanOrEqual(2);
+      expect(controller.state.job?.state).toBe('completed');
+      expect(controller.state.job?.items[0].state).toBe('completed');
+
+      // A settled job stops polling.
+      const settled = snapshots;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(snapshots).toBe(settled);
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('runs preflight, dry run, start, pause, resume, and cancel without blocking state consumers', async () => {

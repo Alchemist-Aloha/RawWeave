@@ -383,7 +383,7 @@ describe('editor controller', () => {
     expect(definition.identity).toEqual({ id: 'raw-development', version: '1.0.0' });
     expect(definition.inputs.map((port) => port.id)).toEqual([]);
     expect(definition.outputs.map((port) => port.id)).toEqual(['output:exposure:image']);
-    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['root', 'raw-development']);
+    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['workflow', 'raw-development']);
     expect(editor.state.nodes.map((node) => node.id)).toEqual(['input', 'exposure']);
     expect(editor.state.workflowHash).toMatch(/^[a-f0-9]{16,64}$/);
     expect(editor.state.dependencyReport?.missing).toEqual([
@@ -391,7 +391,7 @@ describe('editor controller', () => {
     ]);
 
     await editor.returnToParent();
-    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['root']);
+    expect(editor.state.scopePath.map((scope) => scope.id)).toEqual(['workflow']);
     expect(editor.state.nodes.map((node) => node.id)).toEqual(['input', 'exposure', 'output']);
   });
 
@@ -452,5 +452,18 @@ describe('editor controller', () => {
 
     const saved = JSON.parse(await editor.saveBlueprint()) as { identity: { id: string; version: string } };
     expect(saved.identity).toEqual({ id: 'looks.exposure', version: '2.0.0' });
+  });
+
+  it('reports the root scope identity that the pinned workflow hash is computed from', async () => {
+    const editor = await controller();
+    const definition = JSON.parse(await editor.exportBlueprint()) as { identity: { id: string; version: string } };
+
+    // Batch jobs pin `binding.hash` (the backend hash of this definition) together
+    // with `binding.id`. A scope id that differs from the definition identity makes
+    // the backend reject every job with "pinned workflow hash mismatch".
+    expect(editor.state.scopePath.at(-1)).toMatchObject({
+      id: definition.identity.id,
+      version: definition.identity.version,
+    });
   });
 });

@@ -632,6 +632,9 @@ export default function App() {
     };
     const showDifference = () => {
       if (!inputTarget || !canPreviewCommitted || !generatedTarget) return;
+      // The layout choice only applies to the side-by-side surface, so select it
+      // before switching the layout.
+      viewerController.setComparison('side-by-side');
       viewerController.setLayout('side-by-side');
       viewerController.setTarget('A', inputTarget);
       viewerController.setTarget('B', generatedTarget);
@@ -970,6 +973,19 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // Modal surfaces own Escape before any global shortcut.
+      if (event.key === 'Escape') {
+        if (showShortcuts) {
+          event.preventDefault();
+          setShowShortcuts(false);
+          return;
+        }
+        if (showSubgraphForm) {
+          event.preventDefault();
+          setShowSubgraphForm(false);
+          return;
+        }
+      }
       const action = shortcutAction(event);
       if (!action) return;
       const target = event.target as HTMLElement | null;
@@ -1011,7 +1027,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [controller, disconnectEdge, fileInput, nodeSearchInput, openImage, selectedEdgeId]);
+  }, [controller, disconnectEdge, fileInput, nodeSearchInput, openImage, selectedEdgeId, showShortcuts, showSubgraphForm]);
 
   const editorErrorNotice = controller.state.error
     ? describeEditorError(controller.state.error, {

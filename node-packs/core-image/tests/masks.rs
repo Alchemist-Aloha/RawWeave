@@ -172,3 +172,33 @@ fn blur_feather_expand_and_contract_keep_requested_region_origin() {
         assert_eq!(output.dimensions(), Dimensions::new(3, 1), "{type_id}");
     }
 }
+
+#[test]
+fn painted_mask_renders_every_serialized_stroke() {
+    let context = EvaluationContext::default();
+    let parameters = [
+        ("width".to_owned(), 20_i64.into()),
+        ("height".to_owned(), 1_i64.into()),
+        ("size".to_owned(), 3.0_f32.into()),
+        ("hardness".to_owned(), 1.0_f32.into()),
+        ("opacity".to_owned(), 1.0_f32.into()),
+        ("mode".to_owned(), "add".to_owned().into()),
+        ("points".to_owned(), "2,0|17,0".to_owned().into()),
+    ]
+    .into_iter()
+    .collect::<Parameters>();
+    let node = registry().instantiate("core.mask-painted").unwrap();
+    let mask = mask_output(
+        node.evaluate(&Inputs::new(), &parameters, &context)
+            .expect("multi-stroke points should evaluate"),
+    );
+    assert!(
+        mask.pixel_global(2, 0).unwrap() > 0.0,
+        "first stroke was dropped"
+    );
+    assert!(
+        mask.pixel_global(17, 0).unwrap() > 0.0,
+        "second stroke was dropped"
+    );
+    assert_eq!(mask.pixel_global(10, 0).unwrap(), 0.0);
+}
