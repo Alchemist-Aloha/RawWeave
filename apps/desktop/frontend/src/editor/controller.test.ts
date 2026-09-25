@@ -127,23 +127,32 @@ describe('editor controller', () => {
     ]);
   });
 
-  it('tracks drag positions without publishing and commits when the drag ends', async () => {
+  it('publishes every drag position so the canvas can follow the pointer, and commits once', async () => {
     const editor = await controller();
     await editor.createNode('core.image-input', 'input');
     const start = editor.state.nodes[0].position;
-    let publishes = 0;
-    const unsubscribe = editor.subscribe(() => { publishes += 1; });
+    const seen: Array<{ x: number; y: number }> = [];
+    const unsubscribe = editor.subscribe(() => {
+      seen.push({ ...editor.state.nodes[0].position });
+    });
 
     editor.updateNodePosition('input', { x: start.x + 40, y: start.y + 20 }, true);
     editor.updateNodePosition('input', { x: start.x + 80, y: start.y + 40 }, true);
 
-    // Moving the pointer must not repaint the whole editor on every frame.
-    expect(publishes).toBe(0);
+    // A controlled React Flow node only moves when the new position comes back
+    // through the `nodes` prop, so each intermediate position has to be published;
+    // suppressing them leaves the node frozen until the drop.
+    expect(seen).toEqual([
+      { x: start.x + 40, y: start.y + 20 },
+      { x: start.x + 80, y: start.y + 40 },
+    ]);
     expect(editor.state.nodes[0].position).toEqual({ x: start.x + 80, y: start.y + 40 });
 
+    seen.length = 0;
+    // Releasing republishes only the history flags, not a new position.
     editor.updateNodePosition('input', { x: start.x + 80, y: start.y + 40 }, false);
-    expect(publishes).toBe(1);
-    expect(editor.state.nodes[0].position).toEqual({ x: start.x + 80, y: start.y + 40 });
+    expect(seen.filter((position) => position.x !== start.x + 80 || position.y !== start.y + 40)).toEqual([]);
+    expect(editor.state.canUndo).toBe(true);
 
     await editor.undo();
     expect(editor.state.nodes[0].position).toEqual(start);

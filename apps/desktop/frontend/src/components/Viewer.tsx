@@ -6,6 +6,7 @@ import { analyzeImageElement, drawClippingOverlay, type ImageAnalysis } from '..
 import { ViewerController } from '../viewer/controller';
 import type { PreviewTarget, ViewerComparison, ViewerId, ViewerPaneState } from '../viewer/types';
 import { describeOperationError } from '../ui/errors';
+import { Icon } from '../ui/Icon';
 
 interface ViewerProps {
   controller: ViewerController;
@@ -25,6 +26,17 @@ const COMPARISON_BUTTONS: Array<{ id: ViewerComparison; label: string; short: st
   { id: 'blink', label: 'Blink', short: 'Blink' },
   { id: 'difference', label: 'Difference', short: 'Diff' },
 ];
+
+/**
+ * The image transform, in one place.
+ *
+ * Absolute positioning pins the image to the stage centre so its intrinsic size
+ * never inflates the grid track; the centring translate then scales it about that
+ * same centre for fit/zoom/pan.
+ */
+export function imageTransform(pan: { x: number; y: number }, displayScale: number): string {
+  return `translate(-50%, -50%) translate(${pan.x}px, ${pan.y}px) scale(${displayScale})`;
+}
 
 const PREVIEWABLE_DATA_TYPES = new Set([
   'core.Image',
@@ -62,9 +74,21 @@ export interface ClippingOverlayProps {
   imageRef: RefObject<HTMLImageElement | null>;
   stageRef: RefObject<HTMLElement | null>;
   viewer: ViewerId;
+  /** Set by the overlay to the geometry-only update the pan/zoom path calls. */
+  handle?: RefObject<ClippingOverlayHandle>;
 }
 
-export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer }: ClippingOverlayProps) {
+/**
+ * Lets the viewer move an already-drawn overlay with the image.
+ *
+ * Panning and zooming only translate the image, so the overlay has to follow the
+ * new bounds without redrawing its pixel raster every frame.
+ */
+export interface ClippingOverlayHandle {
+  reposition: (() => void) | null;
+}
+
+export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer, handle }: ClippingOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useLayoutEffect(() => {
@@ -74,20 +98,27 @@ export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer 
     const stage = stageRef.current;
     if (!canvas || !image || !stage) return;
 
-    const update = () => {
+    const reposition = () => {
       const stageBounds = stage.getBoundingClientRect();
       const imageBounds = image.getBoundingClientRect();
       canvas.style.left = `${imageBounds.left - stageBounds.left}px`;
       canvas.style.top = `${imageBounds.top - stageBounds.top}px`;
       canvas.style.width = `${imageBounds.width}px`;
       canvas.style.height = `${imageBounds.height}px`;
+    };
+    const update = () => {
+      reposition();
       drawClippingOverlay(analysis, canvas);
     };
+    if (handle) handle.current.reposition = reposition;
 
     update();
     window.addEventListener('resize', update);
     if (typeof ResizeObserver === 'undefined') {
-      return () => window.removeEventListener('resize', update);
+      return () => {
+        if (handle) handle.current.reposition = null;
+        window.removeEventListener('resize', update);
+      };
     }
     let frame = 0;
     const schedule = () => {
@@ -101,8 +132,9 @@ export function ClippingOverlay({ analysis, enabled, imageRef, stageRef, viewer 
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', update);
+      if (handle) handle.current.reposition = null;
     };
-  }, [analysis, enabled, imageRef, stageRef]);
+  }, [analysis, enabled, handle, imageRef, stageRef]);
 
   if (!enabled || !analysis) return null;
   return (
@@ -156,9 +188,13 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
   className?: string;
   style?: CSSProperties;
 }) {
-  const dragStart = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  /** Live pan while a gesture is in flight; the controller only sees the commit. */
+  const livePan = useRef(pane.pan);
+  const dragOrigin = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const panFrame = useRef(0);
+  const overlayHandle = useRef<ClippingOverlayHandle>({ reposition: null });
   const imageUrl = pane.imageUrl;
   const errorNotice = pane.status === 'error' && pane.error
     ? describeOperationError(pane.error, {
@@ -168,6 +204,52 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
       outputPort: pane.target?.outputPort,
     })
     : null;
+
+  /**
+   * Writes the image transform straight to the DOM.
+   *
+   * Panning used to publish editor state on every pointer move, which re-rendered
+   * the whole viewer (target selects, scope canvases, mask controls) and left the
+   * image trailing the cursor whenever that render was slow. Writing the transform
+   * here keeps the drag tied to the pointer; React owns it again once the gesture
+   * commits. `will-change` is scoped to the gesture so a resting image is not a
+   * permanent compositing layer.
+   */
+  const writeTransform = useCallback((pan: { x: number; y: number }, panning: boolean) => {
+    const element = imageRef.current;
+    if (element) {
+      element.style.transform = imageTransform(pan, pane.displayScale);
+      element.style.willChange = panning ? 'transform' : '';
+    }
+    overlayHandle.current.reposition?.();
+  }, [pane.displayScale]);
+
+  // Runs after React writes the declarative transform, so the live gesture value
+  // wins without the image snapping back if something else re-renders mid-drag.
+  useLayoutEffect(() => {
+    if (!dragOrigin.current) livePan.current = pane.pan;
+    writeTransform(livePan.current, dragOrigin.current !== null);
+  }, [pane.pan.x, pane.pan.y, pane.displayScale, imageUrl, writeTransform]);
+
+  useEffect(() => () => {
+    if (panFrame.current) cancelAnimationFrame(panFrame.current);
+  }, []);
+
+  const flushPan = useCallback(() => {
+    panFrame.current = 0;
+    writeTransform(livePan.current, true);
+  }, [writeTransform]);
+
+  const endPan = useCallback(() => {
+    if (!dragOrigin.current) return;
+    dragOrigin.current = null;
+    if (panFrame.current) {
+      cancelAnimationFrame(panFrame.current);
+      panFrame.current = 0;
+    }
+    writeTransform(livePan.current, false);
+    controller.updatePan(viewer, livePan.current);
+  }, [controller, viewer, writeTransform]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -210,27 +292,38 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         className="viewer-pane__stage"
         ref={stageRef}
         onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          dragStart.current = {
+          // Record the origin before grabbing capture: a rejected pointer id must
+          // not leave the gesture half-started.
+          dragOrigin.current = {
             x: event.clientX,
             y: event.clientY,
-            panX: pane.pan.x,
-            panY: pane.pan.y,
+            panX: livePan.current.x,
+            panY: livePan.current.y,
           };
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } catch {
+            // Capture only keeps the drag alive outside the stage; the pan still
+            // tracks the pointer while it stays over the image.
+          }
         }}
         onPointerMove={(event) => {
-          if (!dragStart.current) return;
-          controller.updatePan(viewer, {
-            x: dragStart.current.panX + event.clientX - dragStart.current.x,
-            y: dragStart.current.panY + event.clientY - dragStart.current.y,
-          });
+          const origin = dragOrigin.current;
+          if (!origin) return;
+          livePan.current = {
+            x: origin.panX + event.clientX - origin.x,
+            y: origin.panY + event.clientY - origin.y,
+          };
+          // Coalesce to one DOM write per frame; pointer events can outpace paint.
+          if (panFrame.current) return;
+          panFrame.current = requestAnimationFrame(flushPan);
         }}
         onPointerUp={(event) => {
-          dragStart.current = null;
+          endPan();
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
         onPointerCancel={(event) => {
-          dragStart.current = null;
+          endPan();
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
         onWheel={(event) => {
@@ -248,12 +341,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}
             ref={imageRef}
             src={imageUrl}
-            style={{
-              // Absolute positioning pins the image to the stage center, so its
-              // intrinsic size never inflates the grid track; the centring
-              // translate then scales it about that same centre for fit/zoom.
-              transform: `translate(-50%, -50%) translate(${pane.pan.x}px, ${pane.pan.y}px) scale(${pane.displayScale})`,
-            }}
+            style={{ transform: imageTransform(pane.pan, pane.displayScale) }}
             width={pane.width ?? undefined}
           />
         ) : pane.status === 'idle' || pane.status === 'cancelled' ? (
@@ -264,6 +352,7 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         <ClippingOverlay
           analysis={analysis}
           enabled={clippingOverlay}
+          handle={overlayHandle}
           imageRef={imageRef}
           stageRef={stageRef}
           viewer={viewer}
@@ -313,9 +402,9 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
           onClick={() => controller.viewAt100(viewer)}
           type="button"
         >100%</button>
-        <button aria-label={`Zoom out Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, -1)} type="button">−</button>
+        <button aria-label={`Zoom out Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, -1)} type="button"><Icon name="minus" /></button>
         <span className="viewer-pane__zoom">{Math.round(pane.zoom * 100)}%</span>
-        <button aria-label={`Zoom in Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, 1)} type="button">+</button>
+        <button aria-label={`Zoom in Viewer ${viewer}`} onClick={() => controller.adjustZoom(viewer, 1)} type="button"><Icon name="plus" /></button>
         {pane.target?.dataType === 'core.Mask' && (
           <div className="viewer-pane__mask-display" role="group" aria-label={`Viewer ${viewer} mask display`}>
             <button
@@ -560,7 +649,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             title={collapsed ? 'Expand preview panel' : 'Collapse preview panel'}
             type="button"
           >
-            {collapsed ? '▸' : '▾'}
+            {collapsed ? <Icon name="chevronRight" /> : <Icon name="chevronDown" />}
           </button>
         )}
       </div>

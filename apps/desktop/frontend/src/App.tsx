@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
+  BackgroundVariant,
   Controls,
   MiniMap,
   ReactFlow,
@@ -28,6 +29,7 @@ import {
   type DockLayout,
 } from './ui/layout';
 import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
+import type { CheckpointStatus } from './checkpoint/types';
 import { Inspector } from './components/Inspector';
 import type {
   CheckpointOutputPort,
@@ -52,6 +54,7 @@ import { CheckpointController } from './checkpoint/controller';
 import { createCheckpointPlatform } from './platform/checkpoint';
 import { describeOperationError, redactErrorDetails } from './ui/errors';
 import { shortcutAction } from './ui/shortcuts';
+import { Icon } from './ui/Icon';
 
 const nodeTypes = { rawweave: GraphNode };
 const edgeTypes = { rawweave: WorkflowEdge };
@@ -162,6 +165,37 @@ export interface EditorErrorNotice {
 }
 
 const PANEL_STORAGE_KEY = DOCK_STORAGE_KEY;
+const LAMP_STORAGE_KEY = 'rawweave.lightTable';
+
+/**
+ * The light table switch. On, the plane is lit acrylic and you are handling film
+ * on it; off, the plane is the dark instrument surface and the photograph is the
+ * only lit thing on screen.
+ *
+ * The app opens with the lamp off: the node workflow panel, the node index and the
+ * scopes are all dark, and the image keeps the room's only light. Lighting the
+ * table is the deliberate move.
+ *
+ * It is a view preference, not graph state: it never touches the workflow and
+ * never reaches the backend.
+ */
+function loadLamp(): 'on' | 'off' {
+  if (typeof window === 'undefined') return 'off';
+  try {
+    return window.localStorage.getItem(LAMP_STORAGE_KEY) === 'on' ? 'on' : 'off';
+  } catch {
+    return 'off';
+  }
+}
+
+function saveLamp(lamp: 'on' | 'off'): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LAMP_STORAGE_KEY, lamp);
+  } catch {
+    // Persisting the switch is a convenience; ignore storage failures.
+  }
+}
 
 function loadDockLayout(): DockLayout {
   if (typeof window === 'undefined') return { ...DEFAULT_DOCK_LAYOUT };
@@ -325,7 +359,7 @@ function SubgraphForm({
           <span className="eyebrow">Reusable component</span>
           <strong>Create subgraph from selection</strong>
         </div>
-        <button className="icon-button" onClick={onCancel} type="button">×</button>
+        <button className="icon-button" onClick={onCancel} type="button"><Icon name="close" /></button>
       </div>
       <div className="subgraph-form__fields">
         <label>Identity<input required value={id} onChange={(event) => setId(event.target.value)} /></label>
@@ -379,6 +413,7 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
   const [dock, setDock] = useState<DockLayout>(loadDockLayout);
+  const [lamp, setLamp] = useState<'on' | 'off'>(loadLamp);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -458,19 +493,42 @@ export default function App() {
     };
   }, [checkpointController]);
 
+  /**
+   * Flow-node cache keyed by editor-node identity.
+   *
+   * A drag publishes a new editor-node object for the dragged node on every
+   * pointer move and keeps the other nodes' objects untouched. Rebuilding the
+   * flow array would still hand React Flow a new object for every node, and it
+   * re-renders each node whose object identity changed, so the cache keeps the
+   * gesture down to one moving node instead of the whole graph.
+   */
+  const flowNodeCache = useRef(new WeakMap<EditorNode, {
+    selected: boolean;
+    checkpointStatus: CheckpointStatus | null;
+    flow: RawWeaveFlowNode;
+  }>());
   const flowNodes = useMemo<RawWeaveFlowNode[]>(
     () =>
-      controller.state.nodes.map((node) => ({
-        id: node.id,
-        type: 'rawweave',
-        position: node.position,
-        data: {
-          node,
-          checkpointStatus: checkpointController.state.statuses.find((status) => status.nodeId === node.id) ?? null,
-        },
-        selected: controller.state.selectedNodeIds.includes(node.id),
-      })),
-    [checkpointController, checkpointController.state.statuses, controller, controller.state.nodes, controller.state.selectedNodeIds],
+      controller.state.nodes.map((node) => {
+        const selected = controller.state.selectedNodeIds.includes(node.id);
+        const checkpointStatus = checkpointController.state.statuses.find(
+          (status) => status.nodeId === node.id,
+        ) ?? null;
+        const cached = flowNodeCache.current.get(node);
+        if (cached && cached.selected === selected && cached.checkpointStatus === checkpointStatus) {
+          return cached.flow;
+        }
+        const flow: RawWeaveFlowNode = {
+          id: node.id,
+          type: 'rawweave',
+          position: node.position,
+          data: { node, checkpointStatus },
+          selected,
+        };
+        flowNodeCache.current.set(node, { selected, checkpointStatus, flow });
+        return flow;
+      }),
+    [checkpointController.state.statuses, controller.state.nodes, controller.state.selectedNodeIds],
   );
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -1054,7 +1112,7 @@ export default function App() {
   const imageErrorNotice = imageError ? describeEditorError(imageError, { kind: 'image' }) : null;
 
   return (
-    <main className={`app-shell app-shell--${workspaceMode}`}>
+    <main className={`app-shell app-shell--${workspaceMode}`} data-lamp={lamp}>
       <header className="topbar">
         <div className="brand-mark">
           <span className="brand-mark__glyph">RW</span>
@@ -1077,6 +1135,20 @@ export default function App() {
           ))}
         </nav>
         <div className="topbar__actions">
+          <button
+            aria-pressed={lamp === 'on'}
+            className={`lamp${lamp === 'on' ? ' is-lit' : ''}`}
+            onClick={() => {
+              const next = lamp === 'on' ? 'off' : 'on';
+              setLamp(next);
+              saveLamp(next);
+            }}
+            title={lamp === 'on' ? 'Lamp on: the table is lit for handling frames. Switch off to judge the image.' : 'Lamp off: judging. Switch on to light the table for handling frames.'}
+            type="button"
+          >
+            <span aria-hidden="true" className="lamp__lens" />
+            Lamp
+          </button>
           <button className="button button--quiet" onClick={() => void openImage()} type="button">
             Open Image
           </button>
@@ -1186,7 +1258,7 @@ export default function App() {
               type="button"
             >
               <span className="dock__rail-label">Nodes</span>
-              <span aria-hidden="true">›</span>
+              <Icon name="chevronRight" />
             </button>
           ) : (
             <NodeLibrary
@@ -1250,7 +1322,7 @@ export default function App() {
           </div>
           <div className="flow-canvas">
             <ReactFlow
-              connectionLineStyle={{ stroke: '#8cebd3', strokeWidth: 2 }}
+              connectionLineStyle={{ stroke: 'var(--wax-amber)', strokeWidth: 2 }}
               connectionRadius={30}
               deleteKeyCode={null}
               edgeTypes={edgeTypes}
@@ -1280,17 +1352,15 @@ export default function App() {
               proOptions={{ hideAttribution: true }}
               reconnectRadius={18}
             >
-              <Background color="#27303d" gap={22} size={1} />
+              <Background color="var(--bench-grid)" gap={24} size={1} variant={BackgroundVariant.Lines} />
               <Controls />
-              <MiniMap
-                nodeColor={(node) => (node.type === 'rawweave' ? '#6ee7c7' : '#596579')}
-                pannable
-                zoomable
-              />
+              {/* Its palette lives in the stylesheet with the rest of the plane's, so
+                  the minimap follows the lamp without this component carrying colours. */}
+              <MiniMap pannable zoomable />
             </ReactFlow>
             {controller.state.nodes.length === 0 && (
               <div className="canvas-empty">
-                <span className="canvas-empty__icon">+</span>
+                <span className="canvas-empty__icon"><Icon name="plus" /></span>
                 <strong>Start weaving</strong>
                 <p>Add a node from the library to build your first graph.</p>
               </div>
@@ -1320,7 +1390,7 @@ export default function App() {
               type="button"
             >
               <span className="dock__rail-label">Preview · Inspector</span>
-              <span aria-hidden="true">‹</span>
+              <Icon name="chevronLeft" />
             </button>
           ) : (
             <>
@@ -1384,7 +1454,7 @@ export default function App() {
                     title={dock.sourceCollapsed ? 'Expand source panel' : 'Collapse source panel'}
                     type="button"
                   >
-                    {dock.sourceCollapsed ? '▸' : '▾'}
+                    {dock.sourceCollapsed ? <Icon name="chevronRight" /> : <Icon name="chevronDown" />}
                   </button>
                 </div>
                 {!dock.sourceCollapsed && <SourceMetadata source={controller.state.source} />}
@@ -1410,7 +1480,7 @@ export default function App() {
               <span className="eyebrow">Editor help</span>
               <strong>Keyboard shortcuts</strong>
             </div>
-            <button aria-label="Close keyboard shortcuts" className="icon-button" onClick={() => setShowShortcuts(false)} type="button">×</button>
+            <button aria-label="Close keyboard shortcuts" className="icon-button" onClick={() => setShowShortcuts(false)} type="button"><Icon name="close" /></button>
           </div>
           <dl>
             <div><dt>⌘/Ctrl K</dt><dd>Focus node search</dd></div>
@@ -1430,7 +1500,7 @@ export default function App() {
           <span>{editorErrorNotice.message}</span>
           <small>{editorErrorNotice.guidance}</small>
           <button aria-label="Dismiss editor error" onClick={() => controller.selectNode(controller.state.selectedNodeId)} type="button">
-            ×
+            <Icon name="close" />
           </button>
         </div>
       )}
@@ -1450,7 +1520,7 @@ export default function App() {
             </button>
           )}
           <button aria-label="Dismiss checkpoint error" onClick={() => checkpointController.clearError()} type="button">
-            ×
+            <Icon name="close" />
           </button>
         </div>
       )}
@@ -1460,7 +1530,7 @@ export default function App() {
           <span>{imageErrorNotice.message}</span>
           <small>{imageErrorNotice.guidance}</small>
           <button aria-label="Dismiss image error" onClick={() => setImageError(null)} type="button">
-            ×
+            <Icon name="close" />
           </button>
         </div>
       )}

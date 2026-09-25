@@ -6,6 +6,7 @@ import {
   type EdgeProps,
 } from '@xyflow/react';
 import { dataTypeColor } from '../ui/data-type-colors';
+import { Icon } from '../ui/Icon';
 
 export interface WorkflowEdgeData extends Record<string, unknown> {
   dataType?: string | null;
@@ -54,7 +55,7 @@ export function WorkflowEdge({
         markerEnd={markerEnd}
         path={path}
         style={{
-          stroke: selected ? '#8cebd3' : color,
+          stroke: selected ? 'var(--wax-white)' : color,
           strokeWidth: selected ? 2.4 : 1.6,
         }}
       />
@@ -70,7 +71,7 @@ export function WorkflowEdge({
           title="Disconnect"
           type="button"
         >
-          ✕
+          <Icon name="close" />
         </button>
       </EdgeLabelRenderer>
     </>

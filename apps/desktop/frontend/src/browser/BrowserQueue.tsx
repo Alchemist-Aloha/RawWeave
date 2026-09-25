@@ -12,6 +12,7 @@ import { BatchPanel } from '../components/BatchPanel';
 import { createBatchPlatform } from '../platform/batch';
 import { createImageSet } from '../imageset/model';
 import type { ImageSetCollection, ImageSetOrder } from '../imageset/model';
+import { Icon } from '../ui/Icon';
 
 export interface BrowserQueueProps {
   mode?: 'browse' | 'batch';
@@ -429,7 +430,7 @@ export function BrowserQueue({
               onClick={() => browserController.setView({ sort: { ...browser.view.sort, direction: browser.view.sort.direction === 'asc' ? 'desc' : 'asc' } })}
               type="button"
             >
-              {browser.view.sort.direction === 'asc' ? '↑' : '↓'}
+              {browser.view.sort.direction === 'asc' ? <Icon name="arrowUp" /> : <Icon name="arrowDown" />}
             </button>
             <div aria-label="Browser view" className="browser-view-toggle" role="group">
               <button aria-label="Grid view" aria-pressed={browserLayout === 'grid'} className={browserLayout === 'grid' ? 'is-active' : ''} onClick={() => browserController.setView({ layout: 'grid' })} type="button">Grid</button>
@@ -582,7 +583,7 @@ export function BrowserQueue({
                   <input aria-label={`Include ${item.name} in test set`} checked={item.testSet} onChange={(event) => toggleTestSet(item.path, event.target.checked)} type="checkbox" />
                   Test
                 </label>
-                <button aria-label={`Remove ${item.name} from queue`} className="icon-button" onClick={() => queueController.remove([item.path])} type="button">×</button>
+                <button aria-label={`Remove ${item.name} from queue`} className="icon-button" onClick={() => queueController.remove([item.path])} type="button"><Icon name="close" /></button>
               </div>
               );
             })}
@@ -630,7 +631,7 @@ export function BrowserQueue({
                   </button>
                   <div className="imageset-card__actions">
                     <button aria-label={`Open Image Set ${collection.name}`} className="button button--quiet" onClick={() => openImageSetCollection(collection)} type="button">Open</button>
-                    <button aria-label={`Remove Image Set ${collection.name}`} className="icon-button" onClick={() => removeImageSet(collection)} type="button">×</button>
+                    <button aria-label={`Remove Image Set ${collection.name}`} className="icon-button" onClick={() => removeImageSet(collection)} type="button"><Icon name="close" /></button>
                   </div>
                 </article>
               ))}

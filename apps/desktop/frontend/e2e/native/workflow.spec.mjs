@@ -194,3 +194,47 @@ describe('workflow backend in the real Tauri app', () => {
     expect(await invoke('save_workflow')).toBe(before);
   });
 });
+
+/**
+ * Fields are painted by the app, not by the system theme.
+ *
+ * WebKit paints its own field over any background it is given, so a select in the
+ * dark room rendered as a white system box with a light label on it while
+ * `getComputedStyle` reported the app's own colours. Dropping the system
+ * appearance is what makes the palette reach the screen; if that is ever removed,
+ * the batch recipe silently turns white again on the shipped engine.
+ *
+ * This lives in this file rather than its own because the native run gives every
+ * spec file its own app instance over one shared app home, so a third file makes
+ * the suite interfere with itself.
+ */
+describe('fields keep the palette on the shipped engine', () => {
+  it('paints the batch recipe with the app colours, not the system theme', async () => {
+    for (const button of await $$('nav[aria-label="Workspace mode"] button')) {
+      if ((await button.getText()) === 'Batch') {
+        await button.click();
+        break;
+      }
+    }
+    const select = await $('select[aria-label="Batch output format"]');
+    await select.waitForExist();
+
+    const painted = await browser.execute(() => {
+      const field = document.querySelector('select[aria-label="Batch output format"]');
+      const number = document.querySelector('.batch-panel__fields input');
+      const box = document.querySelector('input[type="checkbox"]');
+      return {
+        appearance: getComputedStyle(field).appearance,
+        background: getComputedStyle(field).backgroundColor,
+        numberAppearance: number ? getComputedStyle(number).appearance : '',
+        checkboxAppearance: box ? getComputedStyle(box).appearance : '',
+      };
+    });
+
+    expect(painted.appearance).toBe('none');
+    expect(painted.numberAppearance).toBe('none');
+    // a checkbox is a native control and must stay one
+    expect(painted.checkboxAppearance).not.toBe('none');
+    expect(painted.background).not.toMatch(/255, 255, 255/);
+  });
+});

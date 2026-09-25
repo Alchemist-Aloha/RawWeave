@@ -1,6 +1,7 @@
 import { useMemo, useState, type RefObject } from 'react';
 import type { NodeDescriptor } from '../editor/types';
 import { dataTypesCompatible } from '../editor/connections';
+import { Icon } from '../ui/Icon';
 
 interface NodeLibraryProps {
   descriptors: NodeDescriptor[];
@@ -53,7 +54,7 @@ export function NodeLibrary({
             title="Collapse Nodes panel"
             type="button"
           >
-            ‹
+            <Icon name="chevronLeft" />
           </button>
         )}
       </div>
@@ -96,7 +97,7 @@ export function NodeLibrary({
             onClick={() => onAdd(descriptor.typeId)}
             type="button"
           >
-            <span className="node-library__icon">+</span>
+            <span className="node-library__icon"><Icon name="plus" /></span>
             <span>
               <strong>{descriptor.name}</strong>
               <small>{descriptor.typeId}</small>

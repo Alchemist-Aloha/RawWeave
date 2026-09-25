@@ -7,6 +7,7 @@ import {
 } from './CheckpointPanel';
 import { ImageSetInspector } from './ImageSetInspector';
 import type { ImageSetCollection } from '../imageset/model';
+import { Icon } from '../ui/Icon';
 
 interface InspectorProps {
   node: EditorNode | undefined;
@@ -59,7 +60,7 @@ export function Inspector({
       title={collapsed ? 'Expand inspector panel' : 'Collapse inspector panel'}
       type="button"
     >
-      {collapsed ? '▸' : '▾'}
+      {collapsed ? <Icon name="chevronRight" /> : <Icon name="chevronDown" />}
     </button>
   ) : null;
   const imageSetPanel = imageSet && onImageSetReorder && onImageSetAlignmentChange ? (
@@ -151,7 +152,7 @@ export function Inspector({
           title="Delete node"
           type="button"
         >
-          ×
+          <Icon name="close" />
         </button>
         {collapseButton}
       </div>

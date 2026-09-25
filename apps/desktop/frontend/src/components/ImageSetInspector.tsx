@@ -1,4 +1,5 @@
 import type { ImageSetCollection } from '../imageset/model';
+import { Icon } from '../ui/Icon';
 
 export interface ImageSetInspectorProps {
   collection: ImageSetCollection | null;
@@ -66,14 +67,14 @@ export function ImageSetInspector({ collection, onReorder, onAlignmentChange }: 
                 disabled={collection.order === 'unordered' || index === 0}
                 onClick={() => onReorder(member.id, index - 1)}
                 type="button"
-              >↑</button>
+              ><Icon name="arrowUp" /></button>
               <button
                 aria-label={`Move ${member.name} down`}
                 className="icon-button"
                 disabled={collection.order === 'unordered' || index === collection.members.length - 1}
                 onClick={() => onReorder(member.id, index + 1)}
                 type="button"
-              >↓</button>
+              ><Icon name="arrowDown" /></button>
             </div>
           </article>
         ))}

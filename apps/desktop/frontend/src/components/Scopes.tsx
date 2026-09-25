@@ -55,6 +55,28 @@ function ScopeCanvas({ label, draw }: { label: string; draw: DrawScope }) {
   );
 }
 
+/**
+ * The scopes are the measuring station, so their ground is the neutral cast's
+ * darkest value and nothing decorative is spent in them.
+ *
+ * The three channel traces keep their own hues, and that is the one place in the
+ * app where colour is not wax: red, green and blue are what those channels *are*,
+ * and a histogram that draws all three the same colour measures nothing. The luma
+ * trace is neutral, and everything else here is a wax that already means
+ * something: amber is the caution mark, red is the fault mark. The retired mint is
+ * gone; nothing in the app strokes in it any more.
+ */
+const SCOPE = {
+  ground: '#141414',
+  graticule: '#3a3a3a',
+  trace: '#f0f0f0',
+  red: '#ef737d',
+  green: '#7cde9c',
+  blue: '#7eafff',
+  caution: '#e8a33d',
+  fault: '#d94a38',
+} as const;
+
 function maxValue(values: ArrayLike<number>): number {
   let maximum = 0;
   for (let index = 0; index < values.length; index += 1) maximum = Math.max(maximum, values[index] ?? 0);
@@ -64,9 +86,9 @@ function maxValue(values: ArrayLike<number>): number {
 function drawHistogram(analysis: ImageAnalysis): DrawScope {
   return (context, width, height) => {
     const channels = [analysis.histogram.red, analysis.histogram.green, analysis.histogram.blue, analysis.histogram.luma];
-    const colors = ['#ef737d', '#7cde9c', '#7eafff', '#dce6ed'];
+    const colors = [SCOPE.red, SCOPE.green, SCOPE.blue, SCOPE.trace];
     const maximum = Math.max(1, ...channels.map(maxValue));
-    context.fillStyle = '#0b1016';
+    context.fillStyle = SCOPE.ground;
     context.fillRect(0, 0, width, height);
     channels.forEach((channel, channelIndex) => {
       context.beginPath();
@@ -76,7 +98,7 @@ function drawHistogram(analysis: ImageAnalysis): DrawScope {
         if (index === 0) context.moveTo(x, y);
         else context.lineTo(x, y);
       });
-      context.strokeStyle = colors[channelIndex] ?? '#dce6ed';
+      context.strokeStyle = colors[channelIndex] ?? SCOPE.trace;
       context.globalAlpha = channelIndex === 3 ? 0.85 : 0.55;
       context.lineWidth = channelIndex === 3 ? 1.5 : 1;
       context.stroke();
@@ -89,7 +111,7 @@ function drawWaveform(analysis: ImageAnalysis, channel: 'red' | 'green' | 'blue'
   return (context, width, height) => {
     const values = analysis.waveform[channel];
     const maximum = Math.max(1, maxValue(values));
-    context.fillStyle = '#0b1016';
+    context.fillStyle = SCOPE.ground;
     context.fillRect(0, 0, width, height);
     context.fillStyle = color;
     for (let y = 0; y < analysis.waveform.height; y += 1) {
@@ -112,14 +134,14 @@ function drawWaveform(analysis: ImageAnalysis, channel: 'red' | 'green' | 'blue'
 function drawRgbParade(analysis: ImageAnalysis): DrawScope {
   return (context, width, height) => {
     const channels = [analysis.waveform.red, analysis.waveform.green, analysis.waveform.blue];
-    const colors = ['#ef737d', '#7cde9c', '#7eafff'];
+    const colors = [SCOPE.red, SCOPE.green, SCOPE.blue];
     const maximum = Math.max(1, ...channels.map(maxValue));
-    context.fillStyle = '#0b1016';
+    context.fillStyle = SCOPE.ground;
     context.fillRect(0, 0, width, height);
     channels.forEach((channel, channelIndex) => {
       const startX = (channelIndex * width) / 3;
       const columnWidth = width / 3;
-      context.fillStyle = colors[channelIndex] ?? '#dce6ed';
+      context.fillStyle = colors[channelIndex] ?? SCOPE.trace;
       for (let y = 0; y < analysis.waveform.height; y += 1) {
         for (let x = 0; x < analysis.waveform.width; x += 1) {
           const value = channel[y * analysis.waveform.width + x] ?? 0;
@@ -141,13 +163,13 @@ function drawRgbParade(analysis: ImageAnalysis): DrawScope {
 function drawVectorscope(analysis: ImageAnalysis): DrawScope {
   return (context, width, height) => {
     const maximum = Math.max(1, maxValue(analysis.vectorscope));
-    context.fillStyle = '#0b1016';
+    context.fillStyle = SCOPE.ground;
     context.fillRect(0, 0, width, height);
-    context.strokeStyle = '#263241';
+    context.strokeStyle = SCOPE.graticule;
     context.beginPath();
     context.arc(width / 2, height / 2, Math.min(width, height) * 0.4, 0, Math.PI * 2);
     context.stroke();
-    context.fillStyle = '#a4e8c9';
+    context.fillStyle = SCOPE.trace;
     for (let y = 0; y < 256; y += 1) {
       for (let x = 0; x < 256; x += 1) {
         const value = analysis.vectorscope[y * 256 + x] ?? 0;
@@ -225,13 +247,13 @@ function scopeEntries(analysis: ImageAnalysis): ScopeEntry[] {
   const centerSample = samplePixel(analysis, Math.floor(analysis.width / 2), Math.floor(analysis.height / 2));
   return [
     { id: 'histogram', label: 'Histogram', short: 'Hist', render: () => <ScopeCanvas draw={drawHistogram(analysis)} label="Histogram" /> },
-    { id: 'waveform', label: 'Waveform', short: 'Wave', render: () => <ScopeCanvas draw={drawWaveform(analysis, 'luma', '#dce6ed')} label="Waveform" /> },
+    { id: 'waveform', label: 'Waveform', short: 'Wave', render: () => <ScopeCanvas draw={drawWaveform(analysis, 'luma', SCOPE.trace)} label="Waveform" /> },
     { id: 'parade', label: 'RGB Parade', short: 'Parade', render: () => <ScopeCanvas draw={drawRgbParade(analysis)} label="RGB Parade" /> },
     { id: 'vectorscope', label: 'Vectorscope', short: 'Vector', render: () => <ScopeCanvas draw={drawVectorscope(analysis)} label="Vectorscope" /> },
     { id: 'false-color', label: 'False Color', short: 'False', render: () => <ScopeCanvas draw={drawRaster(analysis.falseColor)} label="False Color" /> },
-    { id: 'gamut', label: 'Gamut Warning', short: 'Gamut', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.gamutWarning, { on: '#ef737d', off: '#0b1016' })} label="Gamut Warning" /> },
+    { id: 'gamut', label: 'Gamut Warning', short: 'Gamut', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.gamutWarning, { on: SCOPE.fault, off: SCOPE.ground })} label="Gamut Warning" /> },
     { id: 'pixel', label: 'Pixel Inspector', short: 'Pixel', render: () => <PixelInspector sample={centerSample} /> },
-    { id: 'zebra', label: 'Zebra', short: 'Zebra', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.zebra, { on: '#f0cf82', off: '#0b1016' })} label="Zebra" /> },
+    { id: 'zebra', label: 'Zebra', short: 'Zebra', render: () => <ScopeCanvas draw={drawMask(analysis, analysis.zebra, { on: SCOPE.caution, off: SCOPE.ground })} label="Zebra" /> },
   ];
 }
 

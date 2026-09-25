@@ -1,10 +1,28 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+
 /**
- * The Legibility Floor (see DESIGN.md, Typography): mono chrome may go to 9px,
- * everything a user reads or acts on sits at 11px. Sub-9px type is the drift
- * this guards against, so the test fails the moment a declaration drops below it.
+ * The world has two casts and one measuring station, and the cast a colour is
+ * declared in decides what it has to survive:
+ *
+ *   room   warm near-black   handling chrome
+ *   bench  lit acrylic       the one plane frames are laid out on
+ *   plane  the bench with the lamp switched off
+ *   judge  neutral grey      the measuring station
+ *
+ * This test used to check every text colour against a single flat list of dark
+ * surfaces. That stops meaning anything the moment a plane is light: the same
+ * colour cannot be measured against a warm ground and a lit sheet at once. So the
+ * surfaces are now derived from the token table itself, per cast, and the rules
+ * are stricter than before:
+ *
+ *   1. No type below the 9px floor.
+ *   2. No loose colour: every hex in the stylesheet must be a declared token
+ *      value, so a colour cannot be introduced without landing in a cast.
+ *   3. Every ink token clears AA against the worst surface of every cast it is
+ *      declared for — the worst being the surface closest to it in luminance,
+ *      which is what a single flat list used to approximate by luck.
  */
 const FLOOR_PX = 9;
 const fileName = ['src/styles.css', 'apps/desktop/frontend/src/styles.css'].find((candidate) =>
@@ -12,13 +30,16 @@ const fileName = ['src/styles.css', 'apps/desktop/frontend/src/styles.css'].find
 );
 if (!fileName) throw new Error('styles.css not found; run this suite from the frontend package');
 const css = readFileSync(resolve(process.cwd(), fileName), 'utf8');
+/** Comments carry prose about the palette and the font import carries an `@`, so
+ *  neither is parsed as a declaration. */
+const sheet = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@import[^;]*;/g, '');
 
 describe('styles.css legibility floor', () => {
   it('never renders type below the mono-chrome floor', () => {
-    const offenders = [...css.matchAll(/font-size:\s*([\d.]+)px/g)]
+    const offenders = [...sheet.matchAll(/font-size:\s*([\d.]+)px/g)]
       .map((match) => ({
         size: Number(match[1]),
-        line: css.slice(0, match.index).split('\n').length,
+        line: sheet.slice(0, match.index).split('\n').length,
       }))
       .filter((entry) => entry.size < FLOOR_PX)
       .map((entry) => `line ${entry.line}: ${entry.size}px`);
@@ -27,18 +48,62 @@ describe('styles.css legibility floor', () => {
   });
 });
 
-/**
- * The secondary-text tier must clear AA on every surface it can sit on, including
- * hovered rows and tiles. This list is the calibration knob: when a new surface
- * lighter than these is introduced, add it here and re-check the tier.
- */
-const SURFACES = ['#19232d', '#17242a', '#151b24', '#141b24', '#141a23', '#111821', '#111720', '#10141b', '#0e151c', '#0d1117', '#0b0d12'];
+type Cast = 'room' | 'bench' | 'plane' | 'judge';
 
-/** Declarations that are not secondary text colour usage. */
+/**
+ * Which cast a declaration belongs to. The one block that needs splitting is the
+ * root: it carries the room's palette, the bench's default lamp-on values and the
+ * judge station's neutrals, so its tokens are attributed by name there.
+ */
+const CASTS: Array<{ selector: RegExp; cast: Cast }> = [
+  { selector: /^\.canvas-panel,\s*\.browser-panel$/, cast: 'bench' },
+  { selector: /^\.app-shell\[data-lamp='off'\] \.canvas-panel/, cast: 'plane' },
+  { selector: /^\.browser-panel$/, cast: 'bench' },
+  { selector: /^\.viewer-section,/, cast: 'judge' },
+];
+
+function castFor(selector: string, token: string): Cast | null {
+  if (selector.trim() === ':root') {
+    if (token.startsWith('--room-')) return 'room';
+    if (token.startsWith('--bench-')) return 'bench';
+    if (token.startsWith('--judge-')) return 'judge';
+    if (token.startsWith('--wax-')) return 'room';
+    return null;
+  }
+  for (const entry of CASTS) if (entry.selector.test(selector.trim())) return entry.cast;
+  return null;
+}
+
+interface Declaration {
+  token: string;
+  hex: string;
+  cast: Cast;
+}
+
+const declarations: Declaration[] = [];
+for (const block of sheet.matchAll(/([^{}@]+)\{([^{}]*)\}/g)) {
+  const selector = block[1];
+  for (const declaration of block[2].matchAll(/(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6});/g)) {
+    const cast = castFor(selector, declaration[1]);
+    if (cast) declarations.push({ token: declaration[1], hex: declaration[2].toLowerCase(), cast });
+  }
+}
+
+/** Surfaces are what text can sit on: grounds, panels, raises, tints. A line is
+ *  never a surface, and neither is the light box's frame — which is why border
+ *  and mount colours are not measured as text. */
+const SURFACE = /-(ground|sunk|strip|panel|raise|hover|select|tint|spill)$/;
+/** Inks are the tokens that carry type, plus the three wax marks the app also
+ *  prints with. Red is absent on purpose: its text role is `--wax-red-ink`,
+ *  because a wax dark enough to be a mark is too dark to be legible type. */
+const INK = /-ink(-body|-dim|-faint|-soft)?$/;
+const PRINTING_WAX = ['--wax-white', '--wax-amber', '--wax-blue'];
+
+/** Ink set on its own solid wax fill, a large placeholder glyph, and a dismiss
+ *  glyph on a control. */
 const CONTRAST_EXEMPT: Record<string, string> = {
-  '#07100e': 'text set ON a mint fill, not on the dark ground (.button--primary is 12.8:1 against its own background)',
-  '#536478': 'large 22px placeholder glyph: WCAG 1.4.3 exempts large text at 3:1, measured 3.1:1',
-  '#b9757e': 'dismiss glyph on a control, not text: WCAG 1.4.11 requires 3:1, measured 4.9:1',
+  '--wax-white-ink': 'text set ON a solid wax fill, not on a cast surface',
+  '--room-ink-faint': 'large 22px placeholder glyph: WCAG 1.4.3 exempts large text at 3:1',
 };
 
 const srgb = (channel: number) => {
@@ -56,19 +121,38 @@ const ratio = (a: string, b: string) => {
   return (high + 0.05) / (low + 0.05);
 };
 
-describe('styles.css contrast', () => {
-  it('keeps every text colour at AA or better on its worst plausible surface', () => {
-    const offenders: string[] = [];
-    for (const line of css.split('\n')) {
-      for (const [, hex] of line.matchAll(/(?:^|[{;\s])(?:color|fill):\s*(#[0-9a-fA-F]{6})/g)) {
-        const colour = hex.toLowerCase();
-        if (colour in CONTRAST_EXEMPT) continue;
-        const worst = SURFACES.reduce((a, b) => (ratio(colour, a) <= ratio(colour, b) ? a : b));
-        const measured = ratio(colour, worst);
-        if (measured < 4.5) offenders.push(`${colour} at ${measured.toFixed(2)}:1 on ${worst}`);
-      }
-    }
+const surfacesByCast = new Map<Cast, string[]>();
+for (const declaration of declarations) {
+  if (!SURFACE.test(declaration.token)) continue;
+  const list = surfacesByCast.get(declaration.cast) ?? [];
+  list.push(declaration.hex);
+  surfacesByCast.set(declaration.cast, list);
+}
 
+describe('styles.css colour discipline', () => {
+  it('declares every colour it uses, so nothing can escape its cast', () => {
+    const declared = new Set(declarations.map((declaration) => declaration.hex));
+    const loose = [...new Set([...sheet.matchAll(/#[0-9a-fA-F]{6}/g)].map((match) => match[0].toLowerCase()))]
+      .filter((hex) => !declared.has(hex));
+    expect(loose).toEqual([]);
+  });
+
+  it('covers every cast with surfaces to measure against', () => {
+    expect([...surfacesByCast.keys()].sort()).toEqual(['bench', 'judge', 'plane', 'room']);
+  });
+
+  it('keeps every ink at AA on the worst surface of its own cast', () => {
+    const offenders: string[] = [];
+    for (const declaration of declarations) {
+      const { token, hex, cast } = declaration;
+      if (token in CONTRAST_EXEMPT) continue;
+      if (!INK.test(token) && !PRINTING_WAX.includes(token)) continue;
+      const surfaces = surfacesByCast.get(cast) ?? [];
+      expect(surfaces.length).toBeGreaterThan(0);
+      const worst = surfaces.reduce((a, b) => (ratio(hex, a) <= ratio(hex, b) ? a : b));
+      const measured = ratio(hex, worst);
+      if (measured < 4.5) offenders.push(`${token} ${hex} at ${measured.toFixed(2)}:1 on ${worst} (${cast})`);
+    }
     expect([...new Set(offenders)]).toEqual([]);
   });
 });

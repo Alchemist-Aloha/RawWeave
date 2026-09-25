@@ -5,6 +5,7 @@ import type {
   AiProviderPlatform,
 } from '../platform/ai-provider-types';
 import { createAiProviderPlatform } from '../platform/ai-provider';
+import { Icon } from '../ui/Icon';
 
 interface AiProviderManagerProps {
   api?: AiProviderPlatform;
@@ -128,7 +129,7 @@ export function AiProviderManager({ api = defaultApi }: AiProviderManagerProps) 
       {error && (
         <div className="ai-provider-manager__error" role="alert">
           <span>{error}</span>
-          <button aria-label="Dismiss AI provider error" onClick={() => setError(null)} type="button">×</button>
+          <button aria-label="Dismiss AI provider error" onClick={() => setError(null)} type="button"><Icon name="close" /></button>
         </div>
       )}
       <div className="ai-provider-manager__providers">

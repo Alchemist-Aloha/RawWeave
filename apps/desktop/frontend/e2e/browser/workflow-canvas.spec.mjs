@@ -190,6 +190,69 @@ describe('workflow canvas layout', () => {
     expect(Math.round(settled.y)).toBe(Math.round(dropped.y));
   });
 
+  it('moves a dragged node on every pointer move, not just on drop', async () => {
+    const inputs = await $$('.topbar__actions input[type="file"]');
+    await inputs[1].addValue(await browser.uploadFile(imageFixture));
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('2 nodes'));
+    const item = await $('.node-library__item');
+    await item.waitForDisplayed();
+    for (let index = 0; index < 4; index += 1) await item.click();
+    await browser.waitUntil(async () => (await $$('.react-flow__node')).length >= 6, {
+      timeoutMsg: 'the multi-node graph did not build',
+    });
+
+    const node = await $('.react-flow__node');
+    const box = await node.getLocation();
+    const size = await node.getSize();
+    const start = { x: Math.round(box.x + size.width / 2), y: Math.round(box.y + 12) };
+
+    // The whole gesture has to stay in one protocol call: WebDriver resets the
+    // pressed state of an input source between calls. Sample the node from inside
+    // the page so the movement can be observed while the drag is running.
+    await browser.execute(() => {
+      const element = document.querySelector('.react-flow__node');
+      window.__drag = { samples: [], timer: 0 };
+      const sample = () => window.__drag.samples.push({
+        transform: getComputedStyle(element).transform,
+        dragging: element.classList.contains('dragging'),
+      });
+      sample();
+      window.__drag.timer = window.setInterval(sample, 16);
+    });
+
+    const actions = [
+      { type: 'pointerMove', duration: 0, x: start.x, y: start.y, origin: 'viewport' },
+      { type: 'pointerDown', button: 0 },
+    ];
+    for (let step = 1; step <= 8; step += 1) {
+      actions.push({ type: 'pointerMove', duration: 30, x: start.x + step * 9, y: start.y + step * 6, origin: 'viewport' });
+    }
+    actions.push({ type: 'pointerUp', button: 0 });
+    await browser.performActions([{ type: 'pointer', id: 'mouse', parameters: { pointerType: 'mouse' }, actions }]);
+    await browser.pause(300);
+
+    const drag = await browser.execute(() => {
+      window.clearInterval(window.__drag.timer);
+      return window.__drag.samples;
+    });
+    const distinct = new Set(drag.map((sample) => sample.transform));
+    // Dragging in the middle of the gesture, not only when it ends: a single
+    // final transform would mean the node visually waited for the drop.
+    expect(distinct.size).toBeGreaterThan(4);
+    expect(distinct.size).toBeLessThanOrEqual(drag.length - 1);
+    expect(drag.some((sample) => sample.dragging)).toBe(true);
+
+    // The gesture is committed, so the node stays where it was dropped.
+    const dropped = await node.getLocation();
+    expect(Math.abs(dropped.x - box.x) + Math.abs(dropped.y - box.y)).toBeGreaterThan(5);
+    await browser.pause(800);
+    const settled = await node.getLocation();
+    expect(Math.round(settled.x)).toBe(Math.round(dropped.x));
+    expect(Math.round(settled.y)).toBe(Math.round(dropped.y));
+    const after = await browser.execute(() => getComputedStyle(document.querySelector('.react-flow__node')).willChange);
+    expect(after).not.toBe('transform');
+  });
+
   it('shows nodes after loading a workflow with distant saved positions', async () => {
     await addNode('Image Input');
     const remote = await browser.uploadFile(offscreenWorkflow);

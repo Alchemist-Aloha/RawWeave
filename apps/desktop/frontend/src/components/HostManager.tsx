@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createTauriHostManager } from '../platform/hosts';
 import type { ExternalHost, ExternalHostConfig, HostManagerApi } from '../platform/hosts';
+import { Icon } from '../ui/Icon';
 
 interface HostManagerProps {
   api?: HostManagerApi;
@@ -166,7 +167,7 @@ export function HostManager({ api = defaultApi, onDiscovery }: HostManagerProps)
       {error && (
         <div className="host-manager__error" role="alert">
           <span>{error}</span>
-          <button aria-label="Dismiss host manager error" onClick={() => setError(null)} type="button">×</button>
+          <button aria-label="Dismiss host manager error" onClick={() => setError(null)} type="button"><Icon name="close" /></button>
         </div>
       )}
 
