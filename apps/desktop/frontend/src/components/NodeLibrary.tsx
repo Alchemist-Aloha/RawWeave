@@ -13,6 +13,14 @@ interface NodeLibraryProps {
   onCollapse?: () => void;
 }
 
+const CATEGORY_LABELS: Record<string, string> = { ai: 'AI', core: 'Core', pro: 'Pro Tools', raw: 'RAW' };
+
+/** `core.exposure` -> `Core`; unknown families fall back to title case. */
+function categoryLabel(category: string): string {
+  return CATEGORY_LABELS[category]
+    ?? category.replace(/[-_]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 export function NodeLibrary({
   descriptors,
   onAdd,
@@ -24,6 +32,7 @@ export function NodeLibrary({
 }: NodeLibraryProps) {
   const [query, setQuery] = useState('');
   const [compatibleOnly, setCompatibleOnly] = useState(true);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const hasCompatibleTypes = Boolean(compatibleDataTypes && compatibleDataTypes.length > 0);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -37,6 +46,19 @@ export function NodeLibrary({
       return true;
     });
   }, [compatibleDataTypes, compatibleOnly, descriptors, hasCompatibleTypes, query]);
+  // Grouped by the family in the type id (`core.exposure` -> Core), keeping the
+  // backend's own ordering so the list reads the same top to bottom.
+  const groups = useMemo(() => {
+    const byCategory = new Map<string, NodeDescriptor[]>();
+    for (const descriptor of filtered) {
+      const category = descriptor.typeId.split('.')[0] || descriptor.typeId;
+      const bucket = byCategory.get(category);
+      if (bucket) bucket.push(descriptor);
+      else byCategory.set(category, [descriptor]);
+    }
+    return [...byCategory];
+  }, [filtered]);
+  const searching = query.trim().length > 0;
 
   return (
     <aside className="panel panel--library">
@@ -90,19 +112,43 @@ export function NodeLibrary({
         )}
       </div>
       <div className="node-library">
-        {filtered.map((descriptor) => (
-          <button
-            className="node-library__item"
-            key={descriptor.typeId}
-            onClick={() => onAdd(descriptor.typeId)}
-            type="button"
+        {groups.map(([category, items]) => (
+          <details
+            className="node-library__group"
+            key={category}
+            // A search must never hide its own matches, so every group opens
+            // while filtering and the user's collapses only apply when browsing.
+            onToggle={(event) => {
+              if (searching) return;
+              const open = event.currentTarget.open;
+              setCollapsed((current) => {
+                const next = new Set(current);
+                if (open) next.delete(category);
+                else next.add(category);
+                return next;
+              });
+            }}
+            open={searching || !collapsed.has(category)}
           >
-            <span className="node-library__icon"><Icon name="plus" /></span>
-            <span>
-              <strong>{descriptor.name}</strong>
-              <small>{descriptor.typeId}</small>
-            </span>
-          </button>
+            <summary className="node-library__group-summary">
+              <span>{categoryLabel(category)}</span>
+              <span className="count-badge">{items.length}</span>
+            </summary>
+            {items.map((descriptor) => (
+              <button
+                className="node-library__item"
+                key={descriptor.typeId}
+                onClick={() => onAdd(descriptor.typeId)}
+                type="button"
+              >
+                <span className="node-library__icon"><Icon name="plus" /></span>
+                <span>
+                  <strong>{descriptor.name}</strong>
+                  <small>{descriptor.typeId}</small>
+                </span>
+              </button>
+            ))}
+          </details>
         ))}
         {filtered.length === 0 && <p className="empty-state">No nodes match this search.</p>}
       </div>

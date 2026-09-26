@@ -28,9 +28,14 @@ import {
   serializeDockLayout,
   type DockLayout,
 } from './ui/layout';
-import { GraphNode, type RawWeaveFlowNode } from './components/GraphNode';
+import {
+  GraphNode,
+  GraphNodeActionsContext,
+  type GraphNodeActions,
+  type RawWeaveFlowNode,
+} from './components/GraphNode';
 import type { CheckpointStatus } from './checkpoint/types';
-import { Inspector } from './components/Inspector';
+import { ImageSetInspector } from './components/ImageSetInspector';
 import type {
   CheckpointOutputPort,
   CheckpointPreviewActions,
@@ -476,7 +481,7 @@ export default function App() {
     saveDockLayout(dock);
   }, [dock]);
 
-  const toggleDock = useCallback((key: 'libraryCollapsed' | 'rightCollapsed' | 'previewCollapsed' | 'inspectorCollapsed' | 'sourceCollapsed') => {
+  const toggleDock = useCallback((key: 'libraryCollapsed' | 'rightCollapsed' | 'previewCollapsed' | 'sourceCollapsed') => {
     setDock((current) => ({ ...current, [key]: !current[key] }));
   }, []);
 
@@ -505,17 +510,35 @@ export default function App() {
   const flowNodeCache = useRef(new WeakMap<EditorNode, {
     selected: boolean;
     checkpointStatus: CheckpointStatus | null;
+    measured: RawWeaveFlowNode['measured'];
     flow: RawWeaveFlowNode;
   }>());
+  /**
+   * Last measured size per node, fed back from React Flow's own dimensions
+   * changes. Rebuilding a node's flow object without `measured` makes React
+   * Flow treat it as unmeasured and hide it (`visibility: hidden`) until it is
+   * measured again, which flickers the node to nothing for most of a drag.
+   */
+  const measuredSizes = useRef(new Map<string, { width: number; height: number }>());
   const flowNodes = useMemo<RawWeaveFlowNode[]>(
-    () =>
-      controller.state.nodes.map((node) => {
+    () => {
+      const liveIds = new Set(controller.state.nodes.map((node) => node.id));
+      for (const id of measuredSizes.current.keys()) {
+        if (!liveIds.has(id)) measuredSizes.current.delete(id);
+      }
+      return controller.state.nodes.map((node) => {
         const selected = controller.state.selectedNodeIds.includes(node.id);
         const checkpointStatus = checkpointController.state.statuses.find(
           (status) => status.nodeId === node.id,
         ) ?? null;
+        const measured = measuredSizes.current.get(node.id);
         const cached = flowNodeCache.current.get(node);
-        if (cached && cached.selected === selected && cached.checkpointStatus === checkpointStatus) {
+        if (
+          cached
+          && cached.selected === selected
+          && cached.checkpointStatus === checkpointStatus
+          && cached.measured === measured
+        ) {
           return cached.flow;
         }
         const flow: RawWeaveFlowNode = {
@@ -524,10 +547,12 @@ export default function App() {
           position: node.position,
           data: { node, checkpointStatus },
           selected,
+          ...(measured ? { measured } : {}),
         };
-        flowNodeCache.current.set(node, { selected, checkpointStatus, flow });
+        flowNodeCache.current.set(node, { selected, checkpointStatus, measured, flow });
         return flow;
-      }),
+      });
+    },
     [checkpointController.state.statuses, controller.state.nodes, controller.state.selectedNodeIds],
   );
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
@@ -777,7 +802,13 @@ export default function App() {
       for (const change of changes) {
         if (change.type === 'position' && change.position) {
           controller.updateNodePosition(change.id, change.position, change.dragging ?? false);
+        } else if (change.type === 'dimensions' && change.dimensions) {
+          measuredSizes.current.set(change.id, {
+            width: change.dimensions.width,
+            height: change.dimensions.height,
+          });
         } else if (change.type === 'remove') {
+          measuredSizes.current.delete(change.id);
           void controller.removeNode(change.id).catch(() => undefined);
         }
       }
@@ -802,30 +833,11 @@ export default function App() {
     [controller],
   );
 
-  const onParameterChange = useCallback(
-    (parameterId: string, value: ParameterValue) => {
-      if (!selectedNode) return;
-      void controller.setParameter(selectedNode.id, parameterId, value).catch(() => undefined);
-    },
-    [controller, selectedNode],
-  );
-
   const onPaintedMaskChange = useCallback(
     (nodeId: string, parameterId: string, value: ParameterValue) => {
       void controller.setParameter(nodeId, parameterId, value).catch(() => undefined);
     },
     [controller],
-  );
-
-  const onToggleExposed = useCallback(
-    (parameterId: string, exposed: boolean) => {
-      if (!selectedNode) return;
-      const action = exposed
-        ? controller.exposeParameter(selectedNode.id, parameterId)
-        : controller.unexposeParameter(selectedNode.id, parameterId);
-      void action.catch(() => undefined);
-    },
-    [controller, selectedNode],
   );
 
   const onToggleInput = useCallback(
@@ -839,6 +851,47 @@ export default function App() {
     },
     [controller],
   );
+
+  const nodeActions = useMemo<GraphNodeActions>(() => ({
+    onParameterChange: (nodeId, parameterId, value) => {
+      void controller.setParameter(nodeId, parameterId, value).catch(() => undefined);
+    },
+    onToggleExposed: (nodeId, parameterId, exposed) => {
+      const action = exposed
+        ? controller.exposeParameter(nodeId, parameterId)
+        : controller.unexposeParameter(nodeId, parameterId);
+      void action.catch(() => undefined);
+    },
+    onTogglePort: onToggleInput,
+    onDelete: (nodeId) => {
+      void controller.removeNode(nodeId).catch(() => undefined);
+    },
+    workflowInputs: controller.state.workflowInputs,
+    workflowOutputs: controller.state.workflowOutputs,
+    checkpoint: selectedNode?.descriptor.evaluationPolicy === 'manual_checkpoint'
+      ? {
+        nodeId: selectedNode.id,
+        status: selectedCheckpointStatus,
+        loading: checkpointController.state.loading,
+        outputPorts: checkpointOutputPorts,
+        previewActions: checkpointPreviewActions,
+        onGenerate: generateCheckpoint,
+        onCancel: cancelCheckpoint,
+      }
+      : null,
+  }), [
+    cancelCheckpoint,
+    checkpointController.state.loading,
+    checkpointOutputPorts,
+    checkpointPreviewActions,
+    controller,
+    controller.state.workflowInputs,
+    controller.state.workflowOutputs,
+    generateCheckpoint,
+    onToggleInput,
+    selectedCheckpointStatus,
+    selectedNode,
+  ]);
 
   const promoteOverrides = useCallback(async (overrides: Record<string, ParameterValue>) => {
     for (const [workflowParameterId, value] of Object.entries(overrides)) {
@@ -1321,43 +1374,45 @@ export default function App() {
             </div>
           </div>
           <div className="flow-canvas">
-            <ReactFlow
-              connectionLineStyle={{ stroke: 'var(--wax-amber)', strokeWidth: 2 }}
-              connectionRadius={30}
-              deleteKeyCode={null}
-              edgeTypes={edgeTypes}
-              edgesReconnectable
-              fitView
-              isValidConnection={isValidConnection}
-              key={workflowCanvasKey}
-              nodes={flowNodes}
-              edges={flowEdges}
-              nodeTypes={nodeTypes}
-              onConnect={onConnect}
-              onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); controller.selectNode(null); }}
-              onEdgeContextMenu={openEdgeMenu}
-              onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
-              onEdgeMouseLeave={() => setHoveredEdgeId(null)}
-              onEdgesChange={onEdgesChange}
-              onInit={(instance) => { flowInstance.current = instance; }}
-              onNodeClick={(event, node) => { setSelectedEdgeId(null); toggleNodeSelection(event, node.id); }}
-              onNodeContextMenu={openNodeMenu}
-              onNodesChange={onNodesChange}
-              onNodeDragStop={(_, node) => controller.updateNodePosition(node.id, node.position, false)}
-              onPaneClick={() => { setSelectedEdgeId(null); controller.selectNode(null); }}
-              onPaneContextMenu={openPaneMenu}
-              onReconnect={onReconnect}
-              onReconnectEnd={() => { reconnectingEdgeId.current = null; }}
-              onReconnectStart={(_, edge) => { reconnectingEdgeId.current = edge.id; }}
-              proOptions={{ hideAttribution: true }}
-              reconnectRadius={18}
-            >
-              <Background color="var(--bench-grid)" gap={24} size={1} variant={BackgroundVariant.Lines} />
-              <Controls />
-              {/* Its palette lives in the stylesheet with the rest of the plane's, so
-                  the minimap follows the lamp without this component carrying colours. */}
-              <MiniMap pannable zoomable />
-            </ReactFlow>
+            <GraphNodeActionsContext.Provider value={nodeActions}>
+              <ReactFlow
+                connectionLineStyle={{ stroke: 'var(--wax-amber)', strokeWidth: 2 }}
+                connectionRadius={30}
+                deleteKeyCode={null}
+                edgeTypes={edgeTypes}
+                edgesReconnectable
+                fitView
+                isValidConnection={isValidConnection}
+                key={workflowCanvasKey}
+                nodes={flowNodes}
+                edges={flowEdges}
+                nodeTypes={nodeTypes}
+                onConnect={onConnect}
+                onEdgeClick={(_, edge) => { setSelectedEdgeId(edge.id); controller.selectNode(null); }}
+                onEdgeContextMenu={openEdgeMenu}
+                onEdgeMouseEnter={(_, edge) => setHoveredEdgeId(edge.id)}
+                onEdgeMouseLeave={() => setHoveredEdgeId(null)}
+                onEdgesChange={onEdgesChange}
+                onInit={(instance) => { flowInstance.current = instance; }}
+                onNodeClick={(event, node) => { setSelectedEdgeId(null); toggleNodeSelection(event, node.id); }}
+                onNodeContextMenu={openNodeMenu}
+                onNodesChange={onNodesChange}
+                onNodeDragStop={(_, node) => controller.updateNodePosition(node.id, node.position, false)}
+                onPaneClick={() => { setSelectedEdgeId(null); controller.selectNode(null); }}
+                onPaneContextMenu={openPaneMenu}
+                onReconnect={onReconnect}
+                onReconnectEnd={() => { reconnectingEdgeId.current = null; }}
+                onReconnectStart={(_, edge) => { reconnectingEdgeId.current = edge.id; }}
+                proOptions={{ hideAttribution: true }}
+                reconnectRadius={18}
+              >
+                <Background color="var(--bench-grid)" gap={24} size={1} variant={BackgroundVariant.Lines} />
+                <Controls />
+                {/* Its palette lives in the stylesheet with the rest of the plane's, so
+                    the minimap follows the lamp without this component carrying colours. */}
+                <MiniMap pannable zoomable />
+              </ReactFlow>
+            </GraphNodeActionsContext.Provider>
             {controller.state.nodes.length === 0 && (
               <div className="canvas-empty">
                 <span className="canvas-empty__icon"><Icon name="plus" /></span>
@@ -1389,7 +1444,7 @@ export default function App() {
               title="Expand right panel"
               type="button"
             >
-              <span className="dock__rail-label">Preview · Inspector</span>
+              <span className="dock__rail-label">Preview · Source</span>
               <Icon name="chevronLeft" />
             </button>
           ) : (
@@ -1414,30 +1469,17 @@ export default function App() {
                 <Splitter axis="height" label="Resize preview panel" onResize={(delta) => resizeDockBy('previewSize', delta)} />
               )}
 
-              <section className={`dock-section dock-section--inspector${dock.inspectorCollapsed ? ' dock-section--collapsed' : ''}`}>
-                <Inspector
-                  checkpointLoading={checkpointController.state.loading}
-                  checkpointOutputPorts={checkpointOutputPorts}
-                  checkpointPreviewActions={checkpointPreviewActions}
-                  checkpointStatus={selectedCheckpointStatus}
-                  collapsed={dock.inspectorCollapsed}
-                  imageSet={activeImageSet}
-                  node={selectedNode}
-                  onCancelCheckpoint={cancelCheckpoint}
-                  onChange={onParameterChange}
-                  onDelete={(nodeId) => void controller.removeNode(nodeId).catch(() => undefined)}
-                  onGenerateCheckpoint={generateCheckpoint}
-                  onImageSetAlignmentChange={setActiveImageSetReference}
-                  onImageSetReorder={reorderActiveImageSetMember}
-                  onToggleCollapsed={() => toggleDock('inspectorCollapsed')}
-                  onToggleExposed={onToggleExposed}
-                  onToggleInput={onToggleInput}
-                  selectedNodeIds={controller.state.selectedNodeIds}
-                  workflowInputs={controller.state.workflowInputs}
-                  workflowOutputs={controller.state.workflowOutputs}
-                />
-              </section>
-              {!dock.inspectorCollapsed && !dock.sourceCollapsed && (
+              {activeImageSet && (
+                <section className="dock-section dock-section--imageset">
+                  <ImageSetInspector
+                    collection={activeImageSet}
+                    onAlignmentChange={setActiveImageSetReference}
+                    onReorder={reorderActiveImageSetMember}
+                  />
+                </section>
+              )}
+
+              {!dock.sourceCollapsed && (
                 <Splitter axis="height" label="Resize source panel" onResize={(delta) => resizeDockBy('sourceSize', -delta)} />
               )}
 

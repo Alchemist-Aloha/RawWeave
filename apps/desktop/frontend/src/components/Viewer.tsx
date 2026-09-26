@@ -336,7 +336,13 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
             className="viewer-pane__image"
             crossOrigin="anonymous"
+            // An <img> is natively draggable: the first pointer move hands the
+            // gesture to the browser's image drag, which fires pointercancel and
+            // freezes the pan. Opting out keeps the pointer ours for the whole
+            // hold-and-drag gesture.
+            draggable={false}
             height={pane.height ?? undefined}
+            onDragStart={(event) => event.preventDefault()}
             onError={() => controller.reportImageLoadFailure(viewer, imageUrl)}
             onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}
             ref={imageRef}

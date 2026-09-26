@@ -54,7 +54,9 @@ fn ordinary_decode_rejects_declared_dimensions_before_decoding_pixels() {
 
 #[test]
 fn ordinary_decode_rejects_declared_pixel_count_before_decoding_pixels() {
-    let width = MAX_ORDINARY_IMAGE_EDGE.min(4096);
+    // A width the pixel budget can exhaust while the edge limit still allows the
+    // height, so the rejection is about pixel count and not about the edge.
+    let width = MAX_ORDINARY_IMAGE_EDGE;
     let height = (MAX_ORDINARY_IMAGE_PIXELS / u64::from(width) + 1) as u32;
     let error = decode_ordinary_bytes(&declared_png(width, height))
         .expect_err("declared oversized pixel count must be rejected");
@@ -72,6 +74,13 @@ fn ordinary_decode_rejects_declared_pixel_count_before_decoding_pixels() {
 #[test]
 fn ordinary_decode_accepts_a_camera_image_within_the_pixel_budget() {
     assert_eq!(validate_dimensions(4551, 3423), Ok(15_578_073));
+}
+
+#[test]
+fn ordinary_decode_accepts_a_high_resolution_camera_image() {
+    // 5638 x 3759 = 21.2 MP: the ordinary path used to reject this outright
+    // while the RAW path accepted the same frame.
+    assert_eq!(validate_dimensions(5638, 3759), Ok(21_193_242));
 }
 
 #[test]

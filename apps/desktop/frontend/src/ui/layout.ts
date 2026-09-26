@@ -5,7 +5,6 @@ export interface DockLayout {
   rightCollapsed: boolean;
   previewSize: number;
   previewCollapsed: boolean;
-  inspectorCollapsed: boolean;
   sourceSize: number;
   sourceCollapsed: boolean;
 }
@@ -28,7 +27,6 @@ export const DEFAULT_DOCK_LAYOUT: DockLayout = {
   rightCollapsed: false,
   previewSize: 420,
   previewCollapsed: false,
-  inspectorCollapsed: false,
   sourceSize: 168,
   sourceCollapsed: false,
 };
@@ -49,7 +47,6 @@ export function normalizeDockLayout(value: unknown): DockLayout {
     rightCollapsed: source.rightCollapsed === true,
     previewSize: clampNumber('previewSize', source.previewSize, DEFAULT_DOCK_LAYOUT.previewSize),
     previewCollapsed: source.previewCollapsed === true,
-    inspectorCollapsed: source.inspectorCollapsed === true,
     sourceSize: clampNumber('sourceSize', source.sourceSize, DEFAULT_DOCK_LAYOUT.sourceSize),
     sourceCollapsed: source.sourceCollapsed === true,
   };

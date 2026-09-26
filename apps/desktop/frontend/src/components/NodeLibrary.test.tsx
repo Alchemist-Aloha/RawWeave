@@ -82,6 +82,43 @@ describe('NodeLibrary', () => {
     host.remove();
   });
 
+  it('groups nodes by category as a collapsible tree', async () => {
+    const upscale: NodeDescriptor = {
+      typeId: 'ai.upscale', name: 'AI Upscale', version: 1,
+      inputs: [], outputs: [], parameters: [],
+    };
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<NodeLibrary descriptors={[...descriptors, upscale]} onAdd={vi.fn()} />));
+
+    const groups = [...host.querySelectorAll<HTMLDetailsElement>('details.node-library__group')];
+    expect(groups.map((group) => group.querySelector('summary')?.textContent)).toEqual(['Core2', 'AI1']);
+    expect(groups.every((group) => group.open)).toBe(true);
+    // The category heading is the node's own identity in the tree.
+    expect(groups[0].querySelectorAll('.node-library__item')).toHaveLength(2);
+
+    // Collapsing a branch keeps its nodes out of the way without a search.
+    await act(async () => {
+      groups[0].open = false;
+      groups[0].dispatchEvent(new Event('toggle'));
+    });
+    expect(host.querySelectorAll<HTMLDetailsElement>('details.node-library__group')[0].open).toBe(false);
+
+    // Filtering must still surface a match inside a collapsed branch.
+    const search = host.querySelector<HTMLInputElement>('input[type="search"]');
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(search, 'Exposure');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(host.querySelectorAll<HTMLDetailsElement>('details.node-library__group')[0].open).toBe(true);
+    expect(host.textContent).toContain('Exposure');
+    expect(host.textContent).not.toContain('AI Upscale');
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
   it('lets users turn off the compatible-only context filter', async () => {
     const host = document.createElement('div');
     document.body.append(host);

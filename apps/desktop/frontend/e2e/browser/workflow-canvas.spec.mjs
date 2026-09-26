@@ -121,7 +121,6 @@ describe('workflow canvas layout', () => {
     expect(await canvasWidth()).toBeGreaterThan(initialCanvas);
 
     await $('[aria-label="Collapse preview panel"]').click();
-    await $('[aria-label="Collapse inspector panel"]').click();
     await $('[aria-label="Collapse source panel"]').click();
     await expect($('.viewer-section')).toHaveElementClass(expect.stringContaining('viewer-section--collapsed'));
 
@@ -145,10 +144,8 @@ describe('workflow canvas layout', () => {
 
     await $('[aria-label="Expand Nodes panel"]').click();
     await $('[aria-label="Expand preview panel"]').click();
-    await $('[aria-label="Expand inspector panel"]').click();
     await $('[aria-label="Expand source panel"]').click();
     await expect($('.panel--library')).toBeDisplayed();
-    await expect($('.panel--inspector')).toBeDisplayed();
     await expect($('.viewer-section')).not.toHaveElementClass(expect.stringContaining('viewer-section--collapsed'));
   });
 

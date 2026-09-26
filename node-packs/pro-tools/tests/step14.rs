@@ -85,6 +85,38 @@ fn professional_pack_exposes_representative_detail_optical_color_creative_and_an
 }
 
 #[test]
+fn distortion_evaluates_a_high_resolution_camera_frame_in_one_pass() {
+    // 5638 x 3759 = 21.2 MP, the frame from the reported failure. The pack used
+    // to reject anything above 16 MP, and reported it as "parameter 'dimensions'
+    // is missing or has the wrong type", pointing at a parameter the node does
+    // not have instead of at the pack's own pixel budget.
+    let width = 5638_u32;
+    let height = 3759_u32;
+    let source = Image::from_pixels_with_origin(
+        rawweave_image::Dimensions::new(width, height),
+        (0, 0),
+        vec![[0.25, 0.5, 0.75, 1.0]; width as usize * height as usize],
+        rawweave_image::PixelFormat::default(),
+        rawweave_image::ColorMetadata::default(),
+    )
+    .unwrap();
+
+    let node = registry().instantiate("pro.distortion").unwrap();
+    let result = node
+        .evaluate(
+            &input(source),
+            &Parameters::new(),
+            &EvaluationContext::default(),
+        )
+        .expect("a 21 megapixel frame must evaluate");
+    let Value::Image(actual) = &result.outputs["image"] else {
+        panic!("distortion must emit an image");
+    };
+    assert_eq!(actual.global_region(), Region::new(0, 0, width, height));
+    assert_eq!(actual.pixels().len(), width as usize * height as usize);
+}
+
+#[test]
 fn channel_mixer_applies_a_bounded_matrix_and_preserves_global_origin() {
     let node = registry().instantiate("pro.channel-mixer").unwrap();
     let parameters = [

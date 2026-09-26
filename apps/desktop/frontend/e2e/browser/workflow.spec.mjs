@@ -44,8 +44,22 @@ async function addNode(name) {
 }
 
 async function selectedNode(name) {
-  await nodeElement(name).click();
-  await expect($('aside.panel--inspector h2')).toHaveText(name);
+  const element = await nodeElement(name);
+  await element.click();
+  await expect(element).toHaveElementClass(expect.stringContaining('graph-node--selected'));
+}
+
+/** Parameters live on the node card inside a collapsed <details>. Expanding
+ * grows the card past the canvas, so re-fit the view before touching the fields. */
+async function openNodeDetails(name) {
+  const details = await nodeElement(name).$('details.graph-node__details');
+  const summary = await details.$('summary');
+  await summary.waitForClickable();
+  if (!(await details.getProperty('open'))) await summary.click();
+  await browser.waitUntil(async () => details.getProperty('open'), {
+    timeoutMsg: `the ${name} node details did not open`,
+  });
+  await $('button[aria-label="Fit View"]').click();
 }
 
 describe('workflow editing in browser mode', () => {
@@ -58,8 +72,13 @@ describe('workflow editing in browser mode', () => {
   it('edits a parameter and exposes it as a workflow parameter', async () => {
     await addNode('Exposure');
     await selectedNode('Exposure');
+    await openNodeDetails('Exposure');
     const value = await $('.parameter input[type="number"]');
-    await value.setValue('1.5');
+    // Type key by key: `setValue` clears through WebDriver's clear command,
+    // which React's value tracker never sees. See `setNodeSearch`.
+    await value.click();
+    await value.clearValue();
+    for (const char of '1.5') await value.addValue(char);
     await expect(value).toHaveValue('1.5');
 
     await $('button[aria-label="Expose Exposure port"]').click();
@@ -71,10 +90,11 @@ describe('workflow editing in browser mode', () => {
     await expect($('.parameter input[type="number"]')).toHaveValue('1.5');
   });
 
-  it('exposes and hides node input and output ports in the inspector', async () => {
+  it('exposes and hides node input and output ports on the node card', async () => {
     await addNode('Exposure');
     await selectedNode('Exposure');
-    const rows = await $$('section[aria-label="Workflow ports"] .port-row');
+    await openNodeDetails('Exposure');
+    const rows = await nodeElement('Exposure').$$('section[aria-label="Workflow ports"] .port-row');
     expect(rows.length).toBe(3);
     await expect(rows[0]).toHaveText(expect.stringContaining('In Image'));
     await expect(rows[1]).toHaveText(expect.stringContaining('In Exposure'));
@@ -91,6 +111,66 @@ describe('workflow editing in browser mode', () => {
     await expect(outputToggle).toHaveText('Hide');
   });
 
+  it('keeps a dragged node visible for the whole gesture', async () => {
+    await addNode('Exposure');
+    await selectedNode('Exposure');
+    // React Flow hides a node (`visibility: hidden`) while it has no measured
+    // size. Rebuilding the flow node on every drag step used to drop that size,
+    // so the node blinked out for most of the drag.
+    await browser.execute(() => {
+      window.__hiddenSamples = 0;
+      window.__hiddenTimer = setInterval(() => {
+        const wrapper = document.querySelector('[aria-label="Exposure node"]')?.closest('.react-flow__node');
+        if (wrapper && getComputedStyle(wrapper).visibility !== 'visible') window.__hiddenSamples += 1;
+      }, 8);
+    });
+    const node = await nodeElement('Exposure');
+    const box = await node.getLocation();
+    const size = await node.getSize();
+    const start = { x: Math.round(box.x + size.width / 2), y: Math.round(box.y + 12) };
+    const actions = [{ type: 'pointerMove', duration: 0, x: start.x, y: start.y, origin: 'viewport' }, { type: 'pointerDown', button: 0 }];
+    for (let step = 1; step <= 40; step += 1) {
+      actions.push({ type: 'pointerMove', duration: 20, x: start.x + step * 6, y: start.y + step * 4, origin: 'viewport' });
+    }
+    actions.push({ type: 'pointerUp', button: 0 });
+    await browser.performActions([{ type: 'pointer', id: 'mouse', parameters: { pointerType: 'mouse' }, actions }]);
+    await browser.pause(200);
+
+    const hidden = await browser.execute(() => {
+      clearInterval(window.__hiddenTimer);
+      return window.__hiddenSamples;
+    });
+    expect(hidden).toBe(0);
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 nodes'));
+  });
+
+  it('deletes from the node card on a clean click, not on a drag', async () => {
+    await addNode('Exposure');
+    await selectedNode('Exposure');
+    const remove = await $('[aria-label="Delete Exposure"]');
+    await expect(remove).toBeDisplayed();
+
+    // The button sits in the title row, which is the node's drag handle. A drag
+    // that starts on it must neither move nor delete the node.
+    const box = await remove.getLocation();
+    const size = await remove.getSize();
+    const start = { x: Math.round(box.x + size.width / 2), y: Math.round(box.y + size.height / 2) };
+    const actions = [{ type: 'pointerMove', duration: 0, x: start.x, y: start.y, origin: 'viewport' }, { type: 'pointerDown', button: 0 }];
+    for (let step = 1; step <= 8; step += 1) {
+      actions.push({ type: 'pointerMove', duration: 30, x: start.x + step * 12, y: start.y + step * 9, origin: 'viewport' });
+    }
+    actions.push({ type: 'pointerUp', button: 0 });
+    await browser.performActions([{ type: 'pointer', id: 'mouse', parameters: { pointerType: 'mouse' }, actions }]);
+    await browser.pause(200);
+    await expect($('[aria-label="Exposure node"]')).toExist();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 nodes'));
+
+    // A press that stays put deletes it.
+    await remove.click();
+    await expect($('[aria-label="Exposure node"]')).not.toExist();
+    await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 nodes'));
+  });
+
   it('connects two nodes by dragging between handles', async () => {
     await addNode('Image Input');
     await addNode('Exposure');
@@ -105,6 +185,10 @@ describe('workflow editing in browser mode', () => {
       .up()
       .perform();
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 links'));
+    // Edges are cubic bezier curves, not elbow routing.
+    const path = await browser.execute(() => document.querySelector('.react-flow__edge-path')?.getAttribute('d') ?? '');
+    expect(path).toMatch(/C/);
+    expect(path).not.toMatch(/L/);
   });
 
   it('refuses a connection whose data types do not match', async () => {
@@ -267,6 +351,7 @@ describe('workflow editing in browser mode', () => {
     await inputs[2].addValue(remote);
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 nodes'));
     await selectedNode('Exposure');
+    await openNodeDetails('Exposure');
     await expect($('.parameter input[type="number"]')).toHaveValue('2');
   });
 

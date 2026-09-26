@@ -11,9 +11,16 @@ pub const MAX_ORDINARY_ENCODED_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum width or height accepted by the shared decoder.
 pub const MAX_ORDINARY_IMAGE_EDGE: u32 = 16_384;
 /// Maximum number of decoded ordinary-image pixels.
-pub const MAX_ORDINARY_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+///
+/// Deliberately the same budget the RAW decoder and the image-set aggregate use:
+/// a 60-megapixel camera file has to load on either input path, and a lower cap
+/// here would only mean the ordinary JPEG of the same frame is rejected.
+pub const MAX_ORDINARY_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 /// Maximum allocation reserved for the final RGBA32F image buffer.
-pub const MAX_ORDINARY_RGBA32F_BYTES: usize = 256 * 1024 * 1024;
+///
+/// Kept as one pixel budget's worth of RGBA32F (`MAX_ORDINARY_IMAGE_PIXELS` x 16
+/// bytes); the pixel cap above is what actually bounds the allocation.
+pub const MAX_ORDINARY_RGBA32F_BYTES: usize = 1024 * 1024 * 1024;
 
 const RGBA32F_BYTES_PER_PIXEL: usize = size_of::<[f32; 4]>();
 

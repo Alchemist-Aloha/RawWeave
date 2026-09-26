@@ -35,7 +35,6 @@ describe('frontend surfaces in browser mode', () => {
   it('shows the graph editor and viewer', async () => {
     await expect($('main.app-shell--build')).toBeDisplayed();
     await expect($('aside.panel--library')).toBeDisplayed();
-    await expect($('aside.panel--inspector')).toBeDisplayed();
     await expect($('nav[aria-label="Workflow breadcrumbs"]')).toBeDisplayed();
     await expect($('section[aria-label="Image viewers"]')).toBeDisplayed();
     await clickViewerAction('Wipe');
@@ -71,7 +70,7 @@ describe('frontend surfaces in browser mode', () => {
     await $('.node-library__item').click();
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('1 nodes'));
     await $('[aria-label="Exposure node"]').click();
-    await expect($('aside.panel--inspector')).toHaveText(expect.stringContaining('Exposure'));
+    await expect($('[aria-label="Exposure node"]')).toHaveElementClass(expect.stringContaining('graph-node--selected'));
     await clickTopbarAction('Undo');
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('0 nodes'));
     await clickTopbarAction('Redo');

@@ -9,7 +9,11 @@ use rawweave_node_api::{
 
 mod imageset;
 
-const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+/// Pixel budget for the region one node allocates in a single pass.
+///
+/// The same ceiling the source decoders and the image-set aggregate use, so a
+/// high-resolution frame that opens can also pass through every node.
+const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_BLUR_RADIUS: u32 = 64;
 const MAX_MASK_RADIUS: u32 = 64;
 
@@ -888,8 +892,16 @@ impl NodeInstance for Resize {
         let target_pixels = u64::from(width)
             .checked_mul(u64::from(height))
             .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
-        if width == 0 || height == 0 || target_pixels > MAX_IMAGE_PIXELS {
-            return Err(NodeError::InvalidParameter("dimensions".to_owned()));
+        if width == 0 {
+            return Err(NodeError::InvalidParameter("width".to_owned()));
+        }
+        if height == 0 {
+            return Err(NodeError::InvalidParameter("height".to_owned()));
+        }
+        if target_pixels > MAX_IMAGE_PIXELS {
+            return Err(NodeError::Message(format!(
+                "target {width}x{height} holds {target_pixels} pixels, exceeding the {MAX_IMAGE_PIXELS}-pixel node budget"
+            )));
         }
         let target = Dimensions::new(width, height);
         let region = requested_region(Region::new(0, 0, target.width, target.height), context);
@@ -1126,7 +1138,9 @@ fn spatial_bounds(
         .checked_mul(u64::from(height))
         .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
     if pixels > MAX_IMAGE_PIXELS {
-        return Err(NodeError::InvalidParameter("dimensions".to_owned()));
+        return Err(NodeError::Message(format!(
+            "declared bounds {width}x{height} hold {pixels} pixels, exceeding the {MAX_IMAGE_PIXELS}-pixel node budget"
+        )));
     }
     let origin_x = integer_parameter_alias(parameters, &["origin_x"], 0)?;
     let origin_y = integer_parameter_alias(parameters, &["origin_y"], 0)?;

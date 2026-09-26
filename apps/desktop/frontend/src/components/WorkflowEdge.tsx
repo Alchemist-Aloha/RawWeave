@@ -1,7 +1,7 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getSmoothStepPath,
+  getBezierPath,
   type Edge,
   type EdgeProps,
 } from '@xyflow/react';
@@ -36,14 +36,13 @@ export function WorkflowEdge({
   data,
   markerEnd,
 }: EdgeProps<WorkflowFlowEdge>) {
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const [path, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
     sourcePosition,
     targetX,
     targetY,
     targetPosition,
-    borderRadius: 14,
   });
   const color = dataTypeColor(data?.dataType);
   const visible = Boolean(selected) || Boolean(data?.actionsVisible);

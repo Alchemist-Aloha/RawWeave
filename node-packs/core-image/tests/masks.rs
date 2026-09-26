@@ -53,6 +53,34 @@ fn mask_pack_registers_all_spatial_nodes_and_local_exposure() {
 }
 
 #[test]
+fn gradient_bounds_fail_with_the_pixel_budget_not_a_missing_dimensions_parameter() {
+    // Declared bounds of 10^12 pixels cannot be honoured, and the error has to
+    // say that. It used to read "parameter 'dimensions' is missing or has the
+    // wrong type", which sent the reader after a parameter that the node does
+    // not even declare.
+    let node = registry().instantiate("core.mask-linear-gradient").unwrap();
+    let parameters = [
+        ("width".to_owned(), 1_000_000_i64.into()),
+        ("height".to_owned(), 1_000_000_i64.into()),
+    ]
+    .into_iter()
+    .collect::<Parameters>();
+
+    let error = node
+        .evaluate(&Inputs::new(), &parameters, &EvaluationContext::default())
+        .expect_err("bounds above the pixel budget must be rejected");
+    let message = error.to_string();
+    assert!(
+        message.contains("node budget"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        !message.contains("parameter"),
+        "misleading message: {message}"
+    );
+}
+
+#[test]
 fn gradients_and_mask_algebra_are_global_origin_aware() {
     let source = Image::from_pixels_with_origin(
         Dimensions::new(4, 2),

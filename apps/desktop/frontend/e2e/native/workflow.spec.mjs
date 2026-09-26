@@ -57,8 +57,22 @@ async function addNode(name) {
 }
 
 async function selectedNode(name) {
-  await $(`[aria-label="${name} node"]`).click();
-  await expect($('aside.panel--inspector h2')).toHaveText(name);
+  const element = await $(`[aria-label="${name} node"]`);
+  await element.click();
+  await expect(element).toHaveElementClass(expect.stringContaining('graph-node--selected'));
+}
+
+/** Parameters live on the node card inside a collapsed <details>. Expanding
+ * grows the card past the canvas, so re-fit the view before touching the fields. */
+async function openNodeDetails(name) {
+  const details = await $(`[aria-label="${name} node"]`).$('details.graph-node__details');
+  const summary = await details.$('summary');
+  await summary.waitForClickable();
+  if (!(await details.getProperty('open'))) await summary.click();
+  await browser.waitUntil(async () => details.getProperty('open'), {
+    timeoutMsg: `the ${name} node details did not open`,
+  });
+  await $('button[aria-label="Fit View"]').click();
 }
 
 describe('workflow backend in the real Tauri app', () => {
@@ -102,10 +116,19 @@ describe('workflow backend in the real Tauri app', () => {
     expect((await graph()).edges.some((edge) => edge.from_node === 'exposure' && edge.to_node === 'invert')).toBe(false);
   });
 
-  it('persists parameter edits and exposed parameters made through the inspector', async () => {
+  it('persists parameter edits and exposed parameters made from the node card', async () => {
     await selectedNode('Exposure');
+    await openNodeDetails('Exposure');
     const value = await $('.parameter input[type="number"]');
-    await value.setValue('1.5');
+    // WebKitGTK's embedded driver does not deliver key events to the field, so
+    // set the value the way WebDriver does for the search box: through the
+    // native setter plus an input event React can observe.
+    await browser.execute((element, next) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(element, next);
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value, '1.5');
+    await expect(value).toHaveValue('1.5');
     await value.click();
     await expect(value).toHaveValue('1.5');
 
@@ -121,7 +144,9 @@ describe('workflow backend in the real Tauri app', () => {
     await addNode('Resize');
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('5 nodes'));
     await selectedNode('Resize');
-    await $('button[aria-label="Delete Resize"]').click();
+    // Delete-key path; the card's delete button is covered by the preview spec.
+    await browser.execute(() => document.activeElement?.blur?.());
+    await browser.keys(['Delete']);
     await expect($('.canvas-panel__meta')).toHaveText(expect.stringContaining('4 nodes'));
     expect(nodeIds(await graph())).not.toContain('resize');
   });
@@ -163,7 +188,8 @@ describe('workflow backend in the real Tauri app', () => {
 
   it('exposes and hides workflow ports through the backend blueprint', async () => {
     await selectedNode('Invert');
-    const rows = await $$('section[aria-label="Workflow ports"] .port-row');
+    await openNodeDetails('Invert');
+    const rows = await $('[aria-label="Invert node"]').$$('section[aria-label="Workflow ports"] .port-row');
     await expect(rows[0]).toHaveText(expect.stringContaining('In Image'));
     await (await rows[0].$('button')).click();
     await expect(await rows[0].$('button')).toHaveText('Hide');

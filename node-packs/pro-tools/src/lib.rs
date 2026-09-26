@@ -14,7 +14,12 @@ use rawweave_node_api::{
     PortDescriptor, RegistryError, Value,
 };
 
-const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+/// Pixel budget for the region one node evaluates in a single pass.
+///
+/// The same ceiling the source decoders and the image-set aggregate use: a node
+/// that cannot take a high-resolution frame cannot preview the photographs those
+/// paths already accept.
+const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_RADIUS: u32 = 64;
 const MAX_LUT_POINTS: usize = 4096;
 const MAX_LUT_BYTES: usize = 64 * 1024;
@@ -231,7 +236,10 @@ fn checked_pixel_count(region: Region) -> Result<usize, NodeError> {
         .checked_mul(u64::from(region.height))
         .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
     if count > MAX_IMAGE_PIXELS {
-        return Err(NodeError::InvalidParameter("dimensions".to_owned()));
+        return Err(NodeError::Message(format!(
+            "region {}x{} holds {count} pixels, exceeding the {MAX_IMAGE_PIXELS}-pixel node budget",
+            region.width, region.height
+        )));
     }
     usize::try_from(count).map_err(|_| NodeError::InvalidParameter("dimensions".to_owned()))
 }
