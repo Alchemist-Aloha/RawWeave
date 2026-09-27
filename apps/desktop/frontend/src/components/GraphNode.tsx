@@ -1,6 +1,7 @@
 import { createContext, useRef, useContext, useState, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } from '../editor/types';
+import { isRecommendedValue, parameterUX } from '../editor/parameter-ux';
 import { inputDataType } from '../editor/connections';
 import type { CheckpointStatus } from '../checkpoint/types';
 import { dataTypeColor } from '../ui/data-type-colors';
@@ -46,6 +47,7 @@ export interface RawWeaveNodeData extends Record<string, unknown> {
 export type RawWeaveFlowNode = Node<RawWeaveNodeData, 'rawweave'>;
 
 interface ParameterFieldProps {
+  typeId: string;
   parameter: ParameterDescriptor;
   value: ParameterValue;
   onChange: (value: ParameterValue) => void;
@@ -58,43 +60,78 @@ interface ParameterFieldProps {
  * prop, and without the draft React would reset the field mid-typing and drop
  * the rest of what was typed.
  */
-function ParameterField({ parameter, value, onChange, toggle }: ParameterFieldProps) {
+function ParameterField({ typeId, parameter, value, onChange, toggle }: ParameterFieldProps) {
   const [draft, setDraft] = useState<string | null>(null);
+  const ux = parameterUX(typeId, parameter);
+  const modified = !isRecommendedValue(value, parameter.default);
   if (parameter.parameterType === 'Boolean') {
     return (
-      <div className="parameter">
-        <label className="parameter__field parameter__field--checkbox">
-          <span>{parameter.name}</span>
+      <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
+        <label className="parameter__field parameter__field--checkbox parameter__label" data-tooltip={ux.description}>
+          <span>{ux.name}</span>
           <input
+            aria-description={ux.description}
             checked={Boolean(value)}
             onChange={(event) => onChange(event.target.checked)}
             type="checkbox"
           />
         </label>
+        {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onClick={() => onChange(parameter.default)} type="button">Reset</button>}
+        {toggle}
+      </div>
+    );
+  }
+  if (parameter.parameterType === 'String' && ux.options) {
+    const options = ux.options.some((option) => option.value === value)
+      ? ux.options
+      : [...ux.options, { value: String(value), label: `${String(value)} (saved value)` }];
+    return (
+      <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
+        <label className="parameter__field parameter__label" data-tooltip={ux.description}>
+          <span>{ux.name}</span>
+          <select aria-description={ux.description} aria-label={ux.name} onChange={(event) => onChange(event.target.value)} value={String(value)}>
+            {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </label>
+        {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onClick={() => onChange(parameter.default)} type="button">Reset</button>}
         {toggle}
       </div>
     );
   }
   const numeric = parameter.parameterType === 'Float' || parameter.parameterType === 'Integer';
+  const hasSlider = numeric && ux.min != null && ux.max != null && ux.max > ux.min;
+  const factor = ux.factor ?? 1;
+  const outsideRecommended = numeric && ux.recommendedRange && typeof value === 'number'
+    && ((ux.min != null && value < ux.min) || (ux.max != null && value > ux.max));
+  const shownNumber = typeof value === 'number' ? value * factor : value;
+  const displayValue = typeof shownNumber === 'number' && ux.precision != null ? Number(shownNumber.toFixed(ux.precision)) : shownNumber;
   return (
-    <div className="parameter">
-      <label className="parameter__field">
-        <span>{parameter.name}</span>
+    <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
+      <label className="parameter__field parameter__label" data-tooltip={ux.description}>
+        <span>{ux.name}{ux.unit ? ` (${ux.unit})` : ''}</span>
+        <span className="parameter__value-row">
+        {hasSlider && <input aria-description={ux.description} aria-label={`${ux.name} slider`} max={ux.max! * factor} min={ux.min! * factor} onChange={(event) => onChange(Number(event.target.value) / factor)} step={ux.step! * factor} type="range" value={Math.min(ux.max! * factor, Math.max(ux.min! * factor, Number(value) * factor))} />}
         <input
-          max={parameter.max ?? undefined}
-          min={parameter.min ?? undefined}
+          max={parameter.max == null ? undefined : parameter.max * factor}
+          min={parameter.min == null ? undefined : parameter.min * factor}
+          aria-description={ux.description}
+          aria-label={ux.name}
           onBlur={() => setDraft(null)}
           onChange={(event) => {
             const text = event.target.value;
             setDraft(text);
-            const next = numeric ? Number(text) : text;
+            const entered = numeric ? Number(text) : text;
+            const next = numeric && typeof entered === 'number' ? entered / factor : entered;
             if (!numeric || Number.isFinite(next)) onChange(next);
           }}
-          step={parameter.parameterType === 'Float' ? 0.01 : parameter.parameterType === 'Integer' ? 1 : undefined}
+          step={ux.step}
           type={numeric ? 'number' : 'text'}
-          value={draft ?? String(value)}
+          value={draft ?? String(displayValue)}
         />
+        </span>
       </label>
+      {outsideRecommended && <span className="parameter__warning">Outside recommended range</span>}
+      {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onClick={() => onChange(parameter.default)} type="button">Reset</button>}
       {toggle}
     </div>
   );
@@ -237,11 +274,12 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
             </section>
           )}
           <div className="parameter-list">
-            {node.descriptor.parameters.map((parameter) => {
+            {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
               const exposed = (node.exposedParameters ?? []).includes(parameter.id);
               return (
                 <ParameterField
                   key={parameter.id}
+                  typeId={node.typeId}
                   onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)}
                   parameter={parameter}
                   toggle={(
@@ -260,6 +298,18 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
                 />
               );
             })}
+            {node.descriptor.parameters.some((parameter) => parameterUX(node.typeId, parameter).advanced) && (
+              <details className="parameter-advanced">
+                <summary>Advanced</summary>
+                {node.descriptor.parameters.filter((parameter) => parameterUX(node.typeId, parameter).advanced).map((parameter) => {
+                  const exposed = (node.exposedParameters ?? []).includes(parameter.id);
+                  return <ParameterField key={parameter.id} typeId={node.typeId} onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)} parameter={parameter} toggle={<button aria-label={`${exposed ? 'Hide' : 'Expose'} ${parameterUX(node.typeId, parameter).name} port`} aria-pressed={exposed} className={`port-toggle${exposed ? ' port-toggle--active' : ''}`} onClick={() => actions?.onToggleExposed(node.id, parameter.id, !exposed)} title={exposed ? 'Remove parameter port' : 'Expose as an input port'} type="button">⇄</button>} value={node.parameters[parameter.id] ?? parameter.default} />;
+                })}
+              </details>
+            )}
+            {node.descriptor.parameters.length > 0 && node.descriptor.parameters.some((parameter) => !isRecommendedValue(node.parameters[parameter.id] ?? parameter.default, parameter.default)) && (
+              <button className="parameter-reset-all" onClick={() => node.descriptor.parameters.forEach((parameter) => actions?.onParameterChange(node.id, parameter.id, parameter.default))} type="button">Reset parameters</button>
+            )}
             {node.descriptor.parameters.length === 0 && (
               <p className="empty-state empty-state--compact">This node has no parameters.</p>
             )}

@@ -105,6 +105,40 @@ describe('GraphNode parameters', () => {
     container.remove();
   });
 
+  it('shows contextual help, a photographic percentage, and reset behavior', async () => {
+    const aiNode: EditorNode = {
+      ...node,
+      id: 'ai-node',
+      typeId: 'ai.img2img',
+      parameters: { strength: 0.25 },
+      descriptor: {
+        ...node.descriptor,
+        typeId: 'ai.img2img',
+        name: 'AI Image to Image',
+        parameters: [{ id: 'strength', name: 'Strength', parameterType: 'Float', default: 0.75, min: 0, max: 1 }],
+      },
+    };
+    const value = actions();
+    const { container, root } = await renderNode(aiNode, value);
+    const field = container.querySelector<HTMLInputElement>('.parameter input[type="number"]');
+    expect(field?.value).toBe('25');
+    expect(container.querySelector('.parameter__label')?.getAttribute('data-tooltip')).toContain('generated result');
+    expect(container.querySelector<HTMLInputElement>('.parameter input[type="range"]')?.max).toBe('100');
+
+    await act(async () => {
+      if (!field) throw new Error('parameter input missing');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(field, '50');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(value.onParameterChange).toHaveBeenCalledWith('ai-node', 'strength', 0.5);
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Reset Generation Strength"]')?.click());
+    expect(value.onParameterChange).toHaveBeenLastCalledWith('ai-node', 'strength', 0.75);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it('deletes only on a clean press of the delete button, never on a drag', async () => {
     const value = actions();
     const { container, root } = await renderNode(node, value);
