@@ -70,7 +70,6 @@ export interface ViewerPaneState {
   pan: { x: number; y: number };
   maskDisplay: MaskDisplay;
   imageRegion: PreviewRegion | null;
-  imageMip: number;
   imageOrigin: { x: number; y: number };
 }
 

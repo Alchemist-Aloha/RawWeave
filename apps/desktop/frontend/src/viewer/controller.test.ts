@@ -162,7 +162,7 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.progress).toBe(0.25);
   });
 
-  it('renders the full frame once and navigates zoom without another render', () => {
+  it('requests original resolution and keeps zoom changes local', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -173,15 +173,14 @@ describe('viewer controller', () => {
     expect(transport.requests).toHaveLength(1);
     expect(transport.requests[0]).toMatchObject({
       region: { x: 0, y: 0, width: 400, height: 300 },
-      mip: 2,
-      quality: 'draft',
+      mip: 0,
+      quality: 'preview',
     });
 
-    // Zooming transforms the loaded preview; it must not ask for a new render.
     viewer.setZoom('A', 0.5);
     expect(transport.requests).toHaveLength(1);
     expect(viewer.state.panes.A.zoom).toBe(0.5);
-    expect(viewer.state.panes.A.displayScale).toBe(2);
+    expect(viewer.state.panes.A.displayScale).toBe(0.5);
   });
 
   it('pans without starting a render', () => {
@@ -200,7 +199,7 @@ describe('viewer controller', () => {
     expect(transport.requests).toHaveLength(1);
   });
 
-  it('refits the loaded preview when the viewport changes without starting a render', () => {
+  it('refits the full-resolution preview when the viewport changes without rendering', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -211,7 +210,7 @@ describe('viewer controller', () => {
 
     expect(transport.requests).toHaveLength(1);
     expect(viewer.state.panes.A.zoom).toBe(0.5);
-    expect(viewer.state.panes.A.displayScale).toBe(2);
+    expect(viewer.state.panes.A.displayScale).toBe(0.5);
   });
 
   it('renders again only when the graph revision changes', () => {
@@ -223,7 +222,7 @@ describe('viewer controller', () => {
     viewer.setTarget('A', target('output'));
     expect(transport.requests).toHaveLength(1);
 
-    // Pure viewer navigation is not a reason to render.
+    // Pan, zoom, and viewport changes are local; only graph revisions render again.
     viewer.setZoom('A', 2);
     viewer.updatePan('A', { x: 40, y: -15 });
     viewer.setViewport('A', { width: 120, height: 90 });
@@ -233,9 +232,10 @@ describe('viewer controller', () => {
 
     viewer.setRevision(2);
     expect(transport.requests).toHaveLength(2);
+    expect(transport.requests[1].mip).toBe(0);
   });
 
-  it('fits the complete image by requesting the full frame at viewport resolution', () => {
+  it('fits a full-resolution frame into the viewport', () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -244,11 +244,11 @@ describe('viewer controller', () => {
 
     expect(transport.requests[0]).toMatchObject({
       region: { x: 0, y: 0, width: 400, height: 300 },
-      mip: 2,
-      quality: 'draft',
+      mip: 0,
+      quality: 'preview',
     });
     expect(viewer.state.panes.A.zoom).toBe(0.25);
-    expect(viewer.state.panes.A.displayScale).toBe(1);
+    expect(viewer.state.panes.A.displayScale).toBe(0.25);
   });
 
   it('does not clamp a fit below the interactive zoom floor', () => {
@@ -298,7 +298,7 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.zoom).toBeCloseTo(0.1, 6);
   });
 
-  it('compensates the loaded mip in the image display scale when zooming', async () => {
+  it('keeps the full-resolution preview while zooming and does not render again', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 400, height: 300 });
@@ -308,18 +308,18 @@ describe('viewer controller', () => {
     const request = transport.requests[0];
     expect(request).toMatchObject({
       region: { x: 0, y: 0, width: 400, height: 300 },
-      mip: 2,
+      mip: 0,
     });
-    transport.pending.get(request.requestId)!.resolve(result(request, { width: 100, height: 75, fullWidth: 400, fullHeight: 300 }));
+    transport.pending.get(request.requestId)!.resolve(result(request, { width: 400, height: 300, fullWidth: 400, fullHeight: 300 }));
     await Promise.resolve();
 
-    expect(viewer.state.panes.A.width).toBe(100);
-    expect(viewer.state.panes.A.height).toBe(75);
-    expect(viewer.state.panes.A.displayScale).toBe(1);
+    expect(viewer.state.panes.A.width).toBe(400);
+    expect(viewer.state.panes.A.height).toBe(300);
+    expect(viewer.state.panes.A.displayScale).toBe(0.25);
 
     viewer.setZoom('A', 0.5);
     expect(transport.requests).toHaveLength(1);
-    expect(viewer.state.panes.A.displayScale).toBe(2);
+    expect(viewer.state.panes.A.displayScale).toBe(0.5);
   });
 
   it('re-fits and keeps true output dimensions for an intermediate resize', async () => {
@@ -335,10 +335,10 @@ describe('viewer controller', () => {
 
     expect(transport.requests.at(-1)).toMatchObject({
       region: { x: 0, y: 0, width: 800, height: 600 },
-      mip: 3,
+      mip: 0,
     });
     expect(viewer.state.panes.A.zoom).toBe(0.125);
-    expect(viewer.state.panes.A.displayScale).toBe(1);
+    expect(viewer.state.panes.A.displayScale).toBe(0.125);
   });
 
   it('keeps the loaded preview visible across navigation and replaces it on a node setting change', async () => {
@@ -354,7 +354,7 @@ describe('viewer controller', () => {
     const firstUrl = viewer.state.panes.A.imageUrl;
     expect(firstUrl).toBeTruthy();
 
-    // Navigation keeps the same frame on screen and starts no render.
+    // Zoom and pan reuse the full-resolution frame without another render.
     viewer.setZoom('A', 0.5);
     viewer.updatePan('A', { x: 40, y: -20 });
     expect(viewer.state.panes.A.imageUrl).toBe(firstUrl);

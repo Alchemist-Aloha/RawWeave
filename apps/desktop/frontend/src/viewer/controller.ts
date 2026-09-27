@@ -33,7 +33,6 @@ function paneState(): ViewerPaneState {
     pan: { x: 0, y: 0 },
     maskDisplay: 'grayscale',
     imageRegion: null,
-    imageMip: 0,
     imageOrigin: { x: 0, y: 0 },
   };
 }
@@ -43,13 +42,11 @@ function clampZoom(value: number, floor = MIN_ZOOM): number {
 }
 
 const TILE_SIZE = 32;
-const MAX_MIP = 8;
 const DEFAULT_DIMENSIONS: ImageDimensions = { width: 1, height: 1 };
 const DEFAULT_VIEWPORT: ImageDimensions = { width: 1, height: 1 };
 
 interface RequestPlan {
   region: PreviewRegion;
-  mip: number;
   zoom: number;
 }
 
@@ -58,17 +55,14 @@ interface RequestPlan {
  *
  * Fit is deliberately not clamped to the interactive zoom range: a large image
  * in a small panel needs a scale below `MIN_ZOOM`, and clamping it there is what
- * let the "fit" image overflow the panel. `mipForZoom` still caps the render
- * resolution and `displayScale` compensates for whatever mip is loaded.
+ * let the "fit" image overflow the panel. The preview stays full resolution;
+ * display scale controls only how large that original frame appears.
  */
 function fitZoom(dimensions: ImageDimensions, viewport: ImageDimensions): number {
   const fit = Math.min(viewport.width / dimensions.width, viewport.height / dimensions.height);
   return Number.isFinite(fit) && fit > 0 ? fit : 1;
 }
 
-function mipForZoom(zoom: number): number {
-  return Math.min(MAX_MIP, Math.max(0, Math.floor(Math.log2(1 / zoom))));
-}
 
 function sameRegion(first: PreviewRegion, second: PreviewRegion): boolean {
   return (
@@ -171,14 +165,7 @@ export class ViewerController {
     this.startRequest(viewer, target);
   }
 
-  /**
-   * Plans the render for a target/revision change.
-   *
-   * The complete frame is always requested so that viewer navigation (pan,
-   * zoom, viewport resize) is a client-side transform of the loaded preview and
-   * never triggers another render. The mip level is chosen for the current
-   * fit-to-viewport scale, which is the resolution the viewer can actually show.
-   */
+  /** Plan one full-resolution frame; viewer zoom is a client-side transform. */
   private requestPlan(viewer: ViewerId): RequestPlan {
     const pane = this.state.panes[viewer];
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
@@ -187,7 +174,6 @@ export class ViewerController {
     const zoom = pane.zoomMode === 'fit' ? fit : pane.zoom;
     return {
       region: { x: 0, y: 0, width: dimensions.width, height: dimensions.height },
-      mip: mipForZoom(fit),
       zoom,
     };
   }
@@ -211,11 +197,10 @@ export class ViewerController {
     const previous = this.viewports.get(viewer);
     if (previous?.width === next.width && previous.height === next.height) return;
     this.viewports.set(viewer, next);
-    // Resizing only refits the loaded preview; it must not start another render.
-    if (!this.state.panes[viewer].target || this.state.panes[viewer].zoomMode !== 'fit') return;
-    const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
-    const zoom = fitZoom(dimensions, next);
-    this.setPane(viewer, { zoom, displayScale: this.displayScaleFor(viewer, zoom) });
+    const pane = this.state.panes[viewer];
+    if (!pane.target || pane.zoomMode !== 'fit') return;
+    const zoom = fitZoom(this.imageDimensions.get(viewer) ?? this.sourceDimensions, next);
+    this.setPane(viewer, { zoom, displayScale: zoom });
   }
 
   public setRevision(revision: number): void {
@@ -311,18 +296,17 @@ export class ViewerController {
       revision: this.state.currentRevision,
       nodeId: target.nodeId,
       outputPort: target.outputPort,
-      quality: plan.mip > 0 ? 'draft' : 'preview',
+      quality: 'preview',
       region: plan.region,
       tile: { x: Math.floor(plan.region.x / TILE_SIZE), y: Math.floor(plan.region.y / TILE_SIZE) },
-      mip: plan.mip,
+      mip: 0,
       maskDisplay: this.state.panes[viewer].maskDisplay,
     };
     this.active.set(viewer, { request });
     this.setPane(viewer, {
       zoom: plan.zoom,
-      displayScale: plan.zoom * 2 ** plan.mip,
+      displayScale: plan.zoom,
       imageRegion: request.region,
-      imageMip: plan.mip,
       status: 'loading',
       requestId: request.requestId,
       progress: 0,
@@ -353,7 +337,7 @@ export class ViewerController {
         const nextPlan = this.requestPlan(viewer);
         if (
           this.state.panes[viewer].zoomMode === 'fit' &&
-          (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip)
+          !sameRegion(request.region, nextPlan.region)
         ) {
           this.releasePreview(result.url);
           this.startRequest(viewer, target);
@@ -363,6 +347,7 @@ export class ViewerController {
           imageUrl: result.url,
           width: result.width,
           height: result.height,
+          displayScale: nextPlan.zoom,
           status: 'ready',
           progress: 1,
           error: null,
@@ -398,10 +383,6 @@ export class ViewerController {
     });
   }
 
-  private displayScaleFor(viewer: ViewerId, zoom: number): number {
-    return zoom * 2 ** this.state.panes[viewer].imageMip;
-  }
-
   /**
    * The smallest zoom the user may dial in.
    *
@@ -417,16 +398,14 @@ export class ViewerController {
     return Math.min(MIN_ZOOM, fitZoom(dimensions, viewport) / 4);
   }
 
-  /** Zoom changes are applied to the loaded preview; they never start a render. */
+  /** Zoom the loaded full-resolution frame without starting another render. */
   public setZoom(viewer: ViewerId, zoom: number): void {
     const nextZoom = clampZoom(zoom, this.zoomFloor(viewer));
-    if (nextZoom === this.state.panes[viewer].zoom && this.state.panes[viewer].zoomMode === 'custom') {
-      return;
-    }
+    if (nextZoom === this.state.panes[viewer].zoom && this.state.panes[viewer].zoomMode === 'custom') return;
     this.setPane(viewer, {
       zoom: nextZoom,
       zoomMode: 'custom',
-      displayScale: this.displayScaleFor(viewer, nextZoom),
+      displayScale: nextZoom,
     });
   }
 
@@ -442,7 +421,7 @@ export class ViewerController {
       zoom,
       zoomMode: 'fit',
       pan: { x: 0, y: 0 },
-      displayScale: this.displayScaleFor(viewer, zoom),
+      displayScale: zoom,
     });
   }
 
@@ -450,7 +429,7 @@ export class ViewerController {
     this.setPane(viewer, {
       zoom: 1,
       zoomMode: '100%',
-      displayScale: this.displayScaleFor(viewer, 1),
+      displayScale: 1,
     });
   }
 
