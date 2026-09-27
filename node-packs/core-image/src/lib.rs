@@ -1326,6 +1326,12 @@ fn mask_pixel_clamped(mask: &Mask, x: i64, y: i64) -> f32 {
 /// Strokes are separated by `|` and points within a stroke by `;`. A value with
 /// no `|` is a single stroke, so masks painted before multi-stroke support keep
 /// rendering unchanged.
+///
+/// A present `points` value is authoritative even when it is empty: that is the
+/// "no strokes painted" state, and falling back to the single `x`/`y` brush for
+/// it painted a phantom dot at the frame origin - with the node's current brush
+/// size - every time the last stroke was undone. The `x`/`y` fallback is only for
+/// graphs that predate the `points` parameter entirely.
 fn paint_strokes(parameters: &Parameters) -> Result<Vec<Vec<PaintPoint>>, NodeError> {
     if let Some(ParameterValue::String(serialized)) = parameters.get("points") {
         let mut strokes = Vec::new();
@@ -1347,9 +1353,7 @@ fn paint_strokes(parameters: &Parameters) -> Result<Vec<Vec<PaintPoint>>, NodeEr
                 strokes.push(points);
             }
         }
-        if !strokes.is_empty() {
-            return Ok(strokes);
-        }
+        return Ok(strokes);
     }
     Ok(vec![vec![PaintPoint::new(
         float_parameter_alias(parameters, &["x", "center_x"], 0.0)?,

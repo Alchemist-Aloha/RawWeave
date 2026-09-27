@@ -1103,6 +1103,10 @@ export default function App() {
       const editingText = typeof target?.closest === 'function'
         && target.closest('input, textarea, select, [contenteditable="true"]');
       if (editingText && !event.ctrlKey && !event.metaKey) return;
+      // A modal surface owns the keyboard while it is open, or Delete would
+      // remove the node the user is composing into a subgraph behind the form.
+      // The help dialog keeps its own toggle so `?` can still close it.
+      if ((showShortcuts || showSubgraphForm) && action !== 'toggle-shortcuts') return;
       if (action === 'focus-node-search') {
         event.preventDefault();
         nodeSearchInput.current?.focus();
@@ -1279,6 +1283,11 @@ export default function App() {
       </section>
 
       <BrowserQueue
+        // Only the browse workspace shows the tiles these shortcuts mark, and a
+        // modal form or dialog owns the keyboard while it is open. Elsewhere the
+        // panel is hidden, so rating keys there would flag an unseen file (and
+        // write an XMP sidecar) from the graph.
+        active={workspaceMode === 'browse' && !showShortcuts && !showSubgraphForm}
         mode={workspaceMode === 'batch' ? 'batch' : 'browse'}
         activeImageSetId={activeImageSetId}
         batchPlatform={batchPlatform}

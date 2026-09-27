@@ -94,7 +94,13 @@ export class QueueController {
   }
 
   public setTestSet(paths: string[], included: boolean): void {
-    this.setState({ items: setTestMembership(this.state.items, paths, included) });
+    const items = setTestMembership(this.state.items, paths, included);
+    // The Quick-compare cursor must stay inside the test set: leaving it on an
+    // item that just left the set made the header name a non-member and turned
+    // "previous" into a no-op.
+    const current = this.state.testSetCurrentPath;
+    const stillInSet = current !== null && items.some((item) => item.path === current && item.testSet);
+    this.setState({ items, testSetCurrentPath: stillInSet ? current : null });
   }
 
   public moveTest(direction: 'previous' | 'next'): QueueItem | null {

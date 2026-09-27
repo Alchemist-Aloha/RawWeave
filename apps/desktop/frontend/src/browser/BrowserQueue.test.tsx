@@ -25,12 +25,13 @@ function entry(path: string, overrides: Partial<BrowserEntry> = {}): BrowserEntr
   };
 }
 
-function fakePlatform(): BrowserPlatform {
+function fakePlatform(extra: BrowserEntry[] = []): BrowserPlatform {
   const files = new Map<string, BrowserEntry>([
     ['/photos', entry('/photos', { name: 'photos', kind: 'directory', thumbnail: null })],
     ['/photos/Trips', entry('/photos/Trips', { name: 'Trips', kind: 'directory', thumbnail: null })],
     ['/photos/one.jpg', entry('/photos/one.jpg')],
     ['/photos/two.jpg', entry('/photos/two.jpg', { rating: 4, flag: 'pick' })],
+    ...extra.map((item) => [item.path, item] as const),
   ]);
   let saved: BrowserSession | null = null;
   const parent = (path: string) => path.split('/').slice(0, -1).join('/') || '/';
@@ -212,6 +213,73 @@ describe('BrowserQueue', () => {
       view.querySelector<HTMLInputElement>('[aria-label="Include one.jpg in test set"]')?.click();
     });
     expect(view.textContent).toContain('Test Set · 1');
+  });
+
+  it('ignores the rating and flag shortcuts while the surface is not showing', async () => {
+    // The browse surface stays mounted (CSS-hidden) behind the graph editor, so
+    // its window-level shortcuts used to flag and rate the previewed file - and
+    // write an XMP sidecar - while the user was editing the workflow.
+    const view = await renderQueue(fakePlatform(), { active: false });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Select one.jpg"]')?.click();
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '5', bubbles: true }));
+    });
+
+    expect(view.querySelector('[aria-label="Mark one.jpg as reject"]')?.getAttribute('aria-pressed')).toBe('false');
+    expect(view.querySelector('[aria-label="Set 5 stars for one.jpg"]')?.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('distinguishes an empty folder from a filter that hides every file', async () => {
+    const view = await renderQueue(fakePlatform());
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+
+    await act(async () => {
+      const filter = view.querySelector<HTMLInputElement>('[aria-label="Filter files"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(filter, 'nothing-matches');
+      filter!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    expect(view.textContent).toContain('No files match the current filter');
+    expect(view.textContent).not.toContain('Folder is empty');
+  });
+
+  it('does not claim a shutter speed when the metadata has none', async () => {
+    const described = entry('/photos/described.jpg', {
+      metadata: {
+        width: 100,
+        height: 50,
+        camera: 'Test Camera',
+        lens: null,
+        iso: 100,
+        aperture: null,
+        shutter: null,
+        focalLength: null,
+        captureTime: null,
+        orientation: null,
+        exif: {},
+      },
+    });
+    const view = await renderQueue(fakePlatform([described]));
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Choose folder"]')?.click();
+    });
+    await act(async () => {
+      view.querySelector<HTMLButtonElement>('[aria-label="Select described.jpg"]')?.click();
+    });
+
+    const exposure = view.querySelector<HTMLDListElement>('.browser-preview dl')?.textContent ?? '';
+    expect(exposure).not.toContain('—s');
+    expect(exposure).toContain('—');
   });
 
   it('creates an ImageSet from browser selections and opens it in the workflow', async () => {

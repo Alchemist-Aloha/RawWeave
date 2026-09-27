@@ -44,6 +44,33 @@ describe('queue controller', () => {
     expect(controller.state.selectedPaths).toEqual([]);
   });
 
+  it('drops the test-set cursor when its item leaves the test set', () => {
+    // The header names the cursor item and "previous" walks back from it, so a
+    // cursor left on a non-member named the wrong photo and made that button a
+    // silent no-op.
+    const controller = new QueueController();
+    controller.addSelection([entry('one.jpg'), entry('two.jpg')], null);
+    controller.setTestSet(['/photos/one.jpg'], true);
+    controller.moveTest('next');
+    expect(controller.state.testSetCurrentPath).toBe('/photos/one.jpg');
+
+    controller.setTestSet(['/photos/one.jpg'], false);
+
+    expect(controller.state.testSetCurrentPath).toBeNull();
+    expect(controller.state.items.every((item) => !item.testSet)).toBe(true);
+  });
+
+  it('keeps the test-set cursor while its item is still included', () => {
+    const controller = new QueueController();
+    controller.addSelection([entry('one.jpg'), entry('two.jpg')], null);
+    controller.setTestSet(['/photos/one.jpg', '/photos/two.jpg'], true);
+    controller.moveTest('next');
+
+    controller.setTestSet(['/photos/two.jpg'], false);
+
+    expect(controller.state.testSetCurrentPath).toBe('/photos/one.jpg');
+  });
+
   it('copies per-image overrides without cloning the workflow binding', () => {
     const controller = new QueueController();
     controller.addSelection([entry('one.jpg'), entry('two.jpg')], {

@@ -16,6 +16,13 @@ import { Icon } from '../ui/Icon';
 
 export interface BrowserQueueProps {
   mode?: 'browse' | 'batch';
+  /**
+   * Whether the browse surface is the one on screen. The component stays mounted
+   * (and hidden) in the other workspace modes, so its window-level key handlers
+   * have to be inert there: rating and flag shortcuts otherwise write marks to
+   * disk while the user is editing the graph.
+   */
+  active?: boolean;
   platform?: BrowserPlatform;
   initialFolder?: string;
   workflowBinding?: WorkflowBinding | null;
@@ -83,6 +90,7 @@ export function createBrowserSession(
 
 export function BrowserQueue({
   mode = 'browse',
+  active = true,
   platform: providedPlatform,
   initialFolder = '',
   workflowBinding = null,
@@ -305,6 +313,7 @@ export function BrowserQueue({
   }, [browserController, queueController, run]);
 
   useEffect(() => {
+    if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (typeof target?.closest === 'function' && target.closest('input, textarea, select, [contenteditable="true"]')) return;
@@ -326,7 +335,7 @@ export function BrowserQueue({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [browser.entries, browser.selectedPaths, mark, previewPath, queue.currentPath]);
+  }, [active, browser.entries, browser.selectedPaths, mark, previewPath, queue.currentPath]);
 
   const toggleTestSet = useCallback((path: string, included: boolean) => {
     queueController.setTestSet([path], included);
@@ -469,7 +478,8 @@ export function BrowserQueue({
           {browser.error && <p className="browser-error">{browser.error}</p>}
           <div className={`browser-grid browser-grid--${browserLayout} browser-grid--${browser.view.thumbnailSize}`}>
             {!browser.currentFolder && <p className="empty-state">Choose a folder to browse photographs.</p>}
-            {browser.currentFolder && visibleEntries.length === 0 && <p className="empty-state">Folder is empty</p>}
+            {browser.currentFolder && browser.entries.length === 0 && <p className="empty-state">Folder is empty</p>}
+            {browser.currentFolder && browser.entries.length > 0 && visibleEntries.length === 0 && <p className="empty-state">No files match the current filter</p>}
             {visibleEntries.map((entry) => {
               const selected = browser.selectedPaths.includes(entry.path);
               return (
@@ -742,7 +752,7 @@ export function BrowserQueue({
                 <div><dt>Camera</dt><dd>{metadataValue(previewEntry.metadata.camera)}</dd></div>
                 <div><dt>Lens</dt><dd>{metadataValue(previewEntry.metadata.lens)}</dd></div>
                 <div><dt>ISO</dt><dd>{metadataValue(previewEntry.metadata.iso)}</dd></div>
-                <div><dt>Exposure</dt><dd>{metadataValue(previewEntry.metadata.shutter)}s</dd></div>
+                <div><dt>Exposure</dt><dd>{previewEntry.metadata.shutter === null || previewEntry.metadata.shutter === undefined ? '—' : `${previewEntry.metadata.shutter}s`}</dd></div>
               </dl>
             )}
           </div>
@@ -750,6 +760,7 @@ export function BrowserQueue({
       </div>
       <BatchPanel
         controller={batchController}
+        currentPath={queue.currentPath}
         onOpenItem={(item) => {
           void run(async () => {
             openPreview(item.sourcePath);

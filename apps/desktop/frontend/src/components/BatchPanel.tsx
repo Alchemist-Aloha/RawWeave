@@ -25,6 +25,12 @@ import type { QueueItem } from '../browser/types';
 export interface BatchPanelProps {
   controller: BatchController;
   queueItems: QueueItem[];
+  /**
+   * The queue item the browse surface shows as current. The "Current preview
+   * item" subset means this one; without it the panel has no way to tell the
+   * current item from the first one in the queue.
+   */
+  currentPath?: string | null;
   workflow?: BatchWorkflowContext | null;
   onOpenItem?: (item: BatchItem) => void | Promise<void>;
 }
@@ -75,18 +81,23 @@ function isExplicitCheckpointPolicy(policy: BatchCheckpointPolicy): boolean {
   return ['use_committed', 'generate_if_missing', 'regenerate_all', 'fail_if_stale'].includes(policy);
 }
 
-export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: BatchPanelProps) {
+export function BatchPanel({ controller, queueItems, currentPath = null, workflow, onOpenItem }: BatchPanelProps) {
   const [, setRevision] = useState(0);
   const [subset, setSubset] = useState<BatchSubset>(() => defaultSubset(queueItems));
   const [selectedIds, setSelectedIds] = useState<string[]>(() => queueItems.map((item) => item.id));
-  const [currentPreviewId, setCurrentPreviewId] = useState(queueItems[0]?.id ?? '');
+  /** Set only when the user picks a different preview item than the current one. */
+  const [previewItemOverride, setPreviewItemOverride] = useState<string | null>(null);
   const [firstN, setFirstN] = useState(1);
 
   useEffect(() => controller.subscribe(() => setRevision((revision) => revision + 1)), [controller]);
   useEffect(() => {
     setSelectedIds((ids) => ids.filter((id) => queueItems.some((item) => item.id === id)));
-    if (!queueItems.some((item) => item.id === currentPreviewId)) setCurrentPreviewId(queueItems[0]?.id ?? '');
-  }, [currentPreviewId, queueItems]);
+  }, [queueItems]);
+
+  const currentQueueItemId = queueItems.find((item) => item.path === currentPath)?.id ?? queueItems[0]?.id ?? '';
+  const currentPreviewId = previewItemOverride && queueItems.some((item) => item.id === previewItemOverride)
+    ? previewItemOverride
+    : currentQueueItemId;
 
   const recipe = controller.recipe;
   const job = controller.state.job;
@@ -263,7 +274,7 @@ export function BatchPanel({ controller, queueItems, workflow, onOpenItem }: Bat
             </select>
           </label>
           {subset.kind === 'current-preview' && <label>Preview item
-            <select aria-label="Dry run current preview" value={currentPreviewId} onChange={(event) => { setCurrentPreviewId(event.target.value); setSubset({ kind: 'current-preview', itemId: event.target.value }); }}>
+            <select aria-label="Dry run current preview" value={currentPreviewId} onChange={(event) => { setPreviewItemOverride(event.target.value); setSubset({ kind: 'current-preview', itemId: event.target.value }); }}>
               {queueItems.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>}

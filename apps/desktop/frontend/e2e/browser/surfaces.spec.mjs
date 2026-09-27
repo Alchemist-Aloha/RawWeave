@@ -43,9 +43,72 @@ describe('frontend surfaces in browser mode', () => {
     await expect($('[aria-label="blink comparison"]')).toBeDisplayed();
     await clickViewerAction('Difference');
     await expect($('[aria-label="difference comparison"]')).toBeDisplayed();
-    await clickViewerAction('Compare A and B');
+    // Selecting A/B from another comparison surface must reveal the two viewers...
     await clickViewerAction('Compare A and B');
     await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
+    // ...and only toggle the surface off when it is already the one showing.
+    await clickViewerAction('Compare A and B');
+    await expect($('[aria-label="Viewer B"]')).not.toExist();
+    await clickViewerAction('Compare A and B');
+    await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
+  });
+
+  it('selects the A/B comparison instead of hiding it when leaving another mode', async () => {
+    await clickViewerAction('Compare A and B');
+    await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
+    await clickViewerAction('Wipe');
+    await expect($('[aria-label="wipe comparison"]')).toBeDisplayed();
+
+    // The A/B button used to toggle the side-by-side surface using the stale
+    // "compare" flag, so leaving wipe rendered a single viewer with no
+    // comparison mode active at all.
+    await clickViewerAction('Compare A and B');
+    await expect($('.viewer-grid--side-by-side')).toBeDisplayed();
+    await expect($('[aria-label="Viewer B"]')).toBeDisplayed();
+    await expect($('[aria-label="Compare A and B"]')).toHaveAttribute('aria-pressed', 'true');
+
+    await clickViewerAction('Compare A and B');
+    await expect($('[aria-label="Viewer B"]')).not.toExist();
+  });
+
+  it('lays every comparison surface over the whole preview panel', async () => {
+    // Wipe, blink and difference draw their two viewers as absolutely positioned
+    // layers. An equal-specificity cascade left the surface pane as a grid whose
+    // single child took the `auto` track, so the stage had no height to be 100%
+    // of and every comparison mode rendered an empty panel.
+    for (const [label, surface] of [['Wipe', 'wipe comparison'], ['Blink', 'blink comparison'], ['Difference', 'difference comparison']]) {
+      await clickViewerAction(label);
+      await expect($(`[aria-label="${surface}"]`)).toBeDisplayed();
+      const geometry = await browser.execute(() => {
+        const comparison = document.querySelector('.viewer-comparison')?.getBoundingClientRect();
+        const stage = document.querySelector('.viewer-pane--comparison-a .viewer-pane__stage')?.getBoundingClientRect();
+        const pane = document.querySelector('.viewer-pane--comparison-a');
+        return {
+          comparison: comparison?.height ?? 0,
+          stage: stage?.height ?? 0,
+          display: pane ? getComputedStyle(pane).display : '',
+        };
+      });
+      expect(geometry.stage).toBeGreaterThan(geometry.comparison - 60);
+      expect(geometry.display).toBe('block');
+    }
+  });
+
+  it('zooms on wheel with a cancellable event', async () => {
+    const before = await $('.viewer-pane__zoom').getText();
+    const result = await browser.execute(() => {
+      const stage = document.querySelector('.viewer-pane__stage');
+      const event = new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true });
+      stage.dispatchEvent(event);
+      return { defaultPrevented: event.defaultPrevented };
+    });
+
+    // React delegates `wheel` with a passive listener, so `preventDefault` in an
+    // `onWheel` handler did nothing but log "Unable to preventDefault inside
+    // passive event listener invocation" on every scroll, while the webview's
+    // own gesture went ahead. A native non-passive listener can cancel it.
+    expect(result.defaultPrevented).toBe(true);
+    await expect($('.viewer-pane__zoom')).not.toHaveText(before);
   });
 
   it('only offers the side-by-side layout toggle where it applies', async () => {

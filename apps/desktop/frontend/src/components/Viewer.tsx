@@ -277,6 +277,22 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
     };
   }, [controller, viewer]);
 
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    // React delegates `wheel` with a passive listener, so `preventDefault` in an
+    // `onWheel` handler is ignored and logs "Unable to preventDefault inside
+    // passive event listener invocation" on every scroll. Zooming keeps the
+    // webview's own scroll/pinch gesture out of the way, which needs a native
+    // non-passive listener.
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      controller.adjustZoom(viewer, event.deltaY < 0 ? 1 : -1);
+    };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => stage.removeEventListener('wheel', onWheel);
+  }, [controller, viewer]);
+
   return (
     <article aria-label={`Viewer ${viewer}`} className={`viewer-pane${surface ? ' viewer-pane--surface' : ''}${className ? ` ${className}` : ''}`} style={style}>
       {!surface && (
@@ -325,10 +341,6 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
         onPointerCancel={(event) => {
           endPan();
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-        }}
-        onWheel={(event) => {
-          event.preventDefault();
-          controller.adjustZoom(viewer, event.deltaY < 0 ? 1 : -1);
         }}
       >
         {imageUrl ? (
@@ -593,8 +605,14 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
                 className={active ? 'is-active' : ''}
                 key={id}
                 onClick={() => {
+                  // "Compare A and B" selects the side-by-side comparison. It only
+                  // toggles that surface off when it is already the one being shown:
+                  // arriving from wipe/blink/difference must reveal the two viewers
+                  // instead of hiding them, which left the button's label, its
+                  // pressed state, and the visible surface disagreeing.
+                  const alreadyShowing = showCompare && controller.state.comparison === id;
                   controller.setComparison(id);
-                  setShowCompare(id === 'side-by-side' ? !showCompare : true);
+                  setShowCompare(id === 'side-by-side' ? !alreadyShowing : true);
                 }}
                 title={label}
                 type="button"

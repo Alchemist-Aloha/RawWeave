@@ -98,6 +98,33 @@ describe('BatchPanel', () => {
     expect(host.querySelector('[aria-label="Open failed item"]')).not.toBeNull();
   });
 
+  it('dry-runs the item the queue shows as current, not the first entry', async () => {
+    const controller = new BatchController(createMemoryBatchPlatform(), () => 'job-current-item');
+    const second: QueueItem = { ...item, id: '/photos/two.jpg', path: '/photos/two.jpg', name: 'two.jpg', order: 1 };
+    await controller.createFromQueue([item, second], context, { kind: 'all' }, defaultBatchRecipe('/exports'));
+    host = document.createElement('div');
+    document.body.append(host);
+    await act(async () => {
+      root = createRoot(host!);
+      root.render(<BatchPanel controller={controller} currentPath={second.path} queueItems={[item, second]} workflow={context} />);
+    });
+
+    await act(async () => {
+      const subset = host!.querySelector<HTMLSelectElement>('[aria-label="Dry run subset"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+      setter.call(subset, 'current-preview');
+      subset!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    // The dropdown opens on the item the queue has highlighted.
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Dry run current preview"]')?.value).toBe(second.id);
+
+    await act(async () => {
+      host!.querySelector<HTMLButtonElement>('[aria-label="Run dry run"]')?.click();
+    });
+
+    expect(controller.state.dryRun?.itemIds).toEqual([second.id]);
+  });
+
   it('requires an explicit checkpoint policy before creating a manual-checkpoint batch', async () => {
     const controller = new BatchController(createMemoryBatchPlatform(), () => 'manual-policy-ui');
     host = document.createElement('div');

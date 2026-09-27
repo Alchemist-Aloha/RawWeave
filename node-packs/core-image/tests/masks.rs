@@ -230,3 +230,62 @@ fn painted_mask_renders_every_serialized_stroke() {
     );
     assert_eq!(mask.pixel_global(10, 0).unwrap(), 0.0);
 }
+
+#[test]
+fn painted_mask_with_no_strokes_is_empty() {
+    // Undoing the last stroke serializes `points` as an empty string. That is the
+    // "nothing painted" state, and a large brush must not turn it into a blob at
+    // the frame origin.
+    let context = EvaluationContext::default();
+    let parameters = [
+        ("width".to_owned(), 20_i64.into()),
+        ("height".to_owned(), 20_i64.into()),
+        ("size".to_owned(), 8.0_f32.into()),
+        ("hardness".to_owned(), 1.0_f32.into()),
+        ("opacity".to_owned(), 1.0_f32.into()),
+        ("mode".to_owned(), "add".to_owned().into()),
+        ("points".to_owned(), String::new().into()),
+    ]
+    .into_iter()
+    .collect::<Parameters>();
+    let node = registry().instantiate("core.mask-painted").unwrap();
+    let mask = mask_output(
+        node.evaluate(&Inputs::new(), &parameters, &context)
+            .expect("an empty stroke list should evaluate"),
+    );
+    for y in 0..20 {
+        for x in 0..20 {
+            assert_eq!(
+                mask.pixel_global(x, y).unwrap(),
+                0.0,
+                "empty stroke list painted a pixel at ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn painted_mask_without_a_points_parameter_keeps_the_legacy_brush_position() {
+    // Graphs written before the multi-stroke `points` parameter must still paint
+    // their single brush at x/y.
+    let context = EvaluationContext::default();
+    let parameters = [
+        ("width".to_owned(), 20_i64.into()),
+        ("height".to_owned(), 1_i64.into()),
+        ("size".to_owned(), 3.0_f32.into()),
+        ("hardness".to_owned(), 1.0_f32.into()),
+        ("opacity".to_owned(), 1.0_f32.into()),
+        ("mode".to_owned(), "add".to_owned().into()),
+        ("x".to_owned(), 12.0_f32.into()),
+        ("y".to_owned(), 0.0_f32.into()),
+    ]
+    .into_iter()
+    .collect::<Parameters>();
+    let node = registry().instantiate("core.mask-painted").unwrap();
+    let mask = mask_output(
+        node.evaluate(&Inputs::new(), &parameters, &context)
+            .expect("legacy x/y parameters should evaluate"),
+    );
+    assert!(mask.pixel_global(12, 0).unwrap() > 0.0);
+    assert_eq!(mask.pixel_global(2, 0).unwrap(), 0.0);
+}

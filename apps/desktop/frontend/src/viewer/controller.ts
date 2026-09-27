@@ -38,8 +38,8 @@ function paneState(): ViewerPaneState {
   };
 }
 
-function clampZoom(value: number): number {
-  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+function clampZoom(value: number, floor = MIN_ZOOM): number {
+  return Math.min(MAX_ZOOM, Math.max(floor, value));
 }
 
 const TILE_SIZE = 32;
@@ -402,9 +402,24 @@ export class ViewerController {
     return zoom * 2 ** this.state.panes[viewer].imageMip;
   }
 
+  /**
+   * The smallest zoom the user may dial in.
+   *
+   * Fit is deliberately allowed below `MIN_ZOOM` (a large frame in a small panel
+   * needs it), so an absolute floor above the current scale turned "zoom out"
+   * into a zoom in - and then, because the clamped value equalled the current
+   * zoom, froze the control for good. The floor follows the fit scale instead;
+   * `MIN_ZOOM` stays the floor for frames that fit comfortably.
+   */
+  private zoomFloor(viewer: ViewerId): number {
+    const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
+    const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
+    return Math.min(MIN_ZOOM, fitZoom(dimensions, viewport) / 4);
+  }
+
   /** Zoom changes are applied to the loaded preview; they never start a render. */
   public setZoom(viewer: ViewerId, zoom: number): void {
-    const nextZoom = clampZoom(zoom);
+    const nextZoom = clampZoom(zoom, this.zoomFloor(viewer));
     if (nextZoom === this.state.panes[viewer].zoom && this.state.panes[viewer].zoomMode === 'custom') {
       return;
     }

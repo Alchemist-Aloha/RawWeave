@@ -371,3 +371,162 @@ describe('real Tauri batch processing', () => {
     await expect($('.canvas-panel')).toBeDisplayed();
   });
 });
+
+/**
+ * The comparison surfaces (wipe, blink, difference) draw the two viewers on top
+ * of each other, so they own a different layout from the side-by-side grid. A
+ * cascade of equal-specificity rules used to leave those panes as `display: grid`
+ * whose single child landed in the `auto` track: the stage had no height to be
+ * 100% of, and every comparison mode rendered an empty panel with a 1x1 image.
+ */
+describe('real Tauri viewer comparisons', () => {
+  async function clickViewerAction(label) {
+    const button = await $(`.viewer-section button[aria-label="${label}"]`);
+    await button.waitForDisplayed();
+    await button.click();
+  }
+
+  /** Mean luminance of an element region, measured from a real screenshot. */
+  async function meanLuminance(selector) {
+    const rect = await browser.execute((query) => {
+      const element = document.querySelector(query);
+      if (!element) return null;
+      const bounds = element.getBoundingClientRect();
+      return { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height };
+    }, selector);
+    if (!rect || rect.width < 4 || rect.height < 4) return null;
+    const shot = await browser.takeScreenshot();
+    return browser.execute(async (base64, region) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await image.decode();
+      const scaleX = image.width / window.innerWidth;
+      const scaleY = image.height / window.innerHeight;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(region.width * scaleX));
+      canvas.height = Math.max(1, Math.floor(region.height * scaleY));
+      const context = canvas.getContext('2d');
+      context.drawImage(
+        image,
+        Math.floor(region.x * scaleX), Math.floor(region.y * scaleY), canvas.width, canvas.height,
+        0, 0, canvas.width, canvas.height,
+      );
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let total = 0;
+      for (let index = 0; index < data.length; index += 4) total += (data[index] + data[index + 1] + data[index + 2]) / 3;
+      return Math.round(total / (data.length / 4));
+    }, shot, rect);
+  }
+
+  /** Ratio of the image to its stage; the preview is fit, so this reaches 1. */
+  async function fillRatio(viewerClass) {
+    return browser.execute((cls) => {
+      const image = document.querySelector(`${cls} .viewer-pane__image`)?.getBoundingClientRect();
+      const stage = document.querySelector(`${cls} .viewer-pane__stage`)?.getBoundingClientRect();
+      if (!image || !stage || stage.width < 1 || stage.height < 1) return 0;
+      return Math.max(image.width / stage.width, image.height / stage.height);
+    }, viewerClass);
+  }
+
+  /**
+   * Waits for a comparison pane to settle.
+   *
+   * Switching from the side-by-side grid to a comparison surface changes the
+   * pane's viewport, and the re-fit lands a frame or two later (ResizeObserver ->
+   * requestAnimationFrame). Waiting for the value the layout promises beats
+   * guessing with a sleep.
+   */
+  async function waitForFilled(viewerClass, label) {
+    await browser.waitUntil(async () => (await fillRatio(viewerClass)) > 0.9, {
+      timeout: 10_000,
+      timeoutMsg: `${label}: the comparison image never filled its surface`,
+    });
+  }
+
+  async function previewReady() {
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 30_000 });
+    await browser.waitUntil(async () => browser.execute(() =>
+      document.querySelector('.viewer-pane__image')?.complete === true), {
+      timeout: 30_000,
+      timeoutMsg: 'the restored preview did not finish loading',
+    });
+    await browser.pause(800);
+  }
+
+  it('fills the comparison surfaces with a real image', async () => {
+    await previewReady();
+    await clickViewerAction('Compare A and B');
+    await expect($('select[aria-label="Viewer B target"]')).toBeDisplayed();
+
+    // Point both viewers at the same output so the difference surface has a
+    // known answer: an image differenced with itself is black.
+    const targetValue = await browser.execute(() => document.querySelector('select[aria-label="Viewer A target"]')?.value ?? '');
+    await browser.execute((value) => {
+      const select = document.querySelector('select[aria-label="Viewer B target"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, value);
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }, targetValue);
+    await browser.waitUntil(async () => browser.execute(() =>
+      [...document.querySelectorAll('.viewer-pane__image')].length === 2
+      && [...document.querySelectorAll('.viewer-pane__image')].every((image) => image.complete && image.naturalWidth > 0)), {
+      timeout: 30_000,
+      timeoutMsg: 'both comparison previews never loaded',
+    });
+    await browser.pause(600);
+
+    // Earlier specs (the pan spec in particular) leave the viewer panned, zoomed
+    // and showing the clipping overlay. The difference of two misaligned images
+    // is not black, so reset the navigation before measuring.
+    const clipping = await $('input[aria-label="Clipping"]');
+    if (await clipping.isSelected()) await clipping.click();
+    for (const button of await $$('.viewer-grid .viewer-pane__controls button')) {
+      if ((await button.getText()).trim() === 'Fit') await button.click();
+    }
+    await browser.pause(400);
+
+    for (const mode of ['Wipe', 'Blink', 'Difference']) {
+      await clickViewerAction(mode);
+      await waitForFilled('.viewer-pane--comparison-a', mode);
+
+      const geometry = await browser.execute(() => {
+        const image = document.querySelector('.viewer-pane--comparison-a .viewer-pane__image')?.getBoundingClientRect();
+        const stage = document.querySelector('.viewer-pane--comparison-a .viewer-pane__stage')?.getBoundingClientRect();
+        return {
+          image: image ? { width: image.width, height: image.height } : null,
+          stage: stage ? { width: stage.width, height: stage.height } : null,
+        };
+      });
+      // Before the fix the stage was 0 tall and the image a 1x1 dot.
+      expect(geometry.stage?.height).toBeGreaterThan(100);
+      expect(geometry.image?.width).toBeGreaterThan(20);
+      expect(geometry.image?.height).toBeGreaterThan(20);
+    }
+
+    // Wipe at 100% shows Viewer B alone; the difference against an identical
+    // Viewer A must go black. A blend confined to Viewer B's own stacking
+    // context never reaches A and renders B unchanged instead.
+    await clickViewerAction('Wipe');
+    await browser.execute(() => {
+      const slider = document.querySelector('input[aria-label="Wipe position"]');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(slider, '100');
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await browser.pause(500);
+    await waitForFilled('.viewer-pane--comparison-b', 'Wipe');
+    const shown = await meanLuminance('.viewer-pane--comparison-b .viewer-pane__image');
+
+    await clickViewerAction('Difference');
+    await waitForFilled('.viewer-pane--comparison-b', 'Difference');
+    const difference = await meanLuminance('.viewer-pane--comparison-b .viewer-pane__image');
+
+    expect(shown).toBeGreaterThan(10);
+    expect(difference).toBeLessThan(shown * 0.25);
+
+    // Leave the workspace where the next spec file expects it.
+    await clickViewerAction('Compare A and B');
+    await selectMode('Build / Preview');
+    await expect($('.canvas-panel')).toBeDisplayed();
+  });
+});

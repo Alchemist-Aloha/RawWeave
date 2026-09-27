@@ -264,6 +264,40 @@ describe('viewer controller', () => {
     expect(viewer.state.panes.A.zoom).toBeCloseTo(150 / 4000, 6);
   });
 
+  it('shrinks the image when zooming out from a fit below the interactive floor', () => {
+    const viewer = new ViewerController(new FakeTransport());
+    viewer.setSourceDimensions({ width: 6000, height: 4000 });
+    viewer.setViewport('A', { width: 300, height: 150 });
+    viewer.setTarget('A', target('output'));
+    const fit = viewer.state.panes.A.zoom;
+    expect(fit).toBeCloseTo(150 / 4000, 6);
+
+    viewer.adjustZoom('A', -1);
+    const firstStep = viewer.state.panes.A.zoom;
+    expect(firstStep).toBeLessThan(fit);
+
+    // The clamp used to snap back to MIN_ZOOM, which equalled the current zoom,
+    // so "zoom out" both enlarged the frame and left the control dead.
+    viewer.adjustZoom('A', -1);
+    const secondStep = viewer.state.panes.A.zoom;
+    expect(secondStep).toBeLessThan(firstStep);
+
+    // Zooming back in past the floor still works.
+    viewer.adjustZoom('A', 1);
+    expect(viewer.state.panes.A.zoom).toBeGreaterThan(secondStep);
+    expect(viewer.state.panes.A.zoomMode).toBe('custom');
+  });
+
+  it('keeps the interactive zoom floor for frames that fit comfortably', () => {
+    const viewer = new ViewerController(new FakeTransport());
+    viewer.setSourceDimensions({ width: 400, height: 300 });
+    viewer.setViewport('A', { width: 400, height: 300 });
+    viewer.setTarget('A', target('output'));
+
+    for (let step = 0; step < 40; step += 1) viewer.adjustZoom('A', -1);
+    expect(viewer.state.panes.A.zoom).toBeCloseTo(0.1, 6);
+  });
+
   it('compensates the loaded mip in the image display scale when zooming', async () => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);

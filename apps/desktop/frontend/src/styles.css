@@ -805,11 +805,21 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-comparison__selectors { position: relative; z-index: 4; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border-bottom: 1px solid var(--room-line); padding: 7px 9px; background: rgba(26, 22, 17, .94); }
 .viewer-comparison__selectors label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; color: var(--room-ink-dim); font-family: var(--face-data); font-size: 9px; text-transform: uppercase; }
 .viewer-comparison__selectors .viewer-pane__target { min-width: 0; max-width: none; }
-.viewer-pane--surface { position: absolute; inset: 39px 0 0; display: block; border: 0; border-radius: 0; background: transparent; }
+/* Two classes, not one: `.viewer-pane` is declared later in this sheet, so at equal
+   specificity its `display: grid` with an `auto minmax(0, 1fr) auto` track list won
+   and the surface pane's single child (it has no header and no controls) landed in
+   the `auto` track. The stage then had no height to be 100% of, so wipe, blink and
+   difference rendered an empty panel. This also restores the transparent,
+   border-less surface the comparison surfaces are built on. */
+.viewer-pane.viewer-pane--surface { position: absolute; inset: 39px 0 0; display: block; border: 0; border-radius: 0; background: transparent; }
 .viewer-pane--surface .viewer-pane__stage { width: 100%; height: 100%; min-height: 0; background: transparent; }
 .viewer-pane--comparison-a { z-index: 1; }
 .viewer-pane--comparison-b { z-index: 2; }
-.viewer-comparison--difference .viewer-pane--comparison-b .viewer-pane__image { mix-blend-mode: difference; }
+/* The pane is the blended group, not the image inside it. A `z-index` gives the
+   pane its own stacking context, so a blend on the image would be limited to the
+   pane's own (transparent) content and Viewer B would render unchanged instead of
+   the difference against Viewer A. */
+.viewer-comparison--difference .viewer-pane--comparison-b { mix-blend-mode: difference; }
 .viewer-comparison__wipe { position: absolute; right: 10px; bottom: 10px; left: 10px; z-index: 5; display: flex; border: 1px solid rgba(68, 58, 45, .9); border-radius: 3px; padding: 5px 7px; background: rgba(20, 17, 13, .88); }
 .viewer-comparison__wipe input { width: 100%; accent-color: var(--wax-white); }
 .viewer-comparison__status { position: absolute; right: 10px; bottom: 10px; z-index: 5; border: 1px solid rgba(68, 58, 45, .9); border-radius: 3px; padding: 4px 6px; color: var(--room-ink-body); background: rgba(20, 17, 13, .88); font-family: var(--face-data); font-size: 10px; }
