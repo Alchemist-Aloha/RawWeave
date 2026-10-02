@@ -83,6 +83,13 @@ Evidence/measurement: new native layout regression failed before implementation 
 Verification: 196 frontend tests pass; frontend/native build passes. Two native portrait tests, three editing tests and four selected native preview tests pass. Native tests cover actual image display, keyboard divider resizing, library/preview/source collapse and unchanged workflow hash. Native portrait screenshot inspected. Browser round-trip/overflow assertions executed through Chrome DevTools; standard browser runner still lacks its matching driver.
 Boundary: native window size requests were constrained/ignored by the current desktop/WebKitGTK environment (1440×900 request returned an unchanged 960×1023 outer window). Native coverage therefore verifies portrait behavior; orientation round-trip is verified in Chrome, not claimed as a native resize round-trip. Existing full-suite failures remain unresolved.
 
+## Iteration 8 — minimum workflow width
+
+Problem: the workflow could shrink to 363px in the narrow portrait case, squeezing its controls and overview.
+Change: a 480px minimum in both landscape flex and portrait grid layouts. Excess dock width scrolls inside the workbench rather than clipping panels or scrolling the document. No controller, graph or processing changes.
+Evidence: regression assertion failed at 363px before the fix; Chrome measurements now show 480px at 600×1000 and 960×640. Controls and overview remain within the workflow and do not overlap. Scrolling makes the complete 480px workflow reachable at a 600px viewport; screenshot inspected.
+Verification: 196 unit tests, native build and five focused native layout/editing checks pass. Extended browser regression covers minimum width and widget bounds; its equivalent assertions were executed through Chrome DevTools because the standard browser driver remains unavailable. `git diff --check` passes. Existing graph-node accent-stripe detector warning remains outside scope.
+
 ## Performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.

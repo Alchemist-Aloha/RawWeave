@@ -220,8 +220,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .app-shell--browse .browser-queue, .app-shell--batch .browser-queue { display: grid; flex: 1 1 auto; min-height: 0; }
 .app-shell--integrations .integration-strip { display: grid; flex: 1 1 auto; min-height: 0; }
 .app-shell--browse .workbench, .app-shell--batch .workbench, .app-shell--integrations .workbench { display: none; }
-.workbench { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; background: var(--room-line); }
-.workbench > .canvas-panel { flex: 1 1 auto; min-width: 0; }
+.workbench { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; background: var(--room-line); }
+.workbench > .canvas-panel { flex: 1 1 auto; min-width: 480px; }
 .dock { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--room-panel); }
 .dock--left { flex: 0 0 auto; border-right: 1px solid var(--room-line); }
 .dock--right { flex: 0 0 auto; width: var(--dock-width, 360px); border-left: 1px solid var(--room-line); }
@@ -1002,7 +1002,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   html, body, #root { height: 100%; min-height: 0; }
   body { overflow: hidden; }
   .app-shell { height: 100%; min-height: 0; overflow: hidden; }
-  .workbench { display: grid; grid-template-columns: auto 5px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--right-divider-height) minmax(0, min(var(--right-dock-height), 60%)); }
+  .workbench { display: grid; grid-template-columns: auto 5px minmax(480px, 1fr); grid-template-rows: minmax(0, 1fr) var(--right-divider-height) minmax(0, min(var(--right-dock-height), 60%)); }
   .workbench > .dock--left { grid-column: 1; grid-row: 1 / -1; }
   .workbench > .dock--left + .splitter { grid-column: 2; grid-row: 1 / -1; }
   .workbench > .canvas-panel { grid-column: 3; grid-row: 1; }
