@@ -1171,6 +1171,15 @@ impl Graph {
             backend_identity_hash(&execution_context),
         );
         let current_revision = self.graph_revision();
+        if generation_target != Some(node_id)
+            && let Ok(cache) = self.render_cache.lock()
+            && let Some(cached) =
+                cache.get_value_current::<EvaluatedNode>(&cache_key, current_revision)
+        {
+            state.visiting.remove(node_id);
+            state.memo.insert(memo_key, cached.as_ref().clone());
+            return Ok(cached.as_ref().clone());
+        }
         let cached = (generation_target != Some(node_id))
             .then(|| {
                 self.render_cache.lock().ok().map(|cache| {
@@ -1193,7 +1202,7 @@ impl Graph {
             return Ok(evaluated);
         }
         let diagnostics = std::env::var_os("RAWWEAVE_NODE_DIAGNOSTICS").is_some();
-        let evaluation_started = std::time::Instant::now();
+        let evaluation_started = diagnostics.then(std::time::Instant::now);
         let result = if node.type_id == "core.imageset-map"
             && inputs
                 .values()
@@ -1219,14 +1228,22 @@ impl Graph {
                     source,
                 })?
         };
-        let evaluation_elapsed = evaluation_started.elapsed();
-        let hashing_started = std::time::Instant::now();
+        let evaluation_elapsed = evaluation_started.map(|started| started.elapsed());
+        let hashing_started = diagnostics.then(std::time::Instant::now);
         let evaluated = EvaluatedNode {
             output_hash: hash_node_result(&result),
             result,
         };
-        if diagnostics {
-            eprintln!("graph {:?} {:?}: evaluate {:.2} ms, output hash {:.2} ms", node.id.as_str(), node.type_id, evaluation_elapsed.as_secs_f64() * 1000.0, hashing_started.elapsed().as_secs_f64() * 1000.0);
+        if let (Some(evaluation_elapsed), Some(hashing_started)) =
+            (evaluation_elapsed, hashing_started)
+        {
+            eprintln!(
+                "graph {:?} {:?}: evaluate {:.2} ms, output hash {:.2} ms",
+                node.id.as_str(),
+                node.type_id,
+                evaluation_elapsed.as_secs_f64() * 1000.0,
+                hashing_started.elapsed().as_secs_f64() * 1000.0
+            );
         }
         if generation_target == Some(node_id) {
             state.visiting.remove(node_id);
@@ -1243,6 +1260,16 @@ impl Graph {
             if let Ok(mut cache) = self.render_cache.lock() {
                 cache.insert_mask_if_current(cache_key, render, current_revision);
             }
+        } else if let Some(bytes) = raw_result_payload_bytes(&evaluated.result)
+            && let Ok(mut cache) = self.render_cache.lock()
+        {
+            cache.insert_value_if_current(
+                cache_key,
+                Arc::new(evaluated.clone()),
+                bytes,
+                current_revision,
+                current_revision,
+            );
         }
         state.visiting.remove(node_id);
         state.memo.insert(memo_key, evaluated.clone());
@@ -1834,6 +1861,60 @@ fn hash_parameters(parameters: &rawweave_node_api::Parameters) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// RAW/color outputs cannot be reconstructed from the image-only cache. Keep
+/// their complete result and fingerprint under the same payload/FIFO budget.
+/// Shared buffers are counted per output (conservative), not by pointer identity.
+fn raw_result_payload_bytes(result: &NodeResult) -> Option<usize> {
+    if !result.outputs.values().any(|value| {
+        matches!(
+            value,
+            Value::RawFrame(_) | Value::Mosaic(_) | Value::SceneLinearRGB(_) | Value::DisplayRGB(_)
+        )
+    }) {
+        return None;
+    }
+    fn metadata_bytes(value: &impl serde::Serialize) -> Option<usize> {
+        // Account conservatively for owned strings/collections, without ever
+        // serializing pixel or sample arrays.
+        Some(serde_json::to_vec(value).ok()?.len().saturating_mul(32))
+    }
+    result.outputs.iter().try_fold(
+        std::mem::size_of::<EvaluatedNode>(),
+        |bytes, (port, value)| {
+            let payload = match value {
+                Value::RawFrame(frame) => std::mem::size_of_val(frame.mosaic().samples())
+                    .saturating_add(metadata_bytes(&(
+                        frame.camera(),
+                        frame.profile(),
+                        frame.lens_profile(),
+                        frame.exif(),
+                    ))?)
+                    .saturating_add(frame.embedded_preview_bytes().map_or(0, <[u8]>::len)),
+                Value::Mosaic(mosaic) => std::mem::size_of_val(mosaic.samples()),
+                Value::SceneLinearRGB(scene) => std::mem::size_of_val(scene.pixels())
+                    .saturating_add(metadata_bytes(&scene.working_space())?),
+                Value::DisplayRGB(display) => std::mem::size_of_val(display.pixels())
+                    .saturating_add(metadata_bytes(&display.working_space())?),
+                Value::CameraMetadata(metadata) => metadata_bytes(metadata)?,
+                Value::ExifMetadata(metadata) => metadata_bytes(metadata)?,
+                Value::CameraProfile(profile) => metadata_bytes(profile)?,
+                Value::LensProfile(profile) => metadata_bytes(profile)?,
+                Value::EmbeddedPreview(preview) => preview
+                    .bytes()
+                    .map_or(0, <[u8]>::len)
+                    .saturating_add(preview.mime_type().map_or(0, str::len)),
+                _ => return None,
+            };
+            Some(
+                bytes
+                    .saturating_add(port.len())
+                    .saturating_add(std::mem::size_of::<Value>())
+                    .saturating_add(payload),
+            )
+        },
+    )
 }
 
 fn hash_node_result(result: &NodeResult) -> u64 {

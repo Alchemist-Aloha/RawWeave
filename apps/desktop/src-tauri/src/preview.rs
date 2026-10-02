@@ -1639,6 +1639,16 @@ mod tests {
     #[ignore]
     fn large_image_loading_benchmark() {
         use std::time::Instant;
+        let mip = std::env::var("RAWWEAVE_BENCHMARK_MIP")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<u8>()
+                    .expect("benchmark mip must be an integer")
+            })
+            .unwrap_or(2);
+        assert!(mip <= 6, "benchmark mip must be 0..=6");
+        eprintln!("BENCH full-frame requests at mip {mip}");
         let directory = tempfile::tempdir().unwrap();
         let jpeg = directory.path().join("synthetic-24mp.jpg");
         image::RgbImage::from_fn(6000, 4000, |x, y| {
@@ -1706,7 +1716,7 @@ mod tests {
                         height: metadata.height,
                     },
                     tile: PreviewTileRequest { x: 0, y: 0 },
-                    mip: 2,
+                    mip,
                     mask_display: MaskDisplayRequest::Grayscale,
                 };
                 let start = Instant::now();
@@ -1822,17 +1832,21 @@ mod tests {
             mask_display: MaskDisplayRequest::Grayscale,
         };
 
-        render_preview(
-            &PreviewManager::default(),
-            &editor,
-            &current_editor,
-            Some(crate::SourceAsset::Raw {
-                bytes: Arc::new(vec![1]),
-                path: Path::new("test.dng").to_path_buf(),
-            }),
-            request,
-        )
-        .unwrap();
+        for iteration in 0..2 {
+            let mut repeated = request.clone();
+            repeated.request_id = format!("count-raw-decodes-{iteration}");
+            render_preview(
+                &PreviewManager::default(),
+                &editor,
+                &current_editor,
+                Some(crate::SourceAsset::Raw {
+                    bytes: Arc::new(vec![1]),
+                    path: Path::new("test.dng").to_path_buf(),
+                }),
+                repeated,
+            )
+            .unwrap();
+        }
 
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }

@@ -34,6 +34,15 @@ const css = readFileSync(resolve(process.cwd(), fileName), 'utf8');
  *  neither is parsed as a declaration. */
 const sheet = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@import[^;]*;/g, '');
 
+describe('image geometry overlays', () => {
+  it('keeps the crop guide transparent without removing its outline', () => {
+    const rule = sheet.match(/\.geometry-overlay__guide rect[^{}]*\{([^}]+)\}/)?.[1];
+    expect(rule).toBeDefined();
+    expect(rule).toMatch(/fill:\s*none\s*;/);
+    expect(rule).toMatch(/stroke:\s*var\(--wax-white\)/);
+  });
+});
+
 describe('styles.css legibility floor', () => {
   it('never renders type below the mono-chrome floor', () => {
     const offenders = [...sheet.matchAll(/font-size:\s*([\d.]+)px/g)]

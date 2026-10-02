@@ -60,6 +60,8 @@ export interface ViewerPaneState {
   imageUrl: string | null;
   width: number | null;
   height: number | null;
+  fullWidth: number | null;
+  fullHeight: number | null;
   status: 'idle' | 'loading' | 'ready' | 'error' | 'cancelled';
   progress: number;
   error: string | null;

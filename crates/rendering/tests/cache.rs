@@ -338,6 +338,230 @@ fn stale_render_results_are_rejected_and_revision_invalidation_is_targeted() {
 }
 
 #[test]
+fn opaque_values_are_typed_revision_checked_and_share_arc_storage() {
+    assert_eq!(
+        MemoryRenderCache::default().max_bytes(),
+        2 * 1024 * 1024 * 1024
+    );
+    let mut cache = MemoryRenderCache::new(8);
+    let key = key(PreviewQuality::Preview);
+    let revision = GraphRevision::new(1);
+    let value = Arc::new(vec![1_u8, 2, 3]);
+
+    assert!(cache.insert_value_if_current(key.clone(), Arc::clone(&value), 3, revision, revision));
+    let cached = cache.get_value_current::<Vec<u8>>(&key, revision).unwrap();
+    assert!(Arc::ptr_eq(&value, &cached));
+    assert_eq!(*cached, vec![1, 2, 3]);
+    assert!(cache.get_value_current::<String>(&key, revision).is_none());
+    assert!(
+        cache
+            .get_value_current::<Vec<u8>>(&key, GraphRevision::new(2))
+            .is_none()
+    );
+    assert!(Arc::ptr_eq(
+        &value,
+        &cache
+            .clone()
+            .get_value_current::<Vec<u8>>(&key, revision)
+            .unwrap()
+    ));
+    assert!(!cache.insert_value_if_current(
+        key.clone(),
+        Arc::new(99_u8),
+        1,
+        revision,
+        GraphRevision::new(2)
+    ));
+    assert!(Arc::ptr_eq(
+        &value,
+        &cache.get_value_current::<Vec<u8>>(&key, revision).unwrap()
+    ));
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.byte_len(), 3);
+    assert!(!cache.is_empty());
+}
+
+#[test]
+fn opaque_values_share_fifo_count_limits_with_images_masks_and_members() {
+    let mut cache = MemoryRenderCache::new(3);
+    let key = key(PreviewQuality::Preview);
+    let revision = GraphRevision::new(1);
+    let member = MemberCacheKey::new("map", 1, "frame", 1, 1);
+    cache.insert_value_if_current(key.clone(), Arc::new(1_u8), 1, revision, revision);
+    cache.insert(key.clone(), RenderResult::new(image(), revision));
+    cache.insert_mask(
+        key.clone(),
+        rawweave_rendering::MaskRenderResult::new(mask(), revision),
+    );
+    cache.insert_member(member.clone(), Arc::new(image()));
+    assert!(cache.get_value_current::<u8>(&key, revision).is_none());
+    assert!(cache.get(&key).is_some());
+    assert_eq!(cache.len(), 3);
+    assert_eq!(cache.byte_len(), 36);
+
+    cache.insert_value_if_current(key.clone(), Arc::new(2_u8), 1, revision, revision);
+    assert!(cache.get(&key).is_none());
+    assert!(cache.get_mask(&key).is_some());
+    assert!(cache.get_member(&member).is_some());
+    assert_eq!(cache.byte_len(), 21);
+}
+
+#[test]
+fn opaque_value_revision_acceptance_does_not_require_retention() {
+    let key = key(PreviewQuality::Preview);
+    let revision = GraphRevision::new(1);
+    for (capacity, max_bytes, payload_bytes) in [(0, 8, 1), (8, 0, 1), (8, 8, 9)] {
+        let mut cache = MemoryRenderCache::with_limits(capacity, max_bytes);
+        assert!(cache.insert_value_if_current(
+            key.clone(),
+            Arc::new(1_u8),
+            payload_bytes,
+            revision,
+            revision
+        ));
+        assert!(cache.get_value_current::<u8>(&key, revision).is_none());
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.byte_len(), 0);
+    }
+}
+
+#[test]
+fn opaque_values_compete_with_images_for_payload_bytes() {
+    let mut cache = MemoryRenderCache::with_limits(8, 16);
+    let key = key(PreviewQuality::Preview);
+    let revision = GraphRevision::new(1);
+    cache.insert_value_if_current(key.clone(), Arc::new(1_u8), 16, revision, revision);
+    cache.insert(key.clone(), RenderResult::new(image(), revision));
+    assert!(cache.get_value_current::<u8>(&key, revision).is_none());
+    assert_eq!(cache.byte_len(), 16);
+    cache.insert_value_if_current(key.clone(), Arc::new(2_u8), 16, revision, revision);
+    assert!(cache.get(&key).is_none());
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.byte_len(), 16);
+}
+
+#[test]
+fn opaque_value_replacement_updates_bytes_without_refreshing_fifo_order() {
+    let mut cache = MemoryRenderCache::with_limits(2, 16);
+    let first = key(PreviewQuality::Preview);
+    let second = key(PreviewQuality::Final);
+    let third = key(PreviewQuality::Draft);
+    let revision = GraphRevision::new(1);
+    let old = Arc::new(1_u8);
+    cache.insert_value_if_current(first.clone(), Arc::clone(&old), 4, revision, revision);
+    cache.insert_value_if_current(second.clone(), Arc::new(2_u8), 4, revision, revision);
+    cache.insert_value_if_current(
+        first.clone(),
+        Arc::new("replacement".to_owned()),
+        8,
+        revision,
+        revision,
+    );
+    assert_eq!(Arc::strong_count(&old), 1);
+    assert_eq!(cache.len(), 2);
+    assert_eq!(cache.byte_len(), 12);
+    assert!(cache.get_value_current::<u8>(&first, revision).is_none());
+    assert_eq!(
+        cache
+            .get_value_current::<String>(&first, revision)
+            .unwrap()
+            .as_str(),
+        "replacement"
+    );
+    // Oversized replacements preserve the previously retained entry, like image inserts.
+    assert!(cache.insert_value_if_current(first.clone(), Arc::new(9_u8), 17, revision, revision));
+    assert!(
+        cache
+            .get_value_current::<String>(&first, revision)
+            .is_some()
+    );
+    assert_eq!(cache.byte_len(), 12);
+    cache.insert_value_if_current(first.clone(), Arc::new(3_u8), 2, revision, revision);
+    assert_eq!(cache.byte_len(), 6);
+    cache.insert_value_if_current(third.clone(), Arc::new(4_u8), 1, revision, revision);
+    assert!(cache.get_value_current::<u8>(&first, revision).is_none());
+    assert!(cache.get_value_current::<u8>(&second, revision).is_some());
+    assert!(cache.get_value_current::<u8>(&third, revision).is_some());
+    assert_eq!(cache.byte_len(), 5);
+}
+
+#[test]
+fn opaque_values_restamp_and_invalidate_by_node_nodes_and_revision() {
+    let mut cache = MemoryRenderCache::with_limits(4, 64);
+    let first = key(PreviewQuality::Preview);
+    let mut second = first.clone();
+    second.node_id = "other-node".to_owned();
+    let mut third = first.clone();
+    third.node_id = "last-node".to_owned();
+    let revision = GraphRevision::new(1);
+    let next = GraphRevision::new(2);
+    for key in [&first, &second, &third] {
+        cache.insert_value_if_current(key.clone(), Arc::new(1_u8), 4, revision, revision);
+    }
+    cache.insert(first.clone(), RenderResult::new(image(), revision));
+    cache.restamp_revision(next);
+    assert!(cache.get_value_current::<u8>(&first, revision).is_none());
+    assert!(cache.get_value_current::<u8>(&first, next).is_some());
+    assert!(cache.get_current(&first, next).is_some());
+    assert_eq!(cache.len(), 4);
+    assert_eq!(cache.byte_len(), 28);
+    assert_eq!(cache.invalidate_revision(revision), 0);
+    assert_eq!(cache.invalidate_node(&first.node_id), 2);
+    assert_eq!(cache.byte_len(), 8);
+    assert!(cache.get_value_current::<u8>(&second, next).is_some());
+    assert_eq!(
+        cache.invalidate_nodes([second.node_id.as_str(), "missing"]),
+        1
+    );
+    assert_eq!(cache.byte_len(), 4);
+    assert!(cache.get_value_current::<u8>(&third, next).is_some());
+    assert_eq!(cache.invalidate_revision(next), 1);
+    assert!(cache.is_empty());
+    assert_eq!(cache.byte_len(), 0);
+
+    // Reinsert invalidated identities and verify stale FIFO entries cannot evict live entries.
+    cache.insert_value_if_current(second.clone(), Arc::new(2_u8), 4, next, next);
+    cache.insert_value_if_current(first.clone(), Arc::new(3_u8), 4, next, next);
+    cache.insert(first.clone(), RenderResult::new(image(), next));
+    cache.insert_mask(
+        first.clone(),
+        rawweave_rendering::MaskRenderResult::new(mask(), next),
+    );
+    cache.insert_value_if_current(third.clone(), Arc::new(4_u8), 4, next, next);
+    assert!(cache.get_value_current::<u8>(&second, next).is_none());
+    assert!(cache.get_value_current::<u8>(&first, next).is_some());
+    assert_eq!(cache.len(), 4);
+    assert_eq!(cache.byte_len(), 28);
+}
+
+#[test]
+fn clearing_cache_releases_opaque_values_and_resets_accounting_and_fifo() {
+    let mut cache = MemoryRenderCache::with_limits(2, 32);
+    let key = key(PreviewQuality::Preview);
+    let revision = GraphRevision::new(1);
+    let value = Arc::new(1_u8);
+    cache.insert_value_if_current(key.clone(), Arc::clone(&value), 4, revision, revision);
+    cache.insert(key.clone(), RenderResult::new(image(), revision));
+    cache.clear();
+    assert_eq!(Arc::strong_count(&value), 1);
+    assert!(cache.get_value_current::<u8>(&key, revision).is_none());
+    assert!(cache.is_empty());
+    assert_eq!(cache.len(), 0);
+    assert_eq!(cache.byte_len(), 0);
+    cache.insert(key.clone(), RenderResult::new(image(), revision));
+    cache.insert_value_if_current(key.clone(), Arc::clone(&value), 4, revision, revision);
+    cache.insert_mask(
+        key.clone(),
+        rawweave_rendering::MaskRenderResult::new(mask(), revision),
+    );
+    assert!(cache.get(&key).is_none());
+    assert!(cache.get_value_current::<u8>(&key, revision).is_some());
+    assert_eq!(cache.len(), 2);
+    assert_eq!(cache.byte_len(), 8);
+}
+
+#[test]
 fn minimal_gpu_compute_is_optional_but_real_when_an_adapter_exists() {
     let Some(gpu) = GpuContext::initialize_or_cpu() else {
         return;

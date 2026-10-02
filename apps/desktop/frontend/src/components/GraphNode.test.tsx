@@ -63,6 +63,24 @@ async function renderNode(editorNode: EditorNode, value: GraphNodeActions, selec
 }
 
 describe('GraphNode parameters', () => {
+  it('mounts live image helpers only while parameters are open', async () => {
+    const imageControls = vi.fn(() => <span>Live image helpers</span>);
+    const { container, root } = await renderNode(node, actions({ imageControls }));
+    expect(imageControls).not.toHaveBeenCalled();
+    const details = container.querySelector('details.graph-node__details') as HTMLDetailsElement;
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event('toggle'));
+    });
+    expect(container.textContent).toContain('Live image helpers');
+    await act(async () => {
+      details.open = false;
+      details.dispatchEvent(new Event('toggle'));
+    });
+    expect(container.textContent).not.toContain('Live image helpers');
+    await act(async () => root.unmount());
+    container.remove();
+  });
   it('edits parameters and exposes ports from the node card', async () => {
     const value = actions();
     const { container, root } = await renderNode(node, value);

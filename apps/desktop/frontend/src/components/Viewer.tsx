@@ -206,6 +206,9 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
   const panFrame = useRef(0);
   const overlayHandle = useRef<ClippingOverlayHandle>({ reposition: null });
   const imageUrl = pane.imageUrl;
+  const geometrySize = geometryEditing
+    ? controller.getTargetDimensions(geometryEditing.target) ?? (pane.fullWidth && pane.fullHeight ? { width: pane.fullWidth, height: pane.fullHeight } : null)
+    : null;
   const errorNotice = pane.status === 'error' && pane.error
     ? describeOperationError(pane.error, {
       nodeId: pane.target?.nodeId,
@@ -268,11 +271,12 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
     const updateViewport = () => {
       // Integer client sizes: fractional observer values drift across integer
       // boundaries during layout and fire repeated preview restarts.
-      controller.setViewport(viewer, { width: stage.clientWidth, height: stage.clientHeight });
+      controller.setViewport(viewer, { width: stage.clientWidth, height: stage.clientHeight }, window.devicePixelRatio);
     };
     updateViewport();
 
-    if (typeof ResizeObserver === 'undefined') return;
+    window.addEventListener('resize', updateViewport);
+    if (typeof ResizeObserver === 'undefined') return () => window.removeEventListener('resize', updateViewport);
     // Defer to the next frame so writing layout from the callback cannot feed
     // back into the observer ("ResizeObserver loop completed" warning).
     let frame = 0;
@@ -284,6 +288,7 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      window.removeEventListener('resize', updateViewport);
     };
   }, [controller, viewer]);
 
@@ -363,14 +368,14 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
             // freezes the pan. Opting out keeps the pointer ours for the whole
             // hold-and-drag gesture.
             draggable={false}
-            height={pane.height ?? undefined}
+            height={pane.fullHeight ?? undefined}
             onDragStart={(event) => event.preventDefault()}
             onError={() => controller.reportImageLoadFailure(viewer, imageUrl)}
             onLoad={(event) => onAnalysis?.(analyzeImageElement(event.currentTarget))}
             ref={imageRef}
             src={imageUrl}
             style={{ transform: imageTransform(pane.pan, pane.displayScale) }}
-            width={pane.width ?? undefined}
+            width={pane.fullWidth ?? undefined}
           />
         ) : pane.status === 'idle' || pane.status === 'cancelled' ? (
           <div className="viewer-pane__empty">
@@ -407,14 +412,14 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
             )}
           </div>
         )}
-        {geometryEditing && pane.status === 'ready' && pane.imageUrl && pane.imageRegion
+        {geometryEditing && pane.status === 'ready' && pane.imageUrl && geometrySize
           && pane.target?.nodeId === geometryEditing.target.nodeId && pane.target.outputPort === geometryEditing.target.outputPort && (
           <GeometryOverlay
             key={`${geometryEditing.node.id}:${imageUrl}`}
             typeId={geometryEditing.node.typeId}
             parameters={geometryEditing.node.parameters}
             imageRef={imageRef}
-            size={pane.imageRegion}
+            size={geometrySize}
             origin={pane.imageOrigin}
             onChange={geometryEditing.onChange}
             onCancel={geometryEditing.onCancel}

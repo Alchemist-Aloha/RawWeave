@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -471,6 +472,24 @@ enum CacheEntryKey {
     Render(CacheKey),
     Mask(CacheKey),
     Member(MemberCacheKey),
+    Value(CacheKey),
+}
+
+#[derive(Clone)]
+struct OpaqueCacheEntry {
+    data: Arc<dyn Any + Send + Sync>,
+    payload_bytes: usize,
+    revision: GraphRevision,
+}
+
+impl fmt::Debug for OpaqueCacheEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpaqueCacheEntry")
+            .field("payload_bytes", &self.payload_bytes)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +500,7 @@ pub struct MemoryRenderCache {
     entries: HashMap<CacheKey, RenderResult>,
     mask_entries: HashMap<CacheKey, MaskRenderResult>,
     member_entries: HashMap<MemberCacheKey, Arc<Image>>,
+    value_entries: HashMap<CacheKey, OpaqueCacheEntry>,
     order: VecDeque<CacheEntryKey>,
 }
 
@@ -500,12 +520,16 @@ impl MemoryRenderCache {
             entries: HashMap::new(),
             mask_entries: HashMap::new(),
             member_entries: HashMap::new(),
+            value_entries: HashMap::new(),
             order: VecDeque::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len() + self.mask_entries.len() + self.member_entries.len()
+        self.entries.len()
+            + self.mask_entries.len()
+            + self.member_entries.len()
+            + self.value_entries.len()
     }
 
     pub fn member_len(&self) -> usize {
@@ -521,7 +545,7 @@ impl MemoryRenderCache {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.mask_entries.is_empty() && self.member_entries.is_empty()
+        self.len() == 0
     }
 
     pub fn get(&self, key: &CacheKey) -> Option<RenderResult> {
@@ -657,12 +681,61 @@ impl MemoryRenderCache {
         self.get(key).filter(|result| result.is_current(revision))
     }
 
+    /// Retrieves a current opaque value without copying its payload.
+    pub fn get_value_current<T: Any + Send + Sync>(
+        &self,
+        key: &CacheKey,
+        revision: GraphRevision,
+    ) -> Option<Arc<T>> {
+        let entry = self.value_entries.get(key)?;
+        if entry.revision != revision {
+            return None;
+        }
+        Arc::clone(&entry.data).downcast::<T>().ok()
+    }
+
+    /// Accepts only current results; retention is subject to the shared limits.
+    /// The caller must conservatively account for the value's payload bytes.
+    pub fn insert_value_if_current<T: Any + Send + Sync>(
+        &mut self,
+        key: CacheKey,
+        value: Arc<T>,
+        payload_bytes: usize,
+        result_revision: GraphRevision,
+        current_revision: GraphRevision,
+    ) -> bool {
+        if result_revision != current_revision {
+            return false;
+        }
+        if self.capacity == 0 || payload_bytes > self.max_bytes {
+            return true;
+        }
+        let is_new = !self.value_entries.contains_key(&key);
+        let entry = OpaqueCacheEntry {
+            data: value,
+            payload_bytes,
+            revision: result_revision,
+        };
+        if let Some(previous) = self.value_entries.insert(key.clone(), entry) {
+            self.bytes = self.bytes.saturating_sub(previous.payload_bytes);
+        }
+        self.bytes = self.bytes.saturating_add(payload_bytes);
+        if is_new {
+            self.order.push_back(CacheEntryKey::Value(key));
+        }
+        self.trim_to_limits();
+        true
+    }
+
     pub fn restamp_revision(&mut self, revision: GraphRevision) {
         for result in self.entries.values_mut() {
             result.revision = revision;
         }
         for result in self.mask_entries.values_mut() {
             result.revision = revision;
+        }
+        for entry in self.value_entries.values_mut() {
+            entry.revision = revision;
         }
     }
 
@@ -703,7 +776,13 @@ impl MemoryRenderCache {
             .filter(|(_, result)| result.revision == revision)
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        let count = keys.len() + mask_keys.len();
+        let value_keys = self
+            .value_entries
+            .iter()
+            .filter(|(_, entry)| entry.revision == revision)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let count = keys.len() + mask_keys.len() + value_keys.len();
         for key in keys {
             if let Some(result) = self.entries.remove(&key) {
                 self.bytes = self
@@ -716,6 +795,11 @@ impl MemoryRenderCache {
                 self.bytes = self.bytes.saturating_sub(mask_payload_bytes(&result.mask));
             }
         }
+        for key in value_keys {
+            if let Some(entry) = self.value_entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(entry.payload_bytes);
+            }
+        }
         self.retain_live_order_entries();
         count
     }
@@ -724,6 +808,7 @@ impl MemoryRenderCache {
         self.entries.clear();
         self.mask_entries.clear();
         self.member_entries.clear();
+        self.value_entries.clear();
         self.order.clear();
         self.bytes = 0;
     }
@@ -741,7 +826,13 @@ impl MemoryRenderCache {
             .filter(|key| predicate(key))
             .cloned()
             .collect::<Vec<_>>();
-        let count = keys.len() + mask_keys.len();
+        let value_keys = self
+            .value_entries
+            .keys()
+            .filter(|key| predicate(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let count = keys.len() + mask_keys.len() + value_keys.len();
         for key in keys {
             if let Some(result) = self.entries.remove(&key) {
                 self.bytes = self
@@ -752,6 +843,11 @@ impl MemoryRenderCache {
         for key in mask_keys {
             if let Some(result) = self.mask_entries.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(mask_payload_bytes(&result.mask));
+            }
+        }
+        for key in value_keys {
+            if let Some(entry) = self.value_entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(entry.payload_bytes);
             }
         }
         self.retain_live_order_entries();
@@ -781,6 +877,11 @@ impl MemoryRenderCache {
                         self.bytes = self.bytes.saturating_sub(image_payload_bytes(&image));
                     }
                 }
+                CacheEntryKey::Value(key) => {
+                    if let Some(entry) = self.value_entries.remove(&key) {
+                        self.bytes = self.bytes.saturating_sub(entry.payload_bytes);
+                    }
+                }
             }
         }
         self.retain_live_order_entries();
@@ -791,6 +892,7 @@ impl MemoryRenderCache {
             CacheEntryKey::Render(key) => self.entries.contains_key(key),
             CacheEntryKey::Mask(key) => self.mask_entries.contains_key(key),
             CacheEntryKey::Member(key) => self.member_entries.contains_key(key),
+            CacheEntryKey::Value(key) => self.value_entries.contains_key(key),
         });
     }
 }
@@ -810,7 +912,7 @@ fn mask_payload_bytes(mask: &Mask) -> usize {
 
 impl Default for MemoryRenderCache {
     fn default() -> Self {
-        Self::new(64)
+        Self::with_limits(64, 2 * 1024 * 1024 * 1024)
     }
 }
 

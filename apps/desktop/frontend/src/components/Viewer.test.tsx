@@ -25,6 +25,85 @@ function node(id: string, outputs: Array<{ id: string; name: string; dataType: s
 }
 
 describe('Viewer', () => {
+  it('passes DPR and displays a mip bitmap at full-coordinate size without multiplying zoom', async () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(750);
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    const dpr = vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(2);
+    const requestPreview = vi.fn<PreviewTransport['requestPreview']>(async (request) => ({
+      requestId: request.requestId, revision: request.revision,
+      url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
+      width: 1500, height: 1000, fullWidth: 6000, fullHeight: 4000, mimeType: 'image/png',
+    }));
+    const controller = new ViewerController({ requestPreview, cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    controller.setSourceDimensions({ width: 6000, height: 4000 });
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    output.typeId = 'core.output';
+    const crop = node('crop', []);
+    crop.typeId = 'core.crop';
+    const editingTarget = { nodeId: 'output', nodeName: 'output', outputPort: 'image', outputName: 'Image' };
+    const dimensions = vi.spyOn(controller, 'getTargetDimensions');
+    const onChange = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer controller={controller} nodes={[output]} revision={1}
+      source={{ kind: 'ordinary', width: 6000, height: 4000, revision: 1, metadata: null }}
+      geometryEditing={{ node: crop, target: editingTarget, onChange, onCancel: () => undefined }} />));
+    expect(requestPreview.mock.calls.at(-1)?.[0]).toMatchObject({ mip: 2, region: { x: 0, y: 0, width: 6000, height: 4000 } });
+    const image = host.querySelector<HTMLImageElement>('.viewer-pane__image')!;
+    expect(image.width).toBe(6000);
+    expect(image.height).toBe(4000);
+    expect(image.style.transform).toContain('scale(0.125)');
+    expect(dimensions).toHaveBeenCalledWith(editingTarget);
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 750, height: 500 } as DOMRect);
+    const overlay = host.querySelector('.geometry-overlay')!;
+    const pointer = (type: string, x: number, y: number) => new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+    await act(async () => overlay.dispatchEvent(pointer('pointerdown', 75, 50)));
+    await act(async () => overlay.dispatchEvent(pointer('pointerup', 375, 250)));
+    expect(onChange).toHaveBeenCalledWith({ x: 600, y: 400, width: 2400, height: 1600 });
+    await act(async () => controller.viewAt100('A'));
+    expect(requestPreview.mock.calls.at(-1)?.[0].mip).toBe(0);
+    expect(image.style.transform).toContain('scale(1)');
+    await act(async () => root.unmount());
+    host.remove();
+    width.mockRestore(); height.mockRestore(); dpr.mockRestore(); dimensions.mockRestore();
+  });
+
+  it('draws using evaluated output dimensions after an upstream resize at 100%', async () => {
+    const requestPreview = vi.fn<PreviewTransport['requestPreview']>(async (request) => ({
+      requestId: request.requestId, revision: request.revision,
+      url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
+      width: 800, height: 600, fullWidth: 800, fullHeight: 600, mimeType: 'image/png',
+    }));
+    const controller = new ViewerController({ requestPreview, cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    controller.setSourceDimensions({ width: 4000, height: 3000 });
+    controller.viewAt100('A');
+    const output = node('resize', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    const crop = node('crop', []);
+    crop.typeId = 'core.crop';
+    const onChange = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer controller={controller} nodes={[output]} revision={1}
+      source={{ kind: 'ordinary', width: 4000, height: 3000, revision: 1, metadata: null }}
+      geometryEditing={{ node: crop, target: { nodeId: 'resize', nodeName: 'resize', outputPort: 'image', outputName: 'Image' }, onChange, onCancel: () => undefined }} />));
+    expect(requestPreview.mock.calls.map(([request]) => request.region.width)).toEqual([4000, 800]);
+    const image = host.querySelector<HTMLImageElement>('.viewer-pane__image')!;
+    expect(image.width).toBe(800);
+    expect(image.height).toBe(600);
+    expect(image.style.transform).toContain('scale(1)');
+    expect(host.querySelector('.geometry-overlay__controls')?.textContent).toContain('800 × 600 px');
+    vi.spyOn(image, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 800, height: 600 } as DOMRect);
+    const overlay = host.querySelector('.geometry-overlay')!;
+    const pointer = (type: string, x: number, y: number) => new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+    await act(async () => overlay.dispatchEvent(pointer('pointerdown', 80, 60)));
+    await act(async () => overlay.dispatchEvent(pointer('pointerup', 400, 300)));
+    expect(onChange).toHaveBeenCalledWith({ x: 80, y: 60, width: 320, height: 240 });
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
   it('selects the ordinary workflow output when an image opens', async () => {
     const requests: string[] = [];
     const transport: PreviewTransport = {

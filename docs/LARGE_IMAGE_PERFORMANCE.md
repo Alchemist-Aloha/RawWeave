@@ -16,7 +16,7 @@ Open measures disk read, decode, metadata and default workflow construction. Pre
 
 These are optimized backend timings on this host, **not native UI/IPC/browser-decode latency**, cold filesystem measurements, or a camera compatibility matrix. Filesystem caches were not flushed. The RAW fixtures are approximately 6.1 MP and 5.3 MP, not 24 MP. JPEG content is a compressible synthetic pattern, not photographic noise. Timings are observations rather than CI thresholds.
 
-## Before / after (milliseconds)
+## Before / after the initial three iterations (milliseconds)
 
 The baseline and final rows below use the first and final recorded runs; unchanged-repeat columns average two samples. Two additional final-condition runs gave similar results (24 MP first preview 227/229 ms, unchanged repeats ~23 ms).
 
@@ -70,20 +70,47 @@ Files: `apps/desktop/src-tauri/src/preview.rs` (also holds diagnostics and reusa
 Result: JPEG first preview ~222 ms; edit ~161 ms; unchanged preview ~23 ms.
 Test: failing cache-entry regression verified first. PNG byte equality, mip dimensions, non-zero global origins, partial-region output and nondefault tile identity verified afterward.
 
+### 4. Bounded RAW/color result reuse
+
+Node diagnostics (`RAWWEAVE_NODE_DIAGNOSTICS=1`) identified repeated demosaic, display transforms and output hashing; the persistent cache reconstructed only single Image/Mask outputs. The existing `MemoryRenderCache` now retains typed, multi-output RAW/color results under the same FIFO, revision and dependency invalidation rules. Supported payloads are conservatively charged; unsupported mixed outputs are not retained. Default limits are 64 entries and 2 GiB of logical payload, not an RSS guarantee. Explicit `new(capacity)` retains its historical unlimited-payload behavior; callers can choose a smaller payload limit. A tested 512 MiB default evicted the 24 MP JPEG chain and regressed warm previews to ~160 ms, so it was rejected.
+
+Regression coverage includes decoder reuse, shared output storage, parameter/source/mip/quality changes, stale revisions, targeted invalidation, type mismatch, clearing and memory pressure. Diagnostic timers run only when enabled.
+
+### 5. Shared demosaic neighbor search
+
+The CPU demosaic now searches each neighbor ring once for missing RGB channels rather than once per channel. Search is bounded by the CFA pattern period. Original sample order and first-matching-ring behavior are preserved; Bayer/X-Trans border, narrow-image and HDR sample comparisons against the original implementation assert bitwise equality. No interpolation algorithm, processing space or GPU behavior changed.
+
+### 6. Display-sized preview requests
+
+The frontend requests mip `floor(log2(1 / (zoom × DPR)))`, bounded to 0–6, with mip 0 when no viewport is known. Full-resolution dimensions remain separate from PNG dimensions so fitting, crop gestures and global origins remain correct. Pan and same-mip navigation stay local; detail changes upgrade the frame while retaining the previous image. Metadata corrections work at 100% as well as fit. Stale arrivals are released and delayed cancellation cannot clear a newer frame.
+
+The earlier cached mip-0 JPEG measurement was ~371 ms warm, including ~285 ms PNG encoding and ~86 ms selection. At mip 2 it is ~24 ms. This comparison changes requested resolution, not processing correctness or codec speed. `RAWWEAVE_BENCHMARK_MIP=0` (or 3) selects another benchmark mip; the default remains 2.
+
+## Final measured backend results
+
+Same fixtures, whole-frame mip 2, release build, one test thread, diagnostics enabled and filesystem caches not flushed. Two unchanged repeats are averaged. This is one final observation, not a statistical latency guarantee or native open-to-display timing.
+
+| Source | Open | First preview | Unchanged | Parameter edit | Repeat after edit |
+|---|---:|---:|---:|---:|---:|
+| 24 MP synthetic JPEG | 125.71 | 225.10 | 23.76 | 165.63 | 22.89 |
+| Nikon D70s RAW | 48.31 | 546.42 | 29.50 | 447.58 | 29.67 |
+| Sony ILCE-7S RAW | 10.22 | 457.42 | 28.84 | 389.25 | 28.83 |
+
+Compared with the preceding implementation, RAW warm previews fell from ~701/~588 ms to ~30/~29 ms. JPEG warm reuse is preserved. A separate mip-3 diagnostic run under different load produced slower cold RAW timings; do not compare different mip/load conditions as an algorithm speedup.
+
 ## Verification
 
 - `cargo test --locked --workspace --all-targets --all-features`: passes.
 - Desktop backend `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features`: 78 library tests and one binary test pass; two timing benchmarks ignored by default.
 - Root and desktop all-target/all-feature Clippy with `-D warnings`: pass.
 - Root `cargo fmt --all -- --check`: passes. Desktop full formatting check reports existing untouched formatting in `src/ai.rs` and `src/lib.rs`; changed `preview.rs` is formatted. Unrelated files were not reformatted.
-- Native E2E binary rebuilt. Four selected real-WebView preview tests pass: restored-source PNG display, stale-preview retention during graph/layout changes, preview/scope fitting and pointer pan/clipping alignment. This native fixture is 1349×2023, not the synthetic 24 MP benchmark source.
+- Frontend: 230 unit tests and production build pass; existing chunk-size warning remains.
+- Native E2E binary rebuilt. Six selected real-WebView tests pass: restored-source PNG display, frame retention, preview/scope fitting, transparent crop drawing/grouped undo, pointer pan/clipping and comparisons. This native fixture is 1349×2023, not the synthetic 24 MP benchmark source. The crop regression edits the visible Crop Width field to refresh backend connections; hidden advanced inputs do not reliably focus/blur through the native driver.
 - `git diff --check`: passes.
 - No dependency additions, persisted identifier changes, JPEG/RAW path merging or frontend processing.
 
 ## Remaining work / stopping boundary
 
-RAW repeats still evaluate their graph (~0.6–0.7 s here): persistent render-cache reconstruction currently covers ordinary Image/Mask outputs, not multi-output RAW/color results. RAW open also decodes for metadata and later preview evaluation decodes again. The shared-buffer change does not claim to cache decoding or introduce progressive demosaic.
+RAW open still decodes for metadata and first preview decodes again. Source contexts still copy/hash compressed RAW bytes, and RGB-to-RGBA conversion remains measurable. Parameter edits still recompute affected processing stages. The 2 GiB conservative payload budget is not a measured peak-memory bound; allocator overhead, source state, temporary buffers and GPU allocations are separate. Broader cameras, high-resolution noisy photos, native end-to-end latency and peak RSS remain unmeasured.
 
-Next investigate bounded typed-result caching and node-level decode/hash/demosaic timings. That requires a deliberate memory-budget/invalidation design and broader RAW fixtures; it is not a safe one-line extension. GPU work was intentionally avoided because these desktop previews do not attach a GPU render context. PNG encoding is now a meaningful portion of the ~23 ms warm JPEG preview, but changing transport/codec is not justified without real native decode/transfer measurements.
-
-Three focused iterations delivered measured gains. This report does not claim diminishing returns across every RAW/rendering workflow or clearance of the previously failing full native E2E suite. Changes are recorded here, not committed.
+GPU/codec rewrites and progressive demosaic were deliberately skipped: current desktop previews attach no GPU render context, and no native transfer/decode bottleneck was established. The unrestricted native suite still has workflow/batch/restore failures (initial broad run: 13 pass/10 fail); it is not cleared by six focused preview passes. Standard browser E2E remains blocked by the missing matching chromedriver. Changes are recorded, not committed.

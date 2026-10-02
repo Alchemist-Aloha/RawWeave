@@ -198,7 +198,12 @@ describe('real Tauri preview', () => {
     if (!(await details.getProperty('open'))) await details.$('summary').click();
     // The direct backend connections above need one normal controller command
     // to refresh the React snapshot before the input target can be observed.
-    await node.$('button[aria-label="Reset X"]').click();
+    const cropWidth = await node.$('input[aria-label="Crop Width"]');
+    await cropWidth.setValue('2');
+    await browser.execute((element) => element.blur(), cropWidth);
+    const resetWidth = await node.$('button[aria-label="Reset Crop Width"]');
+    await resetWidth.waitForExist();
+    await resetWidth.click();
     const draw = await node.$('button*=Draw crop region');
     await draw.waitForDisplayed();
     await browser.waitUntil(async () => await draw.isEnabled(), {
@@ -210,6 +215,7 @@ describe('real Tauri preview', () => {
     await overlay.waitForDisplayed();
     await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
     await expect(node).toHaveText(expect.stringContaining('Input resolution:'));
+    expect(await browser.execute(() => getComputedStyle(document.querySelector('.geometry-overlay__guide rect')).fill)).toBe('none');
     const points = await browser.execute(() => {
       const image = document.querySelector('.viewer-pane__image').getBoundingClientRect();
       return {

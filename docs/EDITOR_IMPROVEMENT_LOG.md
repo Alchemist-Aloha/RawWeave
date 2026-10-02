@@ -96,7 +96,28 @@ Change: portrait overrides the workflow minimum to zero and uses a shrinkable gr
 Evidence: the new viewport-bound assertion failed before the fix (workflow right edge 717px in a 600px viewport); afterward the workflow spans 237–600px, with controls and overview contained and separated. Chrome checks also cover 900×1200, landscape restoration and the retained landscape minimum. Screenshot inspected.
 Verification: 196 unit tests and frontend/native build pass; browser assertions executed through Chrome DevTools. Native portrait tests could not enter portrait orientation in the current desktop environment and timed out at their orientation waits; native validation is not claimed. Standard browser driver limitation remains. `git diff --check` passes.
 
-## Performance investigation and remaining work
+## Iteration 10 — image-input helpers and precise crop/resize controls
+
+- Reused existing graph parameter transactions and geometry editing, with no new processing or IPC APIs. Nodes with image inputs expose a Preview input action and actual full evaluated resolution; unresolved inputs remain honestly unknown. Direct source dimensions are used only when explicitly supplied, not inferred through resize/crop chains.
+- Crop provides full-frame, square, 3:2, 4:3 and 16:9 centered, integer-pixel presets, output dimensions and the existing draw action. Resize shows output dimensions and quarter/half/three-quarter/original-size actions. Linear/radial gradients retain their existing drawing helpers. Presets commit as one grouped undoable edit; exact numeric fields remain available.
+- Full evaluated A/B metadata replaces requested-region guesses at 100%. Live helper subscriptions mount only while a node's parameter fold is open, avoiding progress-driven updates across collapsed nodes.
+- Native crop test now edits the visible Crop Width field to refresh direct backend connections. The previous test attempted to blur an unfocused hidden advanced field, so no commit/reset button appeared. This was reproduced and corrected without weakening gesture/undo assertions.
+
+## Iteration 11 — transparent crop guides and display-sized previews
+
+- SVG guide shapes use `fill: none` with their existing visible outline; the photograph stays visible beneath crop drawing.
+- Viewport/zoom/DPR-aware mip requests use full-resolution geometry and separate bitmap dimensions. Panning and same-mip changes do not render again; 100% upgrades detail, retaining the old frame until replacement. Output-size correction applies in every zoom mode. A failing delayed-cancellation regression prevented an old acknowledgement from clearing a newer frame.
+- Frontend: 230 tests and production build pass (existing bundle warning remains). Controller coverage includes DPR, hidden/unmeasured stages, metadata correction, stale results, URL release, revisions and cancellation; viewer coverage checks full-size attributes and geometry at reduced bitmap resolution.
+- Rebuilt native binary: six selected preview tests pass, including transparent crop drawing with grouped undo, fit/scopes, pan/clipping and comparisons. This is real WebKitGTK evidence on the 1349×2023 fixture, not 24 MP end-to-end latency.
+
+## Iteration 12 — measured RAW result reuse and shared demosaic search
+
+- Node-level profiling found persistent caching excluded multi-output RAW/color results. Extended the existing bounded, revision-aware render cache rather than adding a separate cache. Default logical payload ceiling is 2 GiB / 64 entries; 512 MiB was tested and rejected because it evicted the 24 MP JPEG chain. Payload accounting is conservative and is not a peak RSS measurement.
+- Demosaic searches each neighbor ring once for missing channels; Bayer/X-Trans comparisons preserve original sample ordering and bitwise results. Scene-linear HDR values and CPU fallback remain unchanged.
+- Final release mip-2 backend measurements: JPEG warm ~24 ms (unchanged), Nikon RAW ~30 ms versus ~701 ms, Sony RAW ~29 ms versus ~588 ms. First RAW previews remain hundreds of milliseconds. Conditions, individual timings, cache boundaries and remaining costs are in `docs/LARGE_IMAGE_PERFORMANCE.md`.
+- Root tests/format/Clippy and desktop tests/Clippy pass. A broad native attempt had 13 passes / 10 failures; workflow/batch/restoration gates are not cleared by the six focused preview passes. Standard browser E2E is still blocked by matching chromedriver availability. No dependency additions or commits.
+
+## Earlier performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.
 - Source inspection: RAW open decodes for metadata, while previews reconstruct contexts from compressed bytes; contexts copy the source byte vector. Persistent graph cache reconstruction excludes RAW values. Repeated preview latency warrants decode/hashing/conversion/PNG stage timings before choosing a fix.
@@ -106,7 +127,7 @@ Verification: 196 unit tests and frontend/native build pass; browser assertions 
 - Desktop previews currently attach no GPU render context. Generic GPU paths upload/read back per operation and block, but changing them would not prove a desktop-preview improvement.
 - Startup config/registry loading, idle CPU, total process memory, image switching, rapid slider latency, export throughput and actual graph-drag frame time still need native profiling. Browser heap/rAF values must not substitute for these.
 
-## Verification / stopping boundary
+## Earlier verification / stopping boundary
 
 - Final frontend tests: 41 files / 195 tests pass. Final production frontend build passes (existing ~670 kB bundle-size warning remains).
 - Native E2E build passes. Final focused native regression: 2/2 pass on rebuilt binary (~958 ms test time).

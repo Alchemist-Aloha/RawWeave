@@ -214,6 +214,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
 
 export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
   const { node, checkpointStatus } = data;
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const actions = useContext(GraphNodeActionsContext);
   const deletePress = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const exposedPorts = (node.exposedParameters ?? [])
@@ -339,9 +340,9 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
       {hasDetailControls && (
         // `nodrag` keeps parameter clicks from starting a node drag; the title
         // row above stays the place to grab the frame.
-        <details className="graph-node__details nodrag">
+        <details className="graph-node__details nodrag" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
           <summary className="graph-node__details-summary">Parameters</summary>
-          {actions?.imageControls?.(node)}
+          {detailsOpen && actions?.imageControls?.(node)}
           <div className="parameter-list">
             {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
               const exposed = (node.exposedParameters ?? []).includes(parameter.id);

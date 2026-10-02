@@ -411,11 +411,7 @@ impl NodeInstance for Demosaic {
         );
         for y in 0..dimensions.height {
             for x in 0..dimensions.width {
-                pixels.push([
-                    demosaic_channel(&mosaic, x, y, CfaColor::Red)?,
-                    demosaic_channel(&mosaic, x, y, CfaColor::Green)?,
-                    demosaic_channel(&mosaic, x, y, CfaColor::Blue)?,
-                ]);
+                pixels.push(demosaic_pixel(&mosaic, x, y)?);
             }
         }
         let scene = SceneLinearRGB::new(dimensions, pixels, WorkingSpace::CameraNative)
@@ -678,6 +674,72 @@ fn cfa_channel(color: CfaColor) -> Option<usize> {
     }
 }
 
+/// Search each ring once for all missing channels, retaining the reference
+/// sample order and first-available-ring rule for Bayer and X-Trans borders.
+fn demosaic_pixel(mosaic: &Mosaic, x: u32, y: u32) -> Result<[f32; 3], NodeError> {
+    let own_channel = mosaic
+        .cfa()
+        .color_at(x, y)
+        .and_then(cfa_channel)
+        .ok_or_else(|| NodeError::Message("unsupported CFA channel".to_owned()))?;
+    let mut pixels = [0.0; 3];
+    let mut ready = [false; 3];
+    pixels[own_channel] = mosaic.sample(x, y).ok_or_else(|| {
+        NodeError::Message("demosaic sample coordinate is outside the mosaic".to_owned())
+    })?;
+    ready[own_channel] = true;
+    let dimensions = mosaic.dimensions();
+    let max_radius = dimensions
+        .width
+        .max(dimensions.height)
+        .min(mosaic.cfa().width().max(mosaic.cfa().height()));
+    for radius in 1..=max_radius {
+        let min_x = x.saturating_sub(radius);
+        let max_x = x.saturating_add(radius).min(dimensions.width - 1);
+        let min_y = y.saturating_sub(radius);
+        let max_y = y.saturating_add(radius).min(dimensions.height - 1);
+        let mut totals = [0.0; 3];
+        let mut counts = [0_u32; 3];
+        for sample_y in min_y..=max_y {
+            for sample_x in min_x..=max_x {
+                let on_ring = sample_x == min_x
+                    || sample_x == max_x
+                    || sample_y == min_y
+                    || sample_y == max_y;
+                if on_ring
+                    && let Some(channel) = mosaic
+                        .cfa()
+                        .color_at(sample_x, sample_y)
+                        .and_then(cfa_channel)
+                    && !ready[channel]
+                    && let Some(sample) = mosaic.sample(sample_x, sample_y)
+                {
+                    totals[channel] += sample;
+                    counts[channel] += 1;
+                }
+            }
+        }
+        for channel in 0..3 {
+            if counts[channel] > 0 {
+                pixels[channel] = totals[channel] / counts[channel] as f32;
+                ready[channel] = true;
+            }
+        }
+        if ready.iter().all(|ready| *ready) {
+            return Ok(pixels);
+        }
+    }
+    let missing = ready.iter().position(|ready| !ready).unwrap_or(0);
+    let color = [CfaColor::Red, CfaColor::Green, CfaColor::Blue]
+        .get(missing)
+        .copied()
+        .unwrap_or(CfaColor::Unknown);
+    Err(NodeError::Message(format!(
+        "unsupported CFA: no {color:?} sample is available for demosaic"
+    )))
+}
+
+#[cfg(test)]
 fn demosaic_channel(mosaic: &Mosaic, x: u32, y: u32, wanted: CfaColor) -> Result<f32, NodeError> {
     if mosaic.cfa().color_at(x, y) == Some(wanted) {
         return mosaic.sample(x, y).ok_or_else(|| {
@@ -853,6 +915,34 @@ impl NodePack for RawNodePack {
 mod tests {
     use super::*;
     use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
+
+    #[test]
+    fn shared_neighbor_search_matches_channel_reference_at_every_border() {
+        for frame in [
+            DeterministicCorpus::bayer_12_bit(),
+            DeterministicCorpus::xtrans_14_bit(),
+        ] {
+            let varied = frame
+                .mosaic()
+                .map_samples(|index, _, _| [-0.0, -0.5, 10_000.0, f32::MAX / 8.0, 0.75][index % 5])
+                .unwrap();
+            for mosaic in [frame.mosaic(), &varied] {
+                for y in 0..mosaic.dimensions().height {
+                    for x in 0..mosaic.dimensions().width {
+                        let expected = [
+                            demosaic_channel(mosaic, x, y, CfaColor::Red).unwrap(),
+                            demosaic_channel(mosaic, x, y, CfaColor::Green).unwrap(),
+                            demosaic_channel(mosaic, x, y, CfaColor::Blue).unwrap(),
+                        ];
+                        assert_eq!(
+                            demosaic_pixel(mosaic, x, y).unwrap().map(f32::to_bits),
+                            expected.map(f32::to_bits)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn default_descriptors_are_registered() {

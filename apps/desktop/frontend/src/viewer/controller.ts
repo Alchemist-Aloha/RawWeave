@@ -23,6 +23,8 @@ function paneState(): ViewerPaneState {
     imageUrl: null,
     width: null,
     height: null,
+    fullWidth: null,
+    fullHeight: null,
     status: 'idle',
     progress: 0,
     error: null,
@@ -43,11 +45,10 @@ function clampZoom(value: number, floor = MIN_ZOOM): number {
 
 const TILE_SIZE = 32;
 const DEFAULT_DIMENSIONS: ImageDimensions = { width: 1, height: 1 };
-const DEFAULT_VIEWPORT: ImageDimensions = { width: 1, height: 1 };
-
 interface RequestPlan {
   region: PreviewRegion;
   zoom: number;
+  mip: number;
 }
 
 /**
@@ -55,8 +56,8 @@ interface RequestPlan {
  *
  * Fit is deliberately not clamped to the interactive zoom range: a large image
  * in a small panel needs a scale below `MIN_ZOOM`, and clamping it there is what
- * let the "fit" image overflow the panel. The preview stays full resolution;
- * display scale controls only how large that original frame appears.
+ * let the "fit" image overflow the panel. Display scale stays in full-resolution
+ * coordinates even when the preview bitmap uses a mip.
  */
 function fitZoom(dimensions: ImageDimensions, viewport: ImageDimensions): number {
   const fit = Math.min(viewport.width / dimensions.width, viewport.height / dimensions.height);
@@ -85,7 +86,8 @@ export class ViewerController {
   private readonly listeners = new Set<(state: ViewerState) => void>();
   private readonly sessionListeners = new Set<() => void>();
   private readonly active = new Map<ViewerId, ActiveRequest>();
-  private readonly viewports = new Map<ViewerId, ImageDimensions>();
+  private readonly viewports = new Map<ViewerId, ImageDimensions & { pixelRatio: number }>();
+  private readonly loadedMips = new Map<ViewerId, number>();
   private readonly imageDimensions = new Map<ViewerId, ImageDimensions>();
   private sourceDimensions: ImageDimensions = DEFAULT_DIMENSIONS;
   private sequence = 0;
@@ -95,6 +97,17 @@ export class ViewerController {
   public subscribe(listener: (state: ViewerState) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Current evaluated full-size metadata, independent of zoom or bitmap mip. */
+  public getTargetDimensions(target: PreviewTarget): ImageDimensions | null {
+    for (const viewer of ['A', 'B'] as ViewerId[]) {
+      const pane = this.state.panes[viewer];
+      if (pane.status !== 'ready' || pane.target?.nodeId !== target.nodeId || pane.target.outputPort !== target.outputPort) continue;
+      const size = this.imageDimensions.get(viewer);
+      if (size && Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height) && size.width > 0 && size.height > 0) return { ...size };
+    }
+    return null;
   }
 
   public subscribeSession(listener: () => void): () => void {
@@ -142,10 +155,13 @@ export class ViewerController {
   public reportImageLoadFailure(viewer: ViewerId, url: string): void {
     if (this.state.panes[viewer].imageUrl !== url) return;
     this.releasePreview(url);
+    this.loadedMips.delete(viewer);
     this.setPane(viewer, {
       imageUrl: null,
       width: null,
       height: null,
+      fullWidth: null,
+      fullHeight: null,
       status: 'error',
       error: `preview image could not be loaded from ${url}`,
     });
@@ -165,16 +181,26 @@ export class ViewerController {
     this.startRequest(viewer, target);
   }
 
-  /** Plan one full-resolution frame; viewer zoom is a client-side transform. */
+  /** Reuse a loaded or in-flight frame when its detail level is already correct. */
+  private updateDetail(viewer: ViewerId): void {
+    if (!this.state.panes[viewer].target) return;
+    const plan = this.requestPlan(viewer);
+    const active = this.active.get(viewer)?.request;
+    if (active ? active.mip === plan.mip && sameRegion(active.region, plan.region) : this.loadedMips.get(viewer) === plan.mip) return;
+    this.restartRequest(viewer);
+  }
+
+  /** Request full-frame coordinates with enough bitmap pixels for the display. */
   private requestPlan(viewer: ViewerId): RequestPlan {
     const pane = this.state.panes[viewer];
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
-    const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
-    const fit = fitZoom(dimensions, viewport);
-    const zoom = pane.zoomMode === 'fit' ? fit : pane.zoom;
+    const viewport = this.viewports.get(viewer);
+    const zoom = pane.zoomMode === 'fit' ? fitZoom(dimensions, viewport ?? dimensions) : pane.zoom;
     return {
       region: { x: 0, y: 0, width: dimensions.width, height: dimensions.height },
       zoom,
+      // A missing/hidden stage must not turn the initial request into a 1x1 fit.
+      mip: viewport ? Math.max(0, Math.min(6, Math.floor(Math.log2(1 / (zoom * viewport.pixelRatio))))) : 0,
     };
   }
 
@@ -184,23 +210,30 @@ export class ViewerController {
       height: Math.max(1, Math.floor(dimensions.height)),
     };
     this.imageDimensions.clear();
+    this.loadedMips.clear();
     for (const viewer of ['A', 'B'] as ViewerId[]) {
       if (this.state.panes[viewer].target) this.restartRequest(viewer);
     }
   }
 
-  public setViewport(viewer: ViewerId, viewport: ImageDimensions): void {
+  public setViewport(viewer: ViewerId, viewport: ImageDimensions, pixelRatio = 1): void {
+    if (!Number.isFinite(pixelRatio) || pixelRatio <= 0 ||
+      !Number.isFinite(viewport.width) || viewport.width < 1 ||
+      !Number.isFinite(viewport.height) || viewport.height < 1) return;
     const next = {
-      width: Math.max(1, Math.floor(viewport.width)),
-      height: Math.max(1, Math.floor(viewport.height)),
+      width: Math.floor(viewport.width),
+      height: Math.floor(viewport.height),
+      pixelRatio,
     };
     const previous = this.viewports.get(viewer);
-    if (previous?.width === next.width && previous.height === next.height) return;
+    if (previous?.width === next.width && previous.height === next.height && previous.pixelRatio === pixelRatio) return;
     this.viewports.set(viewer, next);
     const pane = this.state.panes[viewer];
-    if (!pane.target || pane.zoomMode !== 'fit') return;
-    const zoom = fitZoom(this.imageDimensions.get(viewer) ?? this.sourceDimensions, next);
-    this.setPane(viewer, { zoom, displayScale: zoom });
+    if (pane.zoomMode === 'fit') {
+      const zoom = this.requestPlan(viewer).zoom;
+      this.setPane(viewer, { zoom, displayScale: zoom });
+    }
+    this.updateDetail(viewer);
   }
 
   public setRevision(revision: number): void {
@@ -212,6 +245,7 @@ export class ViewerController {
     }
     for (const viewer of ['A', 'B'] as ViewerId[]) {
       this.imageDimensions.delete(viewer);
+      this.loadedMips.delete(viewer);
       const target = this.state.panes[viewer].target;
       if (!target) {
         this.releasePanePreview(viewer);
@@ -222,6 +256,8 @@ export class ViewerController {
           imageUrl: null,
           width: null,
           height: null,
+          fullWidth: null,
+          fullHeight: null,
           error: null,
         });
         continue;
@@ -268,11 +304,14 @@ export class ViewerController {
     }
     this.releasePanePreview(viewer);
     this.imageDimensions.delete(viewer);
+    this.loadedMips.delete(viewer);
     this.setPane(viewer, {
       target,
       imageUrl: null,
       width: null,
       height: null,
+      fullWidth: null,
+      fullHeight: null,
       status: target ? 'loading' : 'idle',
       progress: 0,
       error: null,
@@ -289,7 +328,7 @@ export class ViewerController {
     for (const viewer of ['A', 'B'] as ViewerId[]) this.setTarget(viewer, null);
   }
 
-  private startRequest(viewer: ViewerId, target: PreviewTarget): void {
+  private startRequest(viewer: ViewerId, target: PreviewTarget, corrected = false): void {
     const plan = this.requestPlan(viewer);
     const request: PreviewRequest = {
       requestId: this.requestId(viewer),
@@ -299,7 +338,7 @@ export class ViewerController {
       quality: 'preview',
       region: plan.region,
       tile: { x: Math.floor(plan.region.x / TILE_SIZE), y: Math.floor(plan.region.y / TILE_SIZE) },
-      mip: 0,
+      mip: plan.mip,
       maskDisplay: this.state.panes[viewer].maskDisplay,
     };
     this.active.set(viewer, { request });
@@ -329,24 +368,30 @@ export class ViewerController {
           this.releasePreview(result.url);
           return;
         }
-        this.active.delete(viewer);
-        this.imageDimensions.set(viewer, {
-          width: Math.max(1, result.fullWidth),
-          height: Math.max(1, result.fullHeight),
-        });
-        const nextPlan = this.requestPlan(viewer);
-        if (
-          this.state.panes[viewer].zoomMode === 'fit' &&
-          !sameRegion(request.region, nextPlan.region)
-        ) {
+        if (!Number.isSafeInteger(result.fullWidth) || result.fullWidth <= 0 ||
+          !Number.isSafeInteger(result.fullHeight) || result.fullHeight <= 0) {
           this.releasePreview(result.url);
-          this.startRequest(viewer, target);
+          throw new Error('preview returned invalid full-size dimensions');
+        }
+        this.imageDimensions.set(viewer, { width: result.fullWidth, height: result.fullHeight });
+        const nextPlan = this.requestPlan(viewer);
+        if (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip) {
+          this.releasePreview(result.url);
+          // One metadata correction is enough for a stable evaluated output.
+          if (corrected) throw new Error('preview output dimensions changed during rendering');
+          this.active.delete(viewer);
+          this.startRequest(viewer, target, true);
           return;
         }
+        this.active.delete(viewer);
+        this.loadedMips.set(viewer, request.mip);
         this.replacePanePreview(viewer, {
           imageUrl: result.url,
           width: result.width,
           height: result.height,
+          fullWidth: result.fullWidth,
+          fullHeight: result.fullHeight,
+          zoom: nextPlan.zoom,
           displayScale: nextPlan.zoom,
           status: 'ready',
           progress: 1,
@@ -371,7 +416,9 @@ export class ViewerController {
     if (!active) return;
     this.active.delete(viewer);
     await this.transport.cancelPreview(active.request.requestId);
+    if (this.state.panes[viewer].requestId !== active.request.requestId) return;
     this.releasePanePreview(viewer);
+    this.loadedMips.delete(viewer);
     this.setPane(viewer, {
       status: 'cancelled',
       requestId: null,
@@ -379,6 +426,8 @@ export class ViewerController {
       imageUrl: null,
       width: null,
       height: null,
+      fullWidth: null,
+      fullHeight: null,
       error: null,
     });
   }
@@ -394,12 +443,13 @@ export class ViewerController {
    */
   private zoomFloor(viewer: ViewerId): number {
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
-    const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
+    const viewport = this.viewports.get(viewer) ?? dimensions;
     return Math.min(MIN_ZOOM, fitZoom(dimensions, viewport) / 4);
   }
 
-  /** Zoom the loaded full-resolution frame without starting another render. */
+  /** Transform immediately; render only when the required mip changes. */
   public setZoom(viewer: ViewerId, zoom: number): void {
+    if (!Number.isFinite(zoom)) return;
     const nextZoom = clampZoom(zoom, this.zoomFloor(viewer));
     if (nextZoom === this.state.panes[viewer].zoom && this.state.panes[viewer].zoomMode === 'custom') return;
     this.setPane(viewer, {
@@ -407,6 +457,7 @@ export class ViewerController {
       zoomMode: 'custom',
       displayScale: nextZoom,
     });
+    this.updateDetail(viewer);
   }
 
   public adjustZoom(viewer: ViewerId, delta: number): void {
@@ -415,7 +466,7 @@ export class ViewerController {
 
   public fitToWindow(viewer: ViewerId): void {
     const dimensions = this.imageDimensions.get(viewer) ?? this.sourceDimensions;
-    const viewport = this.viewports.get(viewer) ?? DEFAULT_VIEWPORT;
+    const viewport = this.viewports.get(viewer) ?? dimensions;
     const zoom = fitZoom(dimensions, viewport);
     this.setPane(viewer, {
       zoom,
@@ -423,6 +474,7 @@ export class ViewerController {
       pan: { x: 0, y: 0 },
       displayScale: zoom,
     });
+    this.updateDetail(viewer);
   }
 
   public viewAt100(viewer: ViewerId): void {
@@ -431,6 +483,7 @@ export class ViewerController {
       zoomMode: '100%',
       displayScale: 1,
     });
+    this.updateDetail(viewer);
   }
 
   /** Pans the loaded preview without starting a render. */
@@ -444,6 +497,7 @@ export class ViewerController {
     if (this.state.panes[viewer].target?.dataType !== 'core.Mask') return;
     if (this.state.panes[viewer].maskDisplay === display) return;
     this.setPane(viewer, { maskDisplay: display });
+    this.loadedMips.delete(viewer);
     this.restartRequest(viewer);
   }
 }

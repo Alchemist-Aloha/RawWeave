@@ -1231,7 +1231,7 @@ input, select, textarea { caret-color: var(--wax-amber); }
 .image-node-controls > div { display: flex; gap: 6px; }
 .geometry-overlay { position: absolute; inset: 0; z-index: 2; cursor: crosshair; touch-action: none; }
 .geometry-overlay__guide { position: absolute; pointer-events: none; overflow: visible; }
-.geometry-overlay__guide rect, .geometry-overlay__guide circle, .geometry-overlay__guide line { fill: var(--wax-white-tint); stroke: var(--wax-white); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.geometry-overlay__guide rect, .geometry-overlay__guide circle, .geometry-overlay__guide line { fill: none; stroke: var(--wax-white); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .geometry-overlay__controls { position: absolute; bottom: 8px; left: 8px; right: 8px; z-index: 3; display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 8px; font-size: 11px; background: var(--room-raise); }
 
 .parameter { grid-template-columns: 1fr auto; }
