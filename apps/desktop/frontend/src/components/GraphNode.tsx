@@ -1,4 +1,4 @@
-import { createContext, useRef, useContext, useState, type ReactNode } from 'react';
+import { createContext, useRef, useContext, useState, useId, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } from '../editor/types';
 import { isRecommendedValue, parameterUX } from '../editor/parameter-ux';
@@ -28,6 +28,7 @@ export interface GraphNodeCheckpoint {
  * drag-time flow-node cache keeps working.
  */
 export interface GraphNodeActions {
+  imageControls?: (node: EditorNode) => ReactNode;
   onParameterChange: (nodeId: string, parameterId: string, value: ParameterValue) => void;
   onToggleExposed: (nodeId: string, parameterId: string, exposed: boolean) => void;
   onTogglePort: (nodeId: string, portId: string, direction: 'Input' | 'Output', exposed: boolean) => void;
@@ -52,6 +53,10 @@ interface ParameterFieldProps {
   value: ParameterValue;
   onChange: (value: ParameterValue) => void;
   toggle: ReactNode;
+  wholeNumber?: boolean;
+  multiline?: boolean;
+  choices?: string[];
+  suggestions?: string[];
 }
 
 /**
@@ -60,10 +65,26 @@ interface ParameterFieldProps {
  * prop, and without the draft React would reset the field mid-typing and drop
  * the rest of what was typed.
  */
-function ParameterField({ typeId, parameter, value, onChange, toggle }: ParameterFieldProps) {
+function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumber = false, multiline = false, choices, suggestions }: ParameterFieldProps) {
   const [draft, setDraft] = useState<string | null>(null);
+  const sliding = useRef(false);
+  const suggestionId = useId();
   const ux = parameterUX(typeId, parameter);
   const modified = !isRecommendedValue(value, parameter.default);
+  const numeric = parameter.parameterType === 'Float' || parameter.parameterType === 'Integer';
+  const factor = ux.factor ?? 1;
+  const min = ux.min ?? parameter.min ?? undefined;
+  const max = ux.max ?? parameter.max ?? undefined;
+  const bounded = numeric && min != null && max != null && max > min;
+  const validNumericValue = (next: number) => Number.isFinite(next)
+    && (parameter.parameterType !== 'Integer' && !wholeNumber || Number.isInteger(next))
+    && (parameter.min == null || next >= parameter.min)
+    && (parameter.max == null || next <= parameter.max);
+  const reset = () => {
+    setDraft(null);
+    onChange(parameter.default);
+  };
+
   if (parameter.parameterType === 'Boolean') {
     return (
       <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
@@ -81,16 +102,17 @@ function ParameterField({ typeId, parameter, value, onChange, toggle }: Paramete
       </div>
     );
   }
-  if (parameter.parameterType === 'String' && ux.options) {
-    const options = ux.options.some((option) => option.value === value)
-      ? ux.options
-      : [...ux.options, { value: String(value), label: `${String(value)} (saved value)` }];
+  if (parameter.parameterType === 'String' && (ux.options || choices)) {
+    const options = ux.options ?? choices!.map((option) => ({ value: option, label: option }));
+    const completeOptions = options.some((option) => option.value === value)
+      ? options
+      : [...options, { value: String(value), label: `${String(value)} (saved value)` }];
     return (
       <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
         <label className="parameter__field parameter__label" data-tooltip={ux.description}>
           <span>{ux.name}</span>
           <select aria-description={ux.description} aria-label={ux.name} onChange={(event) => onChange(event.target.value)} value={String(value)}>
-            {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            {completeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </label>
         {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onClick={() => onChange(parameter.default)} type="button">Reset</button>}
@@ -98,36 +120,76 @@ function ParameterField({ typeId, parameter, value, onChange, toggle }: Paramete
       </div>
     );
   }
-  const numeric = parameter.parameterType === 'Float' || parameter.parameterType === 'Integer';
-  const hasSlider = numeric && ux.min != null && ux.max != null && ux.max > ux.min;
-  const factor = ux.factor ?? 1;
+  const hasSlider = bounded;
   const outsideRecommended = numeric && ux.recommendedRange && typeof value === 'number'
     && ((ux.min != null && value < ux.min) || (ux.max != null && value > ux.max));
   const shownNumber = typeof value === 'number' ? value * factor : value;
   const displayValue = typeof shownNumber === 'number' && ux.precision != null ? Number(shownNumber.toFixed(ux.precision)) : shownNumber;
+  const sliderValue = typeof value === 'number' ? Math.min(max! * factor, Math.max(min! * factor, value * factor)) : min! * factor;
   return (
     <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
       <label className="parameter__field parameter__label" data-tooltip={ux.description}>
         <span>{ux.name}{ux.unit ? ` (${ux.unit})` : ''}</span>
         <span className="parameter__value-row">
-        {hasSlider && <input aria-description={ux.description} aria-label={`${ux.name} slider`} max={ux.max! * factor} min={ux.min! * factor} onChange={(event) => onChange(Number(event.target.value) / factor)} step={ux.step! * factor} type="range" value={Math.min(ux.max! * factor, Math.max(ux.min! * factor, Number(value) * factor))} />}
-        <input
+        {hasSlider && <input
+          aria-description={ux.description}
+          aria-label={`${ux.name} slider`}
+          max={max! * factor}
+          min={min! * factor}
+          onPointerDown={(event) => {
+            sliding.current = true;
+            try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* Continue within the surface. */ }
+          }}
+          onPointerUp={(event) => {
+            if (!sliding.current) return;
+            sliding.current = false;
+            setDraft(null);
+            const next = Number(event.currentTarget.value) / factor;
+            if (validNumericValue(next)) onChange(next);
+          }}
+          onPointerCancel={() => { sliding.current = false; setDraft(null); }}
+          onChange={(event) => {
+            const text = event.target.value;
+            if (sliding.current) setDraft(text);
+            else {
+              setDraft(null);
+              const next = Number(text) / factor;
+              if (validNumericValue(next)) onChange(next);
+            }
+          }}
+          step={(ux.step ?? (wholeNumber ? 1 : 0.01)) * factor}
+          type="range"
+          value={draft != null && Number.isFinite(Number(draft)) ? Number(draft) : sliderValue}
+        />}
+        {multiline && !numeric ? <textarea
+          className="parameter__field--multiline"
+          aria-label={ux.name}
+          aria-description={ux.description}
+          onBlur={() => setDraft(null)}
+          onChange={(event) => { setDraft(event.target.value); onChange(event.target.value); }}
+          value={draft ?? String(value)}
+        /> : <input
+          list={suggestions ? suggestionId : undefined}
           max={parameter.max == null ? undefined : parameter.max * factor}
           min={parameter.min == null ? undefined : parameter.min * factor}
           aria-description={ux.description}
           aria-label={ux.name}
+          aria-invalid={numeric && draft !== null && (draft.trim() === '' || !validNumericValue(Number(draft) / factor)) ? true : undefined}
           onBlur={() => setDraft(null)}
           onChange={(event) => {
             const text = event.target.value;
             setDraft(text);
-            const entered = numeric ? Number(text) : text;
-            const next = numeric && typeof entered === 'number' ? entered / factor : entered;
-            if (!numeric || Number.isFinite(next)) onChange(next);
+            if (!numeric) onChange(text);
+            else {
+              const next = Number(text) / factor;
+              if (text.trim() !== '' && validNumericValue(next)) onChange(next);
+            }
           }}
-          step={ux.step}
+          step={(ux.step ?? (wholeNumber ? 1 : 0.01)) * factor}
           type={numeric ? 'number' : 'text'}
           value={draft ?? String(displayValue)}
-        />
+        />}
+        {suggestions && <datalist id={suggestionId}>{suggestions.map((suggestion) => <option key={suggestion} value={suggestion} />)}</datalist>}
         </span>
       </label>
       {outsideRecommended && <span className="parameter__warning">Outside recommended range</span>}
@@ -266,13 +328,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
         // row above stays the place to grab the frame.
         <details className="graph-node__details nodrag">
           <summary className="graph-node__details-summary">Parameters</summary>
-          {(node.descriptor.inputs.length > 0 || node.descriptor.outputs.length > 0) && (
-            <section className="graph-node__ports-editor" aria-label="Workflow ports">
-              <span className="eyebrow">Workflow ports</span>
-              {node.descriptor.inputs.map((port) => renderPortToggle('Input', port.id, port.name))}
-              {node.descriptor.outputs.map((port) => renderPortToggle('Output', port.id, port.name))}
-            </section>
-          )}
+          {actions?.imageControls?.(node)}
           <div className="parameter-list">
             {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
               const exposed = (node.exposedParameters ?? []).includes(parameter.id);
@@ -282,6 +338,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
                   typeId={node.typeId}
                   onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)}
                   parameter={parameter}
+                  multiline={['prompt', 'negative_prompt', 'workflow_definition', 'points', 'expression'].includes(parameter.id)}
                   toggle={(
                     <button
                       aria-label={`${exposed ? 'Hide' : 'Expose'} ${parameter.name} port`}
@@ -295,6 +352,14 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
                     </button>
                   )}
                   value={node.parameters[parameter.id] ?? parameter.default}
+                  choices={['pro.tone-map', 'pro.advanced-tone-map'].includes(node.typeId) && parameter.id === 'operator' ? ['reinhard', 'filmic', 'aces'] : undefined}
+                  suggestions={node.typeId === 'raw.camera-transform' && parameter.id === 'working_space' ? ['sRGB', 'CameraNative', 'DisplayP3', 'ProPhoto', 'Rec2020'] : undefined}
+                  wholeNumber={
+                    (node.typeId === 'core.crop' || node.typeId === 'core.resize')
+                    && ['x', 'y', 'width', 'height'].includes(parameter.id)
+                    || ['core.blur', 'core.mask-feather', 'core.mask-blur', 'core.mask-expand', 'core.mask-contract'].includes(node.typeId) && parameter.id === 'radius'
+                    || node.typeId === 'core.mask-painted' && ['width', 'height', 'origin_x', 'origin_y'].includes(parameter.id)
+                  }
                 />
               );
             })}
@@ -303,7 +368,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
                 <summary>Advanced</summary>
                 {node.descriptor.parameters.filter((parameter) => parameterUX(node.typeId, parameter).advanced).map((parameter) => {
                   const exposed = (node.exposedParameters ?? []).includes(parameter.id);
-                  return <ParameterField key={parameter.id} typeId={node.typeId} onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)} parameter={parameter} toggle={<button aria-label={`${exposed ? 'Hide' : 'Expose'} ${parameterUX(node.typeId, parameter).name} port`} aria-pressed={exposed} className={`port-toggle${exposed ? ' port-toggle--active' : ''}`} onClick={() => actions?.onToggleExposed(node.id, parameter.id, !exposed)} title={exposed ? 'Remove parameter port' : 'Expose as an input port'} type="button">⇄</button>} value={node.parameters[parameter.id] ?? parameter.default} />;
+                  return <ParameterField key={parameter.id} typeId={node.typeId} onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)} parameter={parameter} multiline={['prompt', 'negative_prompt', 'workflow_definition', 'points', 'expression'].includes(parameter.id)} wholeNumber={(node.typeId === 'core.crop' || node.typeId === 'core.resize') && ['x', 'y', 'width', 'height'].includes(parameter.id) || ['core.blur', 'core.mask-feather', 'core.mask-blur', 'core.mask-expand', 'core.mask-contract'].includes(node.typeId) && parameter.id === 'radius' || node.typeId === 'core.mask-painted' && ['width', 'height', 'origin_x', 'origin_y'].includes(parameter.id)} toggle={<button aria-label={`${exposed ? 'Hide' : 'Expose'} ${parameterUX(node.typeId, parameter).name} port`} aria-pressed={exposed} className={`port-toggle${exposed ? ' port-toggle--active' : ''}`} onClick={() => actions?.onToggleExposed(node.id, parameter.id, !exposed)} title={exposed ? 'Remove parameter port' : 'Expose as an input port'} type="button">⇄</button>} value={node.parameters[parameter.id] ?? parameter.default} />;
                 })}
               </details>
             )}
@@ -314,6 +379,13 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
               <p className="empty-state empty-state--compact">This node has no parameters.</p>
             )}
           </div>
+          {(node.descriptor.inputs.length > 0 || node.descriptor.outputs.length > 0) && (
+            <section className="graph-node__ports-editor" aria-label="Workflow ports">
+              <span className="eyebrow">Workflow ports</span>
+              {node.descriptor.inputs.map((port) => renderPortToggle('Input', port.id, port.name))}
+              {node.descriptor.outputs.map((port) => renderPortToggle('Output', port.id, port.name))}
+            </section>
+          )}
           {checkpoint && (
             <CheckpointPanel
               loading={checkpoint.loading}

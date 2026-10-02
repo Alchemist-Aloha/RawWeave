@@ -139,12 +139,15 @@ impl NodeInstance for FullFrame {
             return Err(NodeError::InvalidParameter("image".to_owned()));
         };
         let mut pixels = image.pixels().to_vec();
-        pixels[0] =
-            if context.requested_region().is_none() && context.tile() == TileCoord::default() {
-                [1.0, 0.0, 0.0, 1.0]
-            } else {
-                [0.0, 1.0, 0.0, 1.0]
-            };
+        pixels[0] = if context.requested_region().is_none()
+            && context.tile() == TileCoord::default()
+            && context.mip_level() == 2
+            && context.quality() == PreviewQuality::Draft
+        {
+            [1.0, 0.0, 0.0, 1.0]
+        } else {
+            [0.0, 1.0, 0.0, 1.0]
+        };
         let output = Image::from_pixels_with_origin(
             image.dimensions(),
             image.origin(),

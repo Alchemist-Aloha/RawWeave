@@ -65,6 +65,7 @@ export class EditorController {
   private readonly redoHistory: HistorySnapshot[] = [];
   private blueprintSerialized: string | null = null;
   private currentHistorySnapshot: HistorySnapshot | null = null;
+  private commandQueue: Promise<void> = Promise.resolve();
   private pendingPositionHistory: HistorySnapshot | null = null;
 
   public constructor(private readonly platform: EditorPlatform) {}
@@ -223,7 +224,17 @@ export class EditorController {
     });
   }
 
-  private async command(action: () => Promise<void>): Promise<void> {
+  private enqueue(action: () => Promise<void>): Promise<void> {
+    const next = this.commandQueue.then(action);
+    this.commandQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private command(action: () => Promise<void>): Promise<void> {
+    return this.enqueue(() => this.performCommand(action));
+  }
+
+  private async performCommand(action: () => Promise<void>): Promise<void> {
     try {
       this.commitPendingPositionHistory();
       const before = this.currentHistorySnapshot
@@ -241,12 +252,16 @@ export class EditorController {
   }
 
   private async restoreHistorySnapshot(snapshot: HistorySnapshot): Promise<void> {
-    await this.platform.loadWorkflow(snapshot.graph);
+    await this.platform.restoreWorkflowHistory(snapshot.graph);
     await this.refresh(snapshot.positions);
     this.currentHistorySnapshot = this.cloneHistorySnapshot(snapshot);
   }
 
-  public async undo(): Promise<void> {
+  public undo(): Promise<void> {
+    return this.enqueue(() => this.undoNow());
+  }
+
+  private async undoNow(): Promise<void> {
     this.commitPendingPositionHistory();
     const target = this.undoHistory.pop();
     if (!target) return;
@@ -266,7 +281,11 @@ export class EditorController {
     }
   }
 
-  public async redo(): Promise<void> {
+  public redo(): Promise<void> {
+    return this.enqueue(() => this.redoNow());
+  }
+
+  private async redoNow(): Promise<void> {
     this.commitPendingPositionHistory();
     const target = this.redoHistory.pop();
     if (!target) return;
@@ -363,6 +382,35 @@ export class EditorController {
 
   public async setParameter(nodeId: string, parameterId: string, value: ParameterValue): Promise<void> {
     await this.command(() => this.platform.setParameter(nodeId, parameterId, value));
+  }
+
+  /** A single user gesture publishes once and creates one undo entry. */
+  public async setParameters(nodeId: string, values: Record<string, ParameterValue>): Promise<void> {
+    await this.command(async () => {
+      const node = this.state.nodes.find((node) => node.id === nodeId);
+      if (!node) throw new Error(`node '${nodeId}' does not exist`);
+      const previous = Object.entries(values).map(([id]) => {
+        const descriptor = node.descriptor.parameters.find((parameter) => parameter.id === id);
+        if (!descriptor) throw new Error(`parameter '${id}' does not exist`);
+        return [id, node.parameters[id] ?? descriptor.default] as const;
+      });
+      try {
+        for (const [id, value] of Object.entries(values)) {
+          await this.platform.setParameter(nodeId, id, value);
+        }
+      } catch (error) {
+        try {
+          for (const [id, value] of previous.reverse()) {
+            await this.platform.setParameter(nodeId, id, value);
+          }
+        } catch (restoreError) {
+          throw new Error(`Parameter edit failed: ${errorMessage(error)}. Restoring previous values failed: ${errorMessage(restoreError)}`);
+        } finally {
+          await this.refresh();
+        }
+        throw error;
+      }
+    });
   }
 
   public async setWorkflowParameter(workflowParameterId: string, value: ParameterValue): Promise<void> {

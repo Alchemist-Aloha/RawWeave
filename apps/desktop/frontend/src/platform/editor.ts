@@ -1309,6 +1309,9 @@ export function createMemoryPlatform(): EditorPlatform {
     async saveWorkflow() {
       return JSON.stringify(snapshot());
     },
+    async restoreWorkflowHistory(serialized) {
+      await this.loadWorkflow(serialized);
+    },
     async loadWorkflow(serialized) {
       const parsed = JSON.parse(serialized) as PlatformSnapshot;
       validateGraph(descriptors, parsed);

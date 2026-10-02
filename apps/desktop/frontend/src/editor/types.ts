@@ -240,6 +240,7 @@ export interface EditorPlatform {
   workflowHash(): Promise<string>;
   saveWorkflow(): Promise<string>;
   loadWorkflow(serialized: string): Promise<void>;
+  restoreWorkflowHistory(serialized: string): Promise<void>;
 }
 
 export interface Position {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import type { EditorNode, ParameterValue, SourceResult } from '../editor/types';
 import { MaskPainter } from '../mask/MaskPainter';
+import { GeometryOverlay } from './GeometryOverlay';
 import { Scopes } from './Scopes';
 import { analyzeImageElement, drawClippingOverlay, type ImageAnalysis } from '../viewer/analysis';
 import { ViewerController } from '../viewer/controller';
@@ -8,7 +9,15 @@ import type { PreviewTarget, ViewerComparison, ViewerId, ViewerPaneState } from 
 import { describeOperationError } from '../ui/errors';
 import { Icon } from '../ui/Icon';
 
+export interface GeometryEditing {
+  node: EditorNode;
+  target: PreviewTarget;
+  onChange: (values: Record<string, ParameterValue>) => void;
+  onCancel: () => void;
+}
+
 interface ViewerProps {
+  geometryEditing?: GeometryEditing;
   controller: ViewerController;
   nodes: EditorNode[];
   revision: number;
@@ -174,7 +183,8 @@ function TargetSelect({ viewer, pane, options, controller }: {
   );
 }
 
-function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, analysis = null, surface = false, clippingOverlay = false, className = '', style }: {
+function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, analysis = null, surface = false, clippingOverlay = false, className = '', style }: {
+  geometryEditing?: GeometryEditing;
   viewer: ViewerId;
   pane: ViewerPaneState;
   options: PreviewTarget[];
@@ -397,6 +407,19 @@ function Pane({ viewer, pane, options, controller, paintedNode, onPaintedMaskCha
             )}
           </div>
         )}
+        {geometryEditing && pane.status === 'ready' && pane.imageUrl && pane.imageRegion
+          && pane.target?.nodeId === geometryEditing.target.nodeId && pane.target.outputPort === geometryEditing.target.outputPort && (
+          <GeometryOverlay
+            key={`${geometryEditing.node.id}:${imageUrl}`}
+            typeId={geometryEditing.node.typeId}
+            parameters={geometryEditing.node.parameters}
+            imageRef={imageRef}
+            size={pane.imageRegion}
+            origin={pane.imageOrigin}
+            onChange={geometryEditing.onChange}
+            onCancel={geometryEditing.onCancel}
+          />
+        )}
         {pane.target?.dataType === 'core.Mask' && paintedNode && (
           <MaskPainter
             imageOrigin={pane.imageOrigin}
@@ -532,7 +555,7 @@ function ComparisonSurface({
   );
 }
 
-export function Viewer({ controller, nodes, revision, source, paintedNode, onPaintedMaskChange, docked = false, collapsed = false, onToggleCollapsed }: ViewerProps) {
+export function Viewer({ geometryEditing, controller, nodes, revision, source, paintedNode, onPaintedMaskChange, docked = false, collapsed = false, onToggleCollapsed }: ViewerProps) {
   const [, setRender] = useState(0);
   const options = useMemo(() => targetsFor(nodes), [nodes]);
   const [wipePosition, setWipePosition] = useState(50);
@@ -688,6 +711,7 @@ export function Viewer({ controller, nodes, revision, source, paintedNode, onPai
             options={options}
             paintedNode={paintedNode}
             pane={controller.state.panes.A}
+            geometryEditing={geometryEditing}
             viewer="A" />
           {showCompare && <Pane
             analysis={analyses.B}

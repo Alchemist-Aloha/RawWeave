@@ -139,6 +139,118 @@ describe('GraphNode parameters', () => {
     container.remove();
   });
 
+  it('provides bounded sliders, precise numeric editing, validation, and reset', async () => {
+    const boundedNode: EditorNode = {
+      ...node,
+      parameters: { amount: 0.5, count: 2 },
+      descriptor: {
+        ...node.descriptor,
+        parameters: [
+          { id: 'amount', name: 'Amount', parameterType: 'Float', default: 0.5, min: 0, max: 1 },
+          { id: 'count', name: 'Count', parameterType: 'Integer', default: 2, min: 1, max: 5 },
+        ],
+      },
+    };
+    const value = actions();
+    const { container, root } = await renderNode(boundedNode, value);
+
+    expect(container.querySelector('input[type="range"][aria-label="Amount slider"]')).not.toBeNull();
+    expect(container.querySelector('input[type="range"][aria-label="Count slider"]')).not.toBeNull();
+
+    const amount = container.querySelector<HTMLInputElement>('input[aria-label="Amount"]');
+    const count = container.querySelector<HTMLInputElement>('input[aria-label="Count"]');
+    if (!amount || !count) throw new Error('numeric parameter inputs missing');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    const type = async (input: HTMLInputElement, text: string) => {
+      setter?.call(input, text);
+      await act(async () => input.dispatchEvent(new Event('input', { bubbles: true })));
+    };
+
+    const slider = container.querySelector<HTMLInputElement>('input[aria-label="Amount slider"]')!;
+    await act(async () => slider.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+    await type(slider, '0.8');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => slider.dispatchEvent(new MouseEvent('pointerup', { bubbles: true })));
+    expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.8);
+    vi.mocked(value.onParameterChange).mockClear();
+    await type(slider, '0.7');
+    expect(amount.value).toBe('0.5');
+    vi.mocked(value.onParameterChange).mockClear();
+    await type(amount, '');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await type(amount, '0.75');
+    await type(amount, '2');
+    await type(count, '2.5');
+    expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.75);
+    expect(value.onParameterChange).not.toHaveBeenCalledWith('exposure', 'amount', 2);
+    expect(value.onParameterChange).not.toHaveBeenCalledWith('exposure', 'count', 2.5);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Reset Amount"]')?.click();
+    });
+    expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.5);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it('uses whole-pixel editing for crop geometry and multiline fields', async () => {
+    const cropNode: EditorNode = {
+      ...node,
+      typeId: 'core.crop',
+      descriptor: {
+        ...node.descriptor,
+        typeId: 'core.crop',
+        parameters: [{ id: 'x', name: 'X', parameterType: 'Float', default: 0, min: 0, max: 10 }],
+      },
+      parameters: { x: 0 },
+    };
+    const value = actions();
+    const { container, root } = await renderNode(cropNode, value);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="X"]');
+    if (!input) throw new Error('crop input missing');
+    expect(input.step).toBe('1');
+
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    setter?.call(input, '1.5');
+    await act(async () => input.dispatchEvent(new Event('input', { bubbles: true })));
+    expect(value.onParameterChange).not.toHaveBeenCalledWith('exposure', 'x', 1.5);
+
+    const multilineNode: EditorNode = {
+      ...node,
+      descriptor: {
+        ...node.descriptor,
+        parameters: [{ id: 'prompt', name: 'Prompt', parameterType: 'String', default: '', min: null, max: null }],
+      },
+      parameters: { prompt: '' },
+    };
+    await act(async () => root.unmount());
+    container.remove();
+    const rendered = await renderNode(multilineNode, value);
+    expect(rendered.container.querySelector('textarea[aria-label="Prompt"]')).not.toBeNull();
+    await act(async () => rendered.root.unmount());
+    rendered.container.remove();
+  });
+
+  it('uses whole-pixel sliders for blur and mask filter radii', async () => {
+    const blur: EditorNode = { ...node, typeId: 'core.blur', parameters: { radius: 1 }, descriptor: { ...node.descriptor, parameters: [{ id: 'radius', name: 'Radius', parameterType: 'Float', default: 1, min: 0, max: 64 }] } };
+    const { container, root } = await renderNode(blur, actions());
+    expect(container.querySelector('input[type="range"]')?.getAttribute('step')).toBe('1');
+    expect(container.querySelector('input[type="number"]')?.getAttribute('step')).toBe('1');
+    await act(async () => root.unmount()); container.remove();
+  });
+
+  it('offers the backend tone mapping operators without losing imported values', async () => {
+    const tone: EditorNode = { ...node, typeId: 'pro.tone-map', parameters: { operator: 'filmic' }, descriptor: { ...node.descriptor, parameters: [{ id: 'operator', name: 'Operator', parameterType: 'String', default: 'reinhard', min: null, max: null }] } };
+    const value = actions();
+    const { container, root } = await renderNode(tone, value);
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Operator"]')!;
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['reinhard', 'filmic', 'aces']);
+    await act(async () => { select.value = 'aces'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'operator', 'aces');
+    await act(async () => root.unmount()); container.remove();
+  });
+
   it('deletes only on a clean press of the delete button, never on a drag', async () => {
     const value = actions();
     const { container, root } = await renderNode(node, value);

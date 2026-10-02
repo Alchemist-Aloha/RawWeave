@@ -3251,9 +3251,26 @@ fn load_workflow(state: State<'_, AppState>, workflow: String) -> Result<(), Str
     load_workflow_state(&state, &workflow)
 }
 
+#[tauri::command]
+fn restore_workflow_history(state: State<'_, AppState>, workflow: String) -> Result<(), String> {
+    restore_workflow_history_state(&state, &workflow)
+}
+
 fn load_workflow_state(state: &AppState, workflow: &str) -> Result<(), String> {
+    load_workflow_state_with_source_policy(state, workflow, true)
+}
+
+fn restore_workflow_history_state(state: &AppState, workflow: &str) -> Result<(), String> {
+    load_workflow_state_with_source_policy(state, workflow, false)
+}
+
+fn load_workflow_state_with_source_policy(
+    state: &AppState,
+    workflow: &str,
+    clear_source: bool,
+) -> Result<(), String> {
     if preview_diagnostics_enabled() {
-        eprintln!("[preview] load workflow clears source");
+        eprintln!("[preview] load workflow clear_source={clear_source}");
     }
     let artifact_store = state.checkpoint.store.clone();
     lock_editor(&state.editor)?
@@ -3262,15 +3279,17 @@ fn load_workflow_state(state: &AppState, workflow: &str) -> Result<(), String> {
     clear_blueprint(state)?;
     let editor = lock_editor(&state.editor)?.clone();
     state.checkpoint.replace_from_graph(&editor)?;
-    *state
-        .source_image
-        .lock()
-        .map_err(|_| "source image state is unavailable".to_owned())? = None;
-    *state
-        .source_selection
-        .lock()
-        .map_err(|_| "source selection state is unavailable".to_owned())? =
-        SourceSelectionIntent::AttachToLoadedWorkflow;
+    if clear_source {
+        *state
+            .source_image
+            .lock()
+            .map_err(|_| "source image state is unavailable".to_owned())? = None;
+        *state
+            .source_selection
+            .lock()
+            .map_err(|_| "source selection state is unavailable".to_owned())? =
+            SourceSelectionIntent::AttachToLoadedWorkflow;
+    }
     state.preview.cancel_all();
     Ok(())
 }
@@ -4139,6 +4158,7 @@ pub fn run() {
             workflow_dependency_report,
             save_workflow,
             load_workflow,
+            restore_workflow_history,
             create_batch_job,
             load_batch_job,
             batch_preflight,
@@ -4933,6 +4953,50 @@ mod tests {
         let error =
             preview::render_preview(&preview, &editor, &current_editor, None, request).unwrap_err();
         assert!(error.contains("source image unavailable"));
+    }
+
+    #[test]
+    fn history_restore_preserves_runtime_source_and_source_selection() {
+        let mut loaded_editor = EditorCore::default();
+        loaded_editor.add_node("input", "core.image-input").unwrap();
+        loaded_editor.add_node("output", "core.output").unwrap();
+        loaded_editor
+            .connect("input", "image", "output", "image")
+            .unwrap();
+        let workflow = loaded_editor.save_workflow().unwrap();
+        let source =
+            SourceAsset::Ordinary(Image::from_pixels(1, 1, vec![[0.25, 0.5, 0.75, 1.0]]).unwrap());
+        let preview = Arc::new(preview::PreviewManager::default());
+        preview.begin("history-restore-preview");
+        let state = AppState {
+            editor: Arc::new(Mutex::new(EditorCore::default())),
+            hosts: Arc::new(Mutex::new(hosts::HostManager::memory())),
+            preview: Arc::clone(&preview),
+            source_image: Mutex::new(Some(source.clone())),
+            source_selection: Mutex::new(SourceSelectionIntent::ReplaceWorkflow),
+            blueprint: Mutex::new(None),
+            blueprint_stack: Mutex::new(Vec::new()),
+            batch: Arc::new(BatchManager::default()),
+            checkpoint: Arc::new(CheckpointManager::default()),
+        };
+
+        restore_workflow_history_state(&state, &workflow).unwrap();
+
+        let source_image = state.source_image.lock().unwrap();
+        let Some(SourceAsset::Ordinary(image)) = source_image.as_ref() else {
+            panic!("history restore should retain the ordinary source");
+        };
+        assert_eq!(image.pixel(0, 0), Some([0.25, 0.5, 0.75, 1.0]));
+        drop(source_image);
+        assert_eq!(
+            *state.source_selection.lock().unwrap(),
+            SourceSelectionIntent::ReplaceWorkflow
+        );
+        assert!(preview.is_cancelled("history-restore-preview"));
+        assert_eq!(
+            state.editor.lock().unwrap().save_workflow().unwrap(),
+            workflow
+        );
     }
 
     #[test]

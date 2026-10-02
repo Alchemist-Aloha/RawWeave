@@ -727,6 +727,15 @@ export function createTauriPlatform(): EditorPlatform {
         throw message(error);
       }
     },
+    async restoreWorkflowHistory(serialized) {
+      try {
+        await invoke('restore_workflow_history', { workflow: serialized });
+        activeDefinition = null;
+        scopePath = [{ id: 'workflow', name: 'Workflow', version: '1.0.0' }];
+      } catch (error) {
+        throw message(error);
+      }
+    },
     async loadWorkflow(serialized) {
       try {
         await invoke('load_workflow', { workflow: serialized });

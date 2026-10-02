@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 
 use png::{BitDepth, ColorType, Encoder};
@@ -465,6 +465,15 @@ fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
     }
 }
 
+fn preview_probe_context(
+    source: &crate::SourceAsset,
+    request: &PreviewRequest,
+) -> EvaluationContext {
+    evaluation_context(source)
+        .with_mip_level(request.mip)
+        .with_quality(request.quality.into())
+}
+
 const LABEL_PREVIEW_COLORS: [[f32; 3]; 8] = [
     [0.12, 0.42, 0.78],
     [0.92, 0.32, 0.18],
@@ -745,12 +754,9 @@ pub fn render_preview(
         let source = source.ok_or_else(|| {
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
+        let probe_context = preview_probe_context(&source, &request);
         let full_frame = editor
-            .evaluate(
-                &request.node_id,
-                &request.output_port,
-                evaluation_context(&source),
-            )
+            .evaluate(&request.node_id, &request.output_port, probe_context)
             .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
         let full_frame =
             color_value_to_image(full_frame, request.mask_display).map_err(|error| {
@@ -783,18 +789,31 @@ pub fn render_preview(
             request.mip,
             request.quality.into(),
         ));
-        let value = editor
-            .evaluate(&request.node_id, &request.output_port, context)
-            .map_err(|error| format!("preview evaluation failed: {error}"))?;
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
         }
-        let image = color_value_to_image(value, request.mask_display).map_err(|error| {
-            format!(
-                "preview output '{}:{}' is not displayable: {error}",
-                request.node_id, request.output_port
-            )
-        })?;
+        let full_frame_target = editor
+            .graph()
+            .nodes()
+            .values()
+            .find(|node| node.id.as_str() == request.node_id)
+            .is_some_and(|node| {
+                node.descriptor.select_execution_capability(&context)
+                    == Some(rawweave_node_api::ExecutionCapability::FullFrame)
+            });
+        let image = if full_frame_target {
+            full_frame
+        } else {
+            let value = editor
+                .evaluate(&request.node_id, &request.output_port, context)
+                .map_err(|error| format!("preview evaluation failed: {error}"))?;
+            color_value_to_image(value, request.mask_display).map_err(|error| {
+                format!(
+                    "preview output '{}:{}' is not displayable: {error}",
+                    request.node_id, request.output_port
+                )
+            })?
+        };
         let image = select_preview_image(&image, requested_region, request.mip)?;
         let latest_revision = current_editor
             .lock()
@@ -995,10 +1014,39 @@ mod tests {
     }
 
     #[test]
+    fn preview_probe_context_preserves_requested_mip_and_quality() {
+        let source = crate::SourceAsset::Ordinary(Image::new(4, 4).unwrap());
+        let request = PreviewRequest {
+            request_id: "probe-context".to_owned(),
+            revision: 0,
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Draft,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 2,
+            mask_display: MaskDisplayRequest::Grayscale,
+        };
+
+        let context = preview_probe_context(&source, &request);
+
+        assert_eq!(context.mip_level(), 2);
+        assert_eq!(context.quality(), PreviewQuality::Draft);
+    }
+
+    #[test]
     fn protocol_preview_can_be_loaded_again_until_released() {
         let manager = PreviewManager::default();
         let path = preview_path("request");
-        manager.store.insert(path.clone(), 12, vec![1, 2, 3]).unwrap();
+        manager
+            .store
+            .insert(path.clone(), 12, vec![1, 2, 3])
+            .unwrap();
         let request = Request::builder()
             .uri(preview_url("request"))
             .body(Vec::new())
@@ -1399,7 +1447,10 @@ mod tests {
             PREVIEW_MIME_TYPE
         );
         assert_eq!(
-            response.headers().get("Access-Control-Allow-Origin").unwrap(),
+            response
+                .headers()
+                .get("Access-Control-Allow-Origin")
+                .unwrap(),
             "*"
         );
         assert_eq!(response.body(), &bytes);
@@ -1457,5 +1508,112 @@ mod tests {
         assert_ne!(gray_bytes, overlay_bytes);
         assert_eq!(&gray_bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&overlay_bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    #[ignore]
+    fn release_preview_benchmark_corpus() {
+        use std::time::Instant;
+        let raw_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test-data/images/raw/nikon-d70s-12bit-lossy.nef");
+        let bytes = std::fs::read(&raw_path).unwrap();
+        let source = crate::SourceAsset::Raw {
+            bytes: Arc::new(bytes),
+            path: raw_path,
+        };
+        let mut editor = EditorCore::default();
+        crate::build_raw_workflow(&mut editor).unwrap();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        for iteration in 0..4 {
+            let request = PreviewRequest {
+                request_id: format!("bench-{iteration}"),
+                revision: editor.graph().revision(),
+                node_id: "display-transform".to_owned(),
+                output_port: "display".to_owned(),
+                quality: PreviewQualityRequest::Preview,
+                region: PreviewRegionRequest {
+                    x: 0,
+                    y: 0,
+                    width: 512,
+                    height: 512,
+                },
+                tile: PreviewTileRequest { x: 0, y: 0 },
+                mip: 2,
+                mask_display: MaskDisplayRequest::Grayscale,
+            };
+            let start = Instant::now();
+            render_preview(
+                &manager,
+                &editor,
+                &current_editor,
+                Some(source.clone()),
+                request,
+            )
+            .unwrap();
+            eprintln!(
+                "RAW preview {iteration}: {:.2} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            manager.discard(&format!("bench-{iteration}"));
+        }
+    }
+
+    #[test]
+    fn raw_full_frame_preview_decodes_source_once() {
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingDecoder {
+            count: Arc<AtomicUsize>,
+            frame: rawweave_raw::RawFrame,
+        }
+
+        impl rawweave_raw::RawDecoder for CountingDecoder {
+            fn decode(
+                &self,
+                _input: &[u8],
+            ) -> Result<rawweave_raw::RawFrame, rawweave_raw::RawError> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(self.frame.clone())
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut editor = EditorCore::new_with_raw_decoder(CountingDecoder {
+            count: Arc::clone(&count),
+            frame: rawweave_raw::DeterministicCorpus::bayer_12_bit(),
+        });
+        crate::build_raw_workflow(&mut editor).unwrap();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let request = PreviewRequest {
+            request_id: "count-raw-decodes".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "display-transform".to_owned(),
+            output_port: "display".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 0,
+            mask_display: MaskDisplayRequest::Grayscale,
+        };
+
+        render_preview(
+            &PreviewManager::default(),
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Raw {
+                bytes: Arc::new(vec![1]),
+                path: Path::new("test.dng").to_path_buf(),
+            }),
+            request,
+        )
+        .unwrap();
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

@@ -476,3 +476,78 @@ describe('editor controller', () => {
     });
   });
 });
+
+
+describe('grouped parameter editing', () => {
+  it('publishes a region edit together and undoes it in one step', async () => {
+    const editor = await controller();
+    await editor.createNode('core.crop');
+    const crop = editor.state.nodes.find((node) => node.typeId === 'core.crop')!;
+    const before = { ...crop.parameters };
+    const changes: Record<string, unknown>[] = [];
+    editor.subscribe((state) => changes.push({ ...state.nodes.find((node) => node.id === crop.id)?.parameters }));
+    await editor.setParameters(crop.id, { x: 10, y: 20, width: 320, height: 200 });
+    expect(changes.every((value) => value.width === before.width || (value.width === 320 && value.height === 200))).toBe(true);
+    expect(editor.state.nodes.find((node) => node.id === crop.id)?.parameters).toMatchObject({ x: 10, y: 20, width: 320, height: 200 });
+    await editor.undo();
+    expect(editor.state.nodes.find((node) => node.id === crop.id)?.parameters).toEqual(before);
+  });
+});
+
+
+it('rolls back a failed grouped edit and serializes rapid parameter gestures', async () => {
+  const base = createMemoryPlatform();
+  let rejectHeight = false;
+  const writes: string[] = [];
+  const editor = new EditorController({ ...base, async setParameter(nodeId, id, value) {
+    writes.push(`${id}:${value}`);
+    await Promise.resolve();
+    if (rejectHeight && id === 'height') { rejectHeight = false; throw new Error('height rejected'); }
+    await base.setParameter(nodeId, id, value);
+  } });
+  await editor.initialize();
+  const cropId = await editor.createNode('core.crop');
+  const before = { ...editor.state.nodes.find((node) => node.id === cropId)!.parameters };
+  rejectHeight = true;
+  await expect(editor.setParameters(cropId, { width: 100, height: 50 })).rejects.toThrow('height rejected');
+  expect((await base.snapshot()).nodes.find((node) => node.id === cropId)!.parameters).toEqual(before);
+  expect(editor.state.nodes.find((node) => node.id === cropId)!.parameters).toEqual(before);
+  writes.length = 0;
+  await Promise.all([editor.setParameters(cropId, { width: 200, height: 100 }), editor.setParameters(cropId, { width: 400, height: 200 })]);
+  expect(writes).toEqual(['width:200', 'height:100', 'width:400', 'height:200']);
+  await editor.undo();
+  expect(editor.state.nodes.find((node) => node.id === cropId)!.parameters).toMatchObject({ width: 200, height: 100 });
+});
+
+
+it('restores even a parameter whose platform write mutates then rejects', async () => {
+  const base = createMemoryPlatform();
+  let rejectAfterWrite = false;
+  const editor = new EditorController({ ...base, async setParameter(nodeId, id, value) {
+    await base.setParameter(nodeId, id, value);
+    if (rejectAfterWrite) { rejectAfterWrite = false; throw new Error('reply lost'); }
+  } });
+  await editor.initialize();
+  const id = await editor.createNode('core.crop');
+  rejectAfterWrite = true;
+  await expect(editor.setParameters(id, { width: 100, height: 50 })).rejects.toThrow('reply lost');
+  expect((await base.snapshot()).nodes.find((node) => node.id === id)!.parameters).toMatchObject({ width: 1, height: 1 });
+  expect(editor.state.nodes.find((node) => node.id === id)!.parameters).toMatchObject({ width: 1, height: 1 });
+});
+
+
+it('restores undo history through the source-preserving platform operation', async () => {
+  const base = createMemoryPlatform();
+  let restores = 0;
+  const editor = new EditorController({ ...base,
+    async loadWorkflow() { throw new Error('normal loading clears the source'); },
+    async restoreWorkflowHistory(serialized: string) { restores += 1; await base.loadWorkflow(serialized); },
+  });
+  await editor.initialize();
+  const id = await editor.createNode('core.crop');
+  await editor.setParameters(id, { width: 100, height: 50 });
+  await editor.undo();
+  await editor.redo();
+  expect(restores).toBe(2);
+  expect(editor.state.nodes.find((node) => node.id === id)!.parameters).toMatchObject({ width: 100, height: 50 });
+});

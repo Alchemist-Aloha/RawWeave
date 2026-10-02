@@ -41,6 +41,8 @@ import type {
   CheckpointPreviewActions,
 } from './components/CheckpointPanel';
 import { NodeLibrary } from './components/NodeLibrary';
+import { ImageNodeControls } from './components/ImageNodeControls';
+import { DRAWABLE_NODES } from './viewer/region';
 import { targetsFor, Viewer } from './components/Viewer';
 import { ViewerController } from './viewer/controller';
 import type { ViewerState } from './viewer/types';
@@ -472,6 +474,7 @@ export default function App() {
     controller.state.nodes,
     controller.state.revision,
     controller.state.scopePath,
+    controller.state.source,
     controller.state.workflowInputs,
     controller.state.workflowOutputs,
     controller.state.workflowParameters,
@@ -852,7 +855,57 @@ export default function App() {
     [controller],
   );
 
+  const [geometryNodeId, setGeometryNodeId] = useState<string | null>(null);
+  const inputTarget = useCallback((node: EditorNode) => {
+    const edge = controller.state.edges.find((edge) => edge.toNode === node.id && edge.toPort === 'image');
+    return targetsFor(controller.state.nodes).find((target) => target.nodeId === edge?.fromNode && target.outputPort === edge.fromPort) ?? null;
+  }, [controller.state.edges, controller.state.nodes]);
+  const geometryNode = controller.state.nodes.find((node) => node.id === geometryNodeId && node.id === selectedNode?.id);
+  const geometryTarget = geometryNode ? inputTarget(geometryNode) : null;
+  const geometryEditing = geometryNode && geometryTarget ? {
+    node: geometryNode,
+    target: geometryTarget,
+    onChange: (values: Record<string, ParameterValue>) => { void controller.setParameters(geometryNode.id, values).catch(() => undefined); },
+    onCancel: () => {
+      setGeometryNodeId(null);
+      const output = targetsFor([geometryNode])[0];
+      if (output) viewerController.setTarget('A', output);
+    },
+  } : undefined;
+
+  useEffect(() => {
+    if (!geometryNodeId) return;
+    if (!geometryNode || !geometryTarget) {
+      setGeometryNodeId(null);
+      const node = controller.state.nodes.find((node) => node.id === geometryNodeId);
+      viewerController.setTarget('A', node ? targetsFor([node])[0] ?? null : null);
+      return;
+    }
+    const current = viewerController.state.panes.A.target;
+    if (current?.nodeId !== geometryTarget.nodeId || current.outputPort !== geometryTarget.outputPort) {
+      viewerController.setTarget('A', geometryTarget);
+    }
+  }, [controller, geometryNodeId, geometryNode?.id, geometryTarget?.nodeId, geometryTarget?.outputPort, viewerController]);
+
   const nodeActions = useMemo<GraphNodeActions>(() => ({
+    imageControls: (node) => <ImageNodeControls
+      node={node}
+      target={inputTarget(node)}
+      inputSize={controller.state.source && controller.state.source.kind !== 'imageset'
+        && controller.state.nodes.find((candidate) => candidate.id === inputTarget(node)?.nodeId)?.typeId === 'core.image-input'
+        ? { width: controller.state.source.width, height: controller.state.source.height } : undefined}
+      controller={viewerController}
+      onChange={(values) => { void controller.setParameters(node.id, values).catch(() => undefined); }}
+      onDraw={() => {
+        const target = inputTarget(node);
+        if (!target) return;
+        controller.selectNode(node.id);
+        setGeometryNodeId(DRAWABLE_NODES.has(node.typeId) ? node.id : null);
+        viewerController.setComparison('side-by-side');
+        viewerController.setTarget('A', target);
+        setDock((current) => ({ ...current, rightCollapsed: false, previewCollapsed: false }));
+      }}
+    />,
     onParameterChange: (nodeId, parameterId, value) => {
       void controller.setParameter(nodeId, parameterId, value).catch(() => undefined);
     },
@@ -880,11 +933,14 @@ export default function App() {
       }
       : null,
   }), [
+    inputTarget,
+    viewerController,
     cancelCheckpoint,
     checkpointController.state.loading,
     checkpointOutputPorts,
     checkpointPreviewActions,
     controller,
+    controller.state.source,
     controller.state.workflowInputs,
     controller.state.workflowOutputs,
     generateCheckpoint,
@@ -1096,6 +1152,11 @@ export default function App() {
           setShowSubgraphForm(false);
           return;
         }
+        if (geometryEditing) {
+          event.preventDefault();
+          geometryEditing.onCancel();
+          return;
+        }
       }
       const action = shortcutAction(event);
       if (!action) return;
@@ -1142,7 +1203,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [controller, disconnectEdge, fileInput, nodeSearchInput, openImage, selectedEdgeId, showShortcuts, showSubgraphForm]);
+  }, [controller, disconnectEdge, fileInput, geometryEditing, nodeSearchInput, openImage, selectedEdgeId, showShortcuts, showSubgraphForm]);
 
   const editorErrorNotice = controller.state.error
     ? describeEditorError(controller.state.error, {
@@ -1466,6 +1527,7 @@ export default function App() {
                   collapsed={dock.previewCollapsed}
                   controller={viewerController}
                   docked
+                  geometryEditing={geometryEditing}
                   nodes={controller.state.nodes}
                   onPaintedMaskChange={onPaintedMaskChange}
                   onToggleCollapsed={() => toggleDock('previewCollapsed')}

@@ -178,6 +178,109 @@ describe('real Tauri preview', () => {
     expect(fits.canvas).toBe(true);
   });
 
+  it('draws a crop region on the real input preview and undoes it as one edit', async () => {
+    const search = await $('input[placeholder="Search nodes"]');
+    await search.setValue('Crop');
+    await $('.node-library__item').click();
+    await browser.tauri.execute((tauri) => tauri.core.invoke('disconnect_nodes', {
+      fromNode: 'input', fromPort: 'image', toNode: 'output', toPort: 'image',
+    }));
+    await browser.tauri.execute((tauri) => tauri.core.invoke('connect_nodes', {
+      fromNode: 'input', fromPort: 'image', toNode: 'crop', toPort: 'image',
+    }));
+    await browser.tauri.execute((tauri) => tauri.core.invoke('connect_nodes', {
+      fromNode: 'crop', fromPort: 'image', toNode: 'output', toPort: 'image',
+    }));
+
+    const node = await $('[aria-label="Crop node"]');
+    await node.click();
+    const details = await node.$('details.graph-node__details');
+    if (!(await details.getProperty('open'))) await details.$('summary').click();
+    // The direct backend connections above need one normal controller command
+    // to refresh the React snapshot before the input target can be observed.
+    await node.$('button[aria-label="Reset X"]').click();
+    const draw = await node.$('button*=Draw crop region');
+    await draw.waitForDisplayed();
+    await browser.waitUntil(async () => await draw.isEnabled(), {
+      timeout: 20_000,
+      timeoutMsg: 'connected crop input never enabled drawing',
+    });
+    await draw.click();
+    const overlay = await $('[aria-label="Draw image region"]');
+    await overlay.waitForDisplayed();
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
+    await expect(node).toHaveText(expect.stringContaining('Input resolution:'));
+    const points = await browser.execute(() => {
+      const image = document.querySelector('.viewer-pane__image').getBoundingClientRect();
+      return {
+        start: { x: image.left + image.width * 0.2, y: image.top + image.height * 0.2 },
+        end: { x: image.left + image.width * 0.8, y: image.top + image.height * 0.8 },
+      };
+    });
+    const pointer = (type, point) => browser.execute((kind, at) => {
+      document.querySelector('[aria-label="Draw image region"]').dispatchEvent(new PointerEvent(kind, {
+        bubbles: true, cancelable: true, composed: true, pointerId: 37, pointerType: 'mouse',
+        isPrimary: true, button: 0, buttons: kind === 'pointerup' ? 0 : 1,
+        clientX: at.x, clientY: at.y,
+      }));
+    }, type, point);
+    await pointer('pointerdown', points.start);
+    await pointer('pointermove', points.end);
+    await pointer('pointerup', points.end);
+
+    let saved;
+    await browser.waitUntil(async () => {
+      saved = JSON.parse(await browser.tauri.execute((tauri) => tauri.core.invoke('save_workflow')));
+      return saved.nodes.crop.parameters.width.Float > 1;
+    }, { timeoutMsg: 'crop gesture did not persist its parameters' });
+    const parameters = saved.nodes.crop.parameters;
+    expect(parameters.x.Float).toBeGreaterThan(0);
+    expect(parameters.y.Float).toBeGreaterThan(0);
+    expect(parameters.width.Float).toBeGreaterThan(100);
+    expect(parameters.height.Float).toBeGreaterThan(100);
+    await $$('button').then(async (buttons) => {
+      for (const button of buttons) {
+        if ((await button.getText()).trim() === 'Undo') return button.click();
+      }
+      throw new Error('Undo button was not found');
+    });
+    await browser.waitUntil(async () => {
+      const workflow = JSON.parse(await browser.tauri.execute((tauri) => tauri.core.invoke('save_workflow')));
+      return workflow.nodes.crop.parameters.x.Float === 0
+        && workflow.nodes.crop.parameters.y.Float === 0
+        && workflow.nodes.crop.parameters.width.Float === 1
+        && workflow.nodes.crop.parameters.height.Float === 1;
+    }, { timeoutMsg: 'undo did not restore the crop defaults' });
+    await browser.execute(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    await expect($('[aria-label="Draw image region"]')).not.toExist();
+    await browser.waitUntil(async () => browser.execute(() =>
+      document.querySelector('select[aria-label="Viewer A target"]')?.value === 'crop:image'), {
+      timeoutMsg: 'crop preview target was not restored after Escape',
+    });
+    await browser.waitUntil(async () => browser.execute(() => {
+      const image = document.querySelector('.viewer-pane__image');
+      return image?.complete === true && image.naturalWidth > 0;
+    }), { timeoutMsg: 'crop preview image was not restored after undo and Escape' });
+    await browser.tauri.execute((tauri) => tauri.core.invoke('disconnect_nodes', {
+      fromNode: 'input', fromPort: 'image', toNode: 'crop', toPort: 'image',
+    }));
+    await browser.tauri.execute((tauri) => tauri.core.invoke('disconnect_nodes', {
+      fromNode: 'crop', fromPort: 'image', toNode: 'output', toPort: 'image',
+    }));
+    await browser.tauri.execute((tauri) => tauri.core.invoke('connect_nodes', {
+      fromNode: 'input', fromPort: 'image', toNode: 'output', toPort: 'image',
+    }));
+    const cropNode = await $('[aria-label="Crop node"]');
+    await cropNode.click();
+    const deleteCrop = await cropNode.$('button[aria-label="Delete Crop"]');
+    await browser.execute((element) => element.click(), deleteCrop);
+    await browser.waitUntil(async () => browser.execute(() =>
+      document.querySelector('.canvas-panel__meta')?.textContent?.includes('2 nodes')), {
+      timeoutMsg: 'UI crop cleanup did not restore the two-node workflow',
+    });
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
+  });
+
   it('keeps the workflow graph visible after switching workspaces', async () => {
     const workspace = await $('.workbench');
     const flow = await $('.react-flow');

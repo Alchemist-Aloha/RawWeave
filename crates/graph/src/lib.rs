@@ -999,7 +999,10 @@ impl Graph {
         };
         let memo_key = MemoKey {
             node_id: node_id.clone(),
-            requested_output: requested_output.map(str::to_owned),
+            requested_output: (node.descriptor.evaluation_policy
+                == EvaluationPolicy::ManualCheckpoint)
+                .then(|| requested_output.map(str::to_owned))
+                .flatten(),
             requested_region: execution_context.requested_region(),
             tile: execution_context.tile(),
             mip_level: execution_context.mip_level(),
