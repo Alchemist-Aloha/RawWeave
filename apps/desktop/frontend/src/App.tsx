@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   Background,
   BackgroundVariant,
@@ -420,6 +420,7 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
   const [dock, setDock] = useState<DockLayout>(loadDockLayout);
+  const [portrait, setPortrait] = useState(() => window.matchMedia('(orientation: portrait)').matches);
   const [lamp, setLamp] = useState<'on' | 'off'>(loadLamp);
   const fileInput = useRef<HTMLInputElement>(null);
   const blueprintInput = useRef<HTMLInputElement>(null);
@@ -484,6 +485,14 @@ export default function App() {
     saveDockLayout(dock);
   }, [dock]);
 
+  useEffect(() => {
+    const orientation = window.matchMedia('(orientation: portrait)');
+    const update = () => setPortrait(orientation.matches);
+    update();
+    orientation.addEventListener('change', update);
+    return () => orientation.removeEventListener('change', update);
+  }, []);
+
   const toggleDock = useCallback((key: 'libraryCollapsed' | 'rightCollapsed' | 'previewCollapsed' | 'sourceCollapsed') => {
     setDock((current) => ({ ...current, [key]: !current[key] }));
   }, []);
@@ -495,7 +504,7 @@ export default function App() {
     requestAnimationFrame(() => nodeSearchInput.current?.focus());
   }, []);
 
-  const resizeDockBy = useCallback((key: 'libraryWidth' | 'rightWidth' | 'previewSize' | 'sourceSize', delta: number) => {
+  const resizeDockBy = useCallback((key: 'libraryWidth' | 'rightWidth' | 'rightHeight' | 'previewSize' | 'sourceSize', delta: number) => {
     setDock((current) => resizeDock(current, key, delta));
   }, []);
 
@@ -1374,7 +1383,10 @@ export default function App() {
         workflowParameters={controller.state.workflowParameters}
       />
 
-      <div className="workbench">
+      <div className="workbench" style={{
+        '--right-dock-height': dock.rightCollapsed ? '32px' : `${dock.rightHeight}px`,
+        '--right-divider-height': dock.rightCollapsed ? '0px' : '5px',
+      } as CSSProperties}>
         <aside
           className={`dock dock--left${dock.libraryCollapsed ? ' dock--rail' : ''}`}
           style={dock.libraryCollapsed ? undefined : { width: dock.libraryWidth }}
@@ -1507,12 +1519,12 @@ export default function App() {
         </section>
 
         {!dock.rightCollapsed && (
-          <Splitter axis="width" label="Resize right panel" onResize={(delta) => resizeDockBy('rightWidth', -delta)} />
+          <Splitter axis={portrait ? 'height' : 'width'} label="Resize right panel" onResize={(delta) => resizeDockBy(portrait ? 'rightHeight' : 'rightWidth', -delta)} />
         )}
 
         <aside
           className={`dock dock--right${dock.rightCollapsed ? ' dock--rail' : ''}`}
-          style={dock.rightCollapsed ? undefined : { width: dock.rightWidth }}
+          style={dock.rightCollapsed ? undefined : { '--dock-width': `${dock.rightWidth}px` } as CSSProperties}
         >
           {dock.rightCollapsed ? (
             <button
@@ -1545,7 +1557,7 @@ export default function App() {
                 />
               </section>
               {!dock.previewCollapsed && (
-                <Splitter axis="height" label="Resize preview panel" onResize={(delta) => resizeDockBy('previewSize', delta)} />
+                <Splitter axis={portrait ? 'width' : 'height'} label="Resize preview panel" onResize={(delta) => resizeDockBy('previewSize', delta)} />
               )}
 
               {activeImageSet && (
@@ -1559,7 +1571,7 @@ export default function App() {
               )}
 
               {!dock.sourceCollapsed && (
-                <Splitter axis="height" label="Resize source panel" onResize={(delta) => resizeDockBy('sourceSize', -delta)} />
+                <Splitter axis={portrait ? 'width' : 'height'} label="Resize source panel" onResize={(delta) => resizeDockBy('sourceSize', -delta)} />
               )}
 
               <section

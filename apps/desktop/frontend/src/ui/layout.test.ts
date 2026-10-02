@@ -34,6 +34,16 @@ describe('dock layout', () => {
     expect(layout.previewCollapsed).toBe(false);
   });
 
+  it('adds a portrait height to older storage without changing landscape width', () => {
+    const layout = parseDockLayout('{"rightWidth":480}');
+    expect(layout.rightWidth).toBe(480);
+    expect(layout.rightHeight).toBe(DEFAULT_DOCK_LAYOUT.rightHeight);
+    const resized = resizeDock(layout, 'rightHeight', 40);
+    expect(resized.rightHeight).toBe(layout.rightHeight + 40);
+    expect(resized.rightWidth).toBe(480);
+    expect(resizeDock(layout, 'rightHeight', -10000).rightHeight).toBe(DOCK_LIMITS.rightHeight.min);
+  });
+
   it('resizes a track within its limits', () => {
     const grown = resizeDock(DEFAULT_DOCK_LAYOUT, 'rightWidth', 80);
     expect(grown.rightWidth).toBe(DEFAULT_DOCK_LAYOUT.rightWidth + 80);

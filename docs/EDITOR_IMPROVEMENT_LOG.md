@@ -64,6 +64,25 @@ Measurement/test: actual browser bounding-rectangle counts improved 60/200 → 2
 Files: `apps/desktop/frontend/src/App.tsx`, `apps/desktop/frontend/e2e/browser/large-graph.spec.mjs`.
 Change: one React Flow prop; no processing, layout algorithm or drag-time state changes.
 
+## Iteration 6 — fixed library heading and search
+
+Problem: scrolling the node library also scrolls its title, search and filters out of view.
+Evidence: `.panel--library` owned scrolling; the node list had no bounded scroll area. New native regression failed before the change.
+Impact: users must return to the top to search or collapse the panel.
+Change: CSS-only flex column with a shrinking, independently scrolling node list; heading, search, filters and selection actions remain fixed. No sticky overlay or scroll-time JavaScript.
+Files: `apps/desktop/frontend/src/styles.css`, `apps/desktop/frontend/e2e/native/parameter-editing.spec.mjs`.
+Measurement/test: title/search coordinates remain identical after scrolling the list to its end at requested window heights 900 and 600; panel scroll remains zero. All 195 frontend tests and three focused native regressions pass; native binary rebuilt, screenshot inspected. Detector reports an existing node-card pseudo-element accent warning outside this change.
+Remaining concerns: unrelated full-suite failures listed below remain unresolved.
+
+## Iteration 7 — portrait workbench
+
+Problem: a tall window spends its limited width on three columns, squeezing the graph.
+Change: portrait media query retains the library on the left, stacks the graph above a preview/source row, and rotates the existing splitters and their keyboard/ARIA axes. Source retains its preferred width instead of consuming spare preview space. Collapsed preview/source become narrow rails. Portrait dock height is stored separately from landscape width; older preferences receive the default height without changing their width. No graph remount, processing or dependencies added.
+Files: `apps/desktop/frontend/src/App.tsx`, `styles.css`, `src/ui/layout.ts`, `layout.test.ts`, `e2e/native/portrait-layout.spec.mjs`, `e2e/browser/portrait-layout.spec.mjs`.
+Evidence/measurement: new native layout regression failed before implementation (preview top 86 versus graph bottom 976). Chrome viewport measurements at 900×1200 now give the graph and preview/source the same 663px width, instead of sharing that width side by side. Portrait → landscape restores the original 838px graph and 360px right dock at 1440×900. At 600×1000 the library remains left and there is no document-width overflow. These are layout measurements, not performance benchmarks.
+Verification: 196 frontend tests pass; frontend/native build passes. Two native portrait tests, three editing tests and four selected native preview tests pass. Native tests cover actual image display, keyboard divider resizing, library/preview/source collapse and unchanged workflow hash. Native portrait screenshot inspected. Browser round-trip/overflow assertions executed through Chrome DevTools; standard browser runner still lacks its matching driver.
+Boundary: native window size requests were constrained/ignored by the current desktop/WebKitGTK environment (1440×900 request returned an unchanged 960×1023 outer window). Native coverage therefore verifies portrait behavior; orientation round-trip is verified in Chrome, not claimed as a native resize round-trip. Existing full-suite failures remain unresolved.
+
 ## Performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.

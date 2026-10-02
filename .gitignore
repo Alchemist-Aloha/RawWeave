@@ -9,6 +9,7 @@ dist/
 # Local tooling and generated files
 .vite/
 *.log
+apps/desktop/frontend/logs/
 *.tsbuildinfo
 apps/desktop/frontend/vite.config.js
 apps/desktop/frontend/vite.config.d.ts

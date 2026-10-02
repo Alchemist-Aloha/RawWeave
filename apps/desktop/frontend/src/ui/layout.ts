@@ -2,6 +2,7 @@ export interface DockLayout {
   libraryWidth: number;
   libraryCollapsed: boolean;
   rightWidth: number;
+  rightHeight: number;
   rightCollapsed: boolean;
   previewSize: number;
   previewCollapsed: boolean;
@@ -14,6 +15,7 @@ export const DOCK_STORAGE_KEY = 'rawweave.dock';
 export const DOCK_LIMITS = {
   libraryWidth: { min: 180, max: 460 },
   rightWidth: { min: 280, max: 760 },
+  rightHeight: { min: 240, max: 1400 },
   previewSize: { min: 140, max: 1400 },
   sourceSize: { min: 92, max: 460 },
 } as const;
@@ -24,6 +26,7 @@ export const DEFAULT_DOCK_LAYOUT: DockLayout = {
   libraryWidth: 232,
   libraryCollapsed: false,
   rightWidth: 360,
+  rightHeight: 480,
   rightCollapsed: false,
   previewSize: 420,
   previewCollapsed: false,
@@ -44,6 +47,7 @@ export function normalizeDockLayout(value: unknown): DockLayout {
     libraryWidth: clampNumber('libraryWidth', source.libraryWidth, DEFAULT_DOCK_LAYOUT.libraryWidth),
     libraryCollapsed: source.libraryCollapsed === true,
     rightWidth: clampNumber('rightWidth', source.rightWidth, DEFAULT_DOCK_LAYOUT.rightWidth),
+    rightHeight: clampNumber('rightHeight', source.rightHeight, DEFAULT_DOCK_LAYOUT.rightHeight),
     rightCollapsed: source.rightCollapsed === true,
     previewSize: clampNumber('previewSize', source.previewSize, DEFAULT_DOCK_LAYOUT.previewSize),
     previewCollapsed: source.previewCollapsed === true,

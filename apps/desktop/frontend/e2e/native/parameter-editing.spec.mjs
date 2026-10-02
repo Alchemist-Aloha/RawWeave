@@ -11,6 +11,41 @@ async function typeDraft(element, text) {
 
 // Self-contained: do not depend on the restored source graph or other specs.
 describe('editing accelerators in the native WebView', () => {
+  it('scrolls only the node list while the title and search stay visible', async () => {
+    for (const height of [900, 600]) {
+      await browser.setWindowSize(1280, height);
+      const before = await browser.execute(() => {
+        const panel = document.querySelector('.panel--library');
+        const list = panel.querySelector('.node-library');
+        return {
+          title: panel.querySelector('.panel__heading').getBoundingClientRect().top,
+          search: panel.querySelector('.search-field').getBoundingClientRect().top,
+          scrollable: list.scrollHeight > list.clientHeight,
+        };
+      });
+      expect(before.scrollable).toBe(true);
+      const after = await browser.execute(() => {
+        const panel = document.querySelector('.panel--library');
+        const list = panel.querySelector('.node-library');
+        list.scrollTop = list.scrollHeight;
+        return {
+          title: panel.querySelector('.panel__heading').getBoundingClientRect().top,
+          search: panel.querySelector('.search-field').getBoundingClientRect().top,
+          listScroll: list.scrollTop,
+          panelScroll: panel.scrollTop,
+        };
+      });
+      expect(after.listScroll).toBeGreaterThan(0);
+      expect(after.panelScroll).toBe(0);
+      expect(after.title).toBe(before.title);
+      expect(after.search).toBe(before.search);
+      await expect($('input[placeholder="Search nodes"]')).toBeDisplayed();
+      if (height === 600) await browser.saveScreenshot('./logs/node-library-scroll.png');
+      await browser.execute(() => { document.querySelector('.node-library').scrollTop = 0; });
+    }
+    await browser.setWindowSize(1280, 900);
+  });
+
   it('reveals the collapsed node library and focuses search with Ctrl+K', async () => {
     await $('[aria-label="Collapse Nodes panel"]').click();
     await browser.execute(() => {

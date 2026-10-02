@@ -224,7 +224,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .workbench > .canvas-panel { flex: 1 1 auto; min-width: 0; }
 .dock { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--room-panel); }
 .dock--left { flex: 0 0 auto; border-right: 1px solid var(--room-line); }
-.dock--right { flex: 0 0 auto; border-left: 1px solid var(--room-line); }
+.dock--right { flex: 0 0 auto; width: var(--dock-width, 360px); border-left: 1px solid var(--room-line); }
 .dock--rail { flex: 0 0 32px; width: 32px; }
 .dock__rail { display: flex; flex: 1 1 auto; align-items: center; justify-content: center; gap: 8px; border: 0; padding: 0; color: var(--room-ink-dim); background: transparent; font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .dock__rail:hover { color: var(--wax-white); background: var(--wax-white-tint); }
@@ -493,7 +493,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 /* Panel headings are ruled, not spaced: a full-width rule does the separating
    work here, which is why no panel in this app needs a card around it. */
 .panel { min-width: 0; background: var(--room-panel); }
-.panel--library { padding: 20px 16px; overflow: auto; }
+.panel--library { display: flex; flex-direction: column; padding: 20px 16px; overflow: hidden; }
+.panel--library > :not(.node-library) { flex-shrink: 0; }
 .panel--library { border-right: 0; }
 .panel__heading { justify-content: space-between; margin-bottom: 12px; border-bottom: 1px solid var(--room-line); padding-bottom: 10px; }
 .panel__heading h2 { margin: 4px 0 0; font-size: 16px; font-stretch: 88%; font-weight: 800; letter-spacing: -.01em; }
@@ -508,7 +509,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .filter-chip input { width: 11px; height: 11px; margin: 0; accent-color: var(--wax-white); }
 /* The library is a ruled index, not a stack of cards: every node is a line the
    way a parts list is, and the type sits on the line as an edge code. */
-.node-library { display: grid; gap: 0; border-top: 1px solid var(--room-line); }
+.node-library { display: grid; flex: 1 1 auto; min-height: 0; align-content: start; gap: 0; overflow: auto; border-top: 1px solid var(--room-line); }
 /* Categories are the index's chapters: a ruled heading that folds its nodes away. */
 .node-library__group { border-bottom: 1px solid var(--room-line); }
 .node-library__group-summary { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 9px 6px; color: var(--room-ink-body); font-family: var(--face-data); font-size: 10px; font-stretch: 87.5%; font-weight: 500; letter-spacing: .14em; list-style: none; text-transform: uppercase; }
@@ -993,6 +994,30 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .preview-strip > div:first-child { width: 100%; }
   .image-viewer { min-height: 160px; }
   .viewer-scopes { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A tall window keeps the library left and gives the graph and judging
+   station the full remaining width. Existing splitters rotate with the layout. */
+@media (orientation: portrait) {
+  html, body, #root { height: 100%; min-height: 0; }
+  body { overflow: hidden; }
+  .app-shell { height: 100%; min-height: 0; overflow: hidden; }
+  .workbench { display: grid; grid-template-columns: auto 5px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--right-divider-height) minmax(0, min(var(--right-dock-height), 60%)); }
+  .workbench > .dock--left { grid-column: 1; grid-row: 1 / -1; }
+  .workbench > .dock--left + .splitter { grid-column: 2; grid-row: 1 / -1; }
+  .workbench > .canvas-panel { grid-column: 3; grid-row: 1; }
+  .workbench > .canvas-panel + .splitter { grid-column: 3; grid-row: 2; }
+  .workbench > .dock--right { grid-column: 3; grid-row: 3; flex-direction: row; width: auto; border-left: 0; }
+  .dock--right > .dock-section { border-bottom: 0; }
+  .dock--right > .dock-section--source { flex-grow: 0; }
+  .dock--right > .dock-section--collapsed { flex-basis: 34px; min-width: 34px; max-width: 34px; }
+  .dock-section--collapsed .viewer-section { padding: 0; }
+  .dock-section--collapsed .viewer-section__toolbar { align-self: start; justify-content: center; }
+  .dock-section--collapsed .viewer-section__comparison,
+  .dock-section--collapsed .dock-section__header > .eyebrow { display: none; }
+  .dock-section--collapsed .dock-section__header { justify-content: center; padding: 8px 3px; }
+  .dock--right.dock--rail .dock__rail-label { writing-mode: horizontal-tb; transform: none; }
+  .dock--right.dock--rail .icon { transform: rotate(90deg); }
 }
 
 /* --- node graph polish ------------------------------------------------- */
