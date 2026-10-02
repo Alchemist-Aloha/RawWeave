@@ -80,15 +80,17 @@ describe('GraphNode parameters', () => {
       setter?.call(input, text);
       input.dispatchEvent(new Event('input', { bubbles: true }));
     };
-    // Every keystroke comes back as a new value prop. The field must keep what
-    // was typed instead of being reset to the last committed number.
+    // A precise edit stays local until committed, rather than creating an
+    // undo entry and preview request for each intermediate number.
     await act(async () => {
       type('1');
       type('1.');
       type('1.5');
     });
     expect(input.value).toBe('1.5');
-    expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'exposure', 1.5);
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => { input.focus(); input.blur(); });
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'exposure', 1.5);
 
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Expose Exposure port"]')?.click();
@@ -101,6 +103,35 @@ describe('GraphNode parameters', () => {
     });
     expect(value.onTogglePort).toHaveBeenCalledWith('exposure', 'exposure', 'Input', true);
 
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it('commits on Enter, cancels on Escape, and skips unchanged or invalid numeric drafts', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Exposure"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    const type = async (text: string) => act(async () => {
+      input.focus();
+      setter.call(input, text);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await type('1.25');
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    expect(input.value).toBe('0');
+    await act(async () => input.blur());
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await type('0');
+    await act(async () => input.blur());
+    await type('');
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    await act(async () => input.blur());
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await type('1.25');
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'exposure', 1.25);
+    expect(document.activeElement).not.toBe(input);
     await act(async () => root.unmount());
     container.remove();
   });
@@ -131,7 +162,9 @@ describe('GraphNode parameters', () => {
       setter?.call(field, '50');
       field.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    expect(value.onParameterChange).toHaveBeenCalledWith('ai-node', 'strength', 0.5);
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => { field?.focus(); field?.blur(); });
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('ai-node', 'strength', 0.5);
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Reset Generation Strength"]')?.click());
     expect(value.onParameterChange).toHaveBeenLastCalledWith('ai-node', 'strength', 0.75);
 
@@ -142,7 +175,7 @@ describe('GraphNode parameters', () => {
   it('provides bounded sliders, precise numeric editing, validation, and reset', async () => {
     const boundedNode: EditorNode = {
       ...node,
-      parameters: { amount: 0.5, count: 2 },
+      parameters: { amount: 0.6, count: 2 },
       descriptor: {
         ...node.descriptor,
         parameters: [
@@ -154,10 +187,10 @@ describe('GraphNode parameters', () => {
     const value = actions();
     const { container, root } = await renderNode(boundedNode, value);
 
-    expect(container.querySelector('input[type="range"][aria-label="Amount slider"]')).not.toBeNull();
+    expect(container.querySelector('input[type="range"][aria-label="Effect Strength slider"]')).not.toBeNull();
     expect(container.querySelector('input[type="range"][aria-label="Count slider"]')).not.toBeNull();
 
-    const amount = container.querySelector<HTMLInputElement>('input[aria-label="Amount"]');
+    const amount = container.querySelector<HTMLInputElement>('input[aria-label="Effect Strength"]');
     const count = container.querySelector<HTMLInputElement>('input[aria-label="Count"]');
     if (!amount || !count) throw new Error('numeric parameter inputs missing');
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -166,7 +199,7 @@ describe('GraphNode parameters', () => {
       await act(async () => input.dispatchEvent(new Event('input', { bubbles: true })));
     };
 
-    const slider = container.querySelector<HTMLInputElement>('input[aria-label="Amount slider"]')!;
+    const slider = container.querySelector<HTMLInputElement>('input[aria-label="Effect Strength slider"]')!;
     await act(async () => slider.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
     await type(slider, '0.8');
     expect(value.onParameterChange).not.toHaveBeenCalled();
@@ -174,19 +207,23 @@ describe('GraphNode parameters', () => {
     expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.8);
     vi.mocked(value.onParameterChange).mockClear();
     await type(slider, '0.7');
-    expect(amount.value).toBe('0.5');
+    expect(amount.value).toBe('0.6');
     vi.mocked(value.onParameterChange).mockClear();
     await type(amount, '');
     expect(value.onParameterChange).not.toHaveBeenCalled();
     await type(amount, '0.75');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => { amount.focus(); amount.blur(); });
     await type(amount, '2');
+    await act(async () => { amount.focus(); amount.blur(); });
     await type(count, '2.5');
+    await act(async () => { count.focus(); count.blur(); });
     expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.75);
     expect(value.onParameterChange).not.toHaveBeenCalledWith('exposure', 'amount', 2);
     expect(value.onParameterChange).not.toHaveBeenCalledWith('exposure', 'count', 2.5);
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="Reset Amount"]')?.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="Reset Effect Strength"]')?.click();
     });
     expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.5);
 
@@ -207,7 +244,7 @@ describe('GraphNode parameters', () => {
     };
     const value = actions();
     const { container, root } = await renderNode(cropNode, value);
-    const input = container.querySelector<HTMLInputElement>('input[aria-label="X"]');
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Left Edge"]');
     if (!input) throw new Error('crop input missing');
     expect(input.step).toBe('1');
 
@@ -244,7 +281,7 @@ describe('GraphNode parameters', () => {
     const tone: EditorNode = { ...node, typeId: 'pro.tone-map', parameters: { operator: 'filmic' }, descriptor: { ...node.descriptor, parameters: [{ id: 'operator', name: 'Operator', parameterType: 'String', default: 'reinhard', min: null, max: null }] } };
     const value = actions();
     const { container, root } = await renderNode(tone, value);
-    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Operator"]')!;
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Tone Mapping Method"]')!;
     expect(Array.from(select.options).map((option) => option.value)).toEqual(['reinhard', 'filmic', 'aces']);
     await act(async () => { select.value = 'aces'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'operator', 'aces');

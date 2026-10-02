@@ -60,10 +60,8 @@ interface ParameterFieldProps {
 }
 
 /**
- * One parameter row. The text field keeps a local draft while it has focus:
- * every keystroke round-trips through the graph and comes back as a new `value`
- * prop, and without the draft React would reset the field mid-typing and drop
- * the rest of what was typed.
+ * Numeric edits stay local until Enter or blur so one edit produces one graph
+ * command. Escape discards the draft; sliders still commit on pointer release.
  */
 function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumber = false, multiline = false, choices, suggestions }: ParameterFieldProps) {
   const [draft, setDraft] = useState<string | null>(null);
@@ -157,7 +155,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
               if (validNumericValue(next)) onChange(next);
             }
           }}
-          step={(ux.step ?? (wholeNumber ? 1 : 0.01)) * factor}
+          step={(wholeNumber ? 1 : ux.step ?? 0.01) * factor}
           type="range"
           value={draft != null && Number.isFinite(Number(draft)) ? Number(draft) : sliderValue}
         />}
@@ -175,17 +173,32 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
           aria-description={ux.description}
           aria-label={ux.name}
           aria-invalid={numeric && draft !== null && (draft.trim() === '' || !validNumericValue(Number(draft) / factor)) ? true : undefined}
-          onBlur={() => setDraft(null)}
+          title={numeric ? 'Enter or leave the field to apply; Escape to cancel' : undefined}
+          onBlur={() => {
+            if (numeric && draft !== null && draft.trim() !== '') {
+              const next = Number(draft) / factor;
+              if (validNumericValue(next) && next !== value) onChange(next);
+            }
+            setDraft(null);
+          }}
+          onKeyDown={(event) => {
+            if (!numeric || event.nativeEvent.isComposing) return;
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.stopPropagation();
+              event.currentTarget.blur();
+            } else if (event.key === 'Escape') {
+              event.preventDefault();
+              event.stopPropagation();
+              setDraft(null);
+            }
+          }}
           onChange={(event) => {
             const text = event.target.value;
             setDraft(text);
             if (!numeric) onChange(text);
-            else {
-              const next = Number(text) / factor;
-              if (text.trim() !== '' && validNumericValue(next)) onChange(next);
-            }
           }}
-          step={(ux.step ?? (wholeNumber ? 1 : 0.01)) * factor}
+          step={(wholeNumber ? 1 : ux.step ?? 0.01) * factor}
           type={numeric ? 'number' : 'text'}
           value={draft ?? String(displayValue)}
         />}

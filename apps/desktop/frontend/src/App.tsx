@@ -488,6 +488,13 @@ export default function App() {
     setDock((current) => ({ ...current, [key]: !current[key] }));
   }, []);
 
+  const focusNodeSearch = useCallback(() => {
+    setWorkspaceMode('build');
+    setDock((current) => current.libraryCollapsed ? { ...current, libraryCollapsed: false } : current);
+    // Wait for the library to mount when invoked from a collapsed dock.
+    requestAnimationFrame(() => nodeSearchInput.current?.focus());
+  }, []);
+
   const resizeDockBy = useCallback((key: 'libraryWidth' | 'rightWidth' | 'previewSize' | 'sourceSize', delta: number) => {
     setDock((current) => resizeDock(current, key, delta));
   }, []);
@@ -655,10 +662,10 @@ export default function App() {
       title: 'Canvas',
       items: [
         { id: 'fit-view', label: 'Fit view', onSelect: () => flowInstance.current?.fitView({ padding: 0.2, duration: 250 }) },
-        { id: 'add-node', label: 'Add node…', onSelect: () => nodeSearchInput.current?.focus() },
+        { id: 'add-node', label: 'Add node…', onSelect: focusNodeSearch },
       ],
     });
-  }, []);
+  }, [focusNodeSearch]);
 
   const flowEdges = useMemo<WorkflowFlowEdge[]>(
     () =>
@@ -1170,7 +1177,7 @@ export default function App() {
       if ((showShortcuts || showSubgraphForm) && action !== 'toggle-shortcuts') return;
       if (action === 'focus-node-search') {
         event.preventDefault();
-        nodeSearchInput.current?.focus();
+        focusNodeSearch();
       } else if (action === 'open-image') {
         event.preventDefault();
         void openImage();
@@ -1203,7 +1210,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [controller, disconnectEdge, fileInput, geometryEditing, nodeSearchInput, openImage, selectedEdgeId, showShortcuts, showSubgraphForm]);
+  }, [controller, disconnectEdge, fileInput, focusNodeSearch, geometryEditing, openImage, selectedEdgeId, showShortcuts, showSubgraphForm]);
 
   const editorErrorNotice = controller.state.error
     ? describeEditorError(controller.state.error, {
@@ -1453,6 +1460,7 @@ export default function App() {
                 edgesReconnectable
                 fitView
                 isValidConnection={isValidConnection}
+                minZoom={0.05}
                 key={workflowCanvasKey}
                 nodes={flowNodes}
                 edges={flowEdges}
