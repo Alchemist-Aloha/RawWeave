@@ -29,6 +29,33 @@ fn image_carries_format_domain_and_revision_safe_views() {
 }
 
 #[test]
+fn pixel_hash_is_content_based_shared_and_not_serialized() {
+    let image = Image::from_pixels(1, 1, vec![[0.25, 0.5, 2.0, 1.0]]).unwrap();
+    let hash = image.pixel_content_hash();
+    let clone = image.clone();
+    assert_eq!(clone.backing_ptr(), image.backing_ptr());
+    assert_eq!(clone.pixel_content_hash(), hash);
+    let changed = image.map_pixels(|mut pixel| {
+        pixel[0] = 0.75;
+        pixel
+    });
+    assert_ne!(changed.pixel_content_hash(), hash);
+    let same_revision = Image::from_pixels_with_revision(
+        image.dimensions(),
+        changed.pixels().to_vec(),
+        image.pixel_format(),
+        image.color_metadata(),
+        image.revision(),
+    )
+    .unwrap();
+    assert_ne!(same_revision.pixel_content_hash(), hash);
+    let json = serde_json::to_string(&image).unwrap();
+    assert!(!json.contains("pixel_content_hash"));
+    let restored: Image = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.pixel_content_hash(), hash);
+}
+
+#[test]
 fn image_views_reject_regions_outside_the_image() {
     let image = Image::new(4, 4).unwrap();
     assert!(image.view(Region::new(3, 3, 2, 1)).is_err());

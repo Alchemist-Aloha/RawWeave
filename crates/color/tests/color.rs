@@ -6,6 +6,35 @@ use rawweave_color::{
 use rawweave_image::Dimensions;
 
 #[test]
+fn color_buffer_clones_share_pixels_without_changing_wire_format_or_hdr() {
+    let scene = SceneLinearRGB::from_pixels(1, 1, vec![[2.0, 0.5, -0.25]]).unwrap();
+    assert_eq!(scene.clone().pixels().as_ptr(), scene.pixels().as_ptr());
+    assert_eq!(
+        scene
+            .with_working_space(WorkingSpace::CameraNative)
+            .pixels()
+            .as_ptr(),
+        scene.pixels().as_ptr()
+    );
+    let changed = scene
+        .map_pixels(|pixel| pixel.map(|channel| channel * 2.0))
+        .unwrap();
+    assert_ne!(changed.pixels().as_ptr(), scene.pixels().as_ptr());
+    assert_eq!(scene.pixels(), &[[2.0, 0.5, -0.25]]);
+    let display = SrgbDisplayTransform.transform(&scene).unwrap();
+    assert_eq!(display.clone().pixels().as_ptr(), display.pixels().as_ptr());
+    let json = serde_json::to_value(&scene).unwrap();
+    assert!(json["pixels"].is_array());
+    assert_eq!(
+        serde_json::from_value::<SceneLinearRGB>(json).unwrap(),
+        scene
+    );
+    let json = serde_json::to_value(&display).unwrap();
+    assert!(json["pixels"].is_array());
+    assert_eq!(serde_json::from_value::<DisplayRGB>(json).unwrap(), display);
+}
+
+#[test]
 fn scene_linear_buffer_validates_dimensions_and_preserves_hdr_values() {
     let scene = SceneLinearRGB::new(
         Dimensions::new(2, 1),

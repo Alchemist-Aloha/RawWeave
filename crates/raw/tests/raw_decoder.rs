@@ -51,6 +51,29 @@ fn fixture_frame() -> RawFrame {
 }
 
 #[test]
+fn cloned_raw_frames_share_samples_but_processing_allocates_new_samples() {
+    let frame = fixture_frame();
+    let clone = frame.clone();
+    assert_eq!(
+        clone.mosaic().samples().as_ptr(),
+        frame.mosaic().samples().as_ptr()
+    );
+    let changed = frame
+        .mosaic()
+        .map_samples(|_, value, _| value + 1.0)
+        .unwrap();
+    assert_ne!(
+        changed.samples().as_ptr(),
+        frame.mosaic().samples().as_ptr()
+    );
+    assert_eq!(frame.mosaic().samples()[0], 64.0);
+    assert_eq!(changed.samples()[0], 65.0);
+    let json = serde_json::to_value(&frame).unwrap();
+    assert!(json["mosaic"]["samples"].is_array());
+    assert_eq!(serde_json::from_value::<RawFrame>(json).unwrap(), frame);
+}
+
+#[test]
 fn raw_frame_exposes_sensor_mosaic_levels_and_camera_metadata() {
     let frame = fixture_frame();
 

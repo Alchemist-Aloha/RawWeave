@@ -4,6 +4,8 @@
 //! serializable scene-linear RGB buffer, a display RGB buffer, and a small transform boundary
 //! that can later be backed by OCIO or LittleCMS without changing graph value types.
 
+use std::sync::Arc;
+
 use rawweave_image::Dimensions;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -91,7 +93,7 @@ fn validate_pixels(dimensions: Dimensions, pixels: &[[f32; 3]]) -> Result<(), Co
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneLinearRGB {
     dimensions: Dimensions,
-    pixels: Vec<[f32; 3]>,
+    pixels: Arc<Vec<[f32; 3]>>,
     working_space: WorkingSpace,
 }
 
@@ -123,7 +125,7 @@ impl SceneLinearRGB {
         validate_pixels(dimensions, &pixels)?;
         Ok(Self {
             dimensions,
-            pixels,
+            pixels: Arc::new(pixels),
             working_space,
         })
     }
@@ -170,7 +172,7 @@ impl SceneLinearRGB {
         )
     }
 
-    /// Copy the buffer into another declared working space without changing samples.
+    /// Share the immutable buffer in another declared working space without changing samples.
     pub fn with_working_space(&self, working_space: WorkingSpace) -> Self {
         Self {
             dimensions: self.dimensions,
@@ -184,7 +186,7 @@ impl SceneLinearRGB {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DisplayRGB {
     dimensions: Dimensions,
-    pixels: Vec<[f32; 3]>,
+    pixels: Arc<Vec<[f32; 3]>>,
     working_space: WorkingSpace,
 }
 
@@ -216,7 +218,7 @@ impl DisplayRGB {
         validate_pixels(dimensions, &pixels)?;
         Ok(Self {
             dimensions,
-            pixels,
+            pixels: Arc::new(pixels),
             working_space,
         })
     }

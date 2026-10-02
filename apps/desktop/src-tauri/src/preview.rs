@@ -736,6 +736,17 @@ pub fn render_preview(
     request: PreviewRequest,
 ) -> Result<PreviewMetadata, String> {
     manager.begin(&request.request_id);
+    let mut stage_start = crate::preview_diagnostics_enabled().then(std::time::Instant::now);
+    let mut trace_stage = |stage: &str| {
+        if let Some(start) = stage_start {
+            eprintln!(
+                "preview {} {stage}: {:.2} ms",
+                request.request_id,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            stage_start = Some(std::time::Instant::now());
+        }
+    };
     let result = (|| {
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
@@ -755,9 +766,11 @@ pub fn render_preview(
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
         let probe_context = preview_probe_context(&source, &request);
+        trace_stage("source context");
         let full_frame = editor
             .evaluate(&request.node_id, &request.output_port, probe_context)
             .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
+        trace_stage("probe evaluation");
         let full_frame =
             color_value_to_image(full_frame, request.mask_display).map_err(|error| {
                 format!(
@@ -765,6 +778,7 @@ pub fn render_preview(
                     request.node_id, request.output_port
                 )
             })?;
+        trace_stage("display conversion");
         let full_width = full_frame.width();
         let full_height = full_frame.height();
         let full_origin = full_frame.origin();
@@ -801,7 +815,12 @@ pub fn render_preview(
                 node.descriptor.select_execution_capability(&context)
                     == Some(rawweave_node_api::ExecutionCapability::FullFrame)
             });
-        let image = if full_frame_target {
+        // The probe already used the requested mip/quality. With identical
+        // bounds and the default tile, a regional pass would repeat the work.
+        let whole_image_request = requested_region == full_frame.global_region()
+            && request.tile.x == 0
+            && request.tile.y == 0;
+        let image = if full_frame_target || whole_image_request {
             full_frame
         } else {
             let value = editor
@@ -814,7 +833,9 @@ pub fn render_preview(
                 )
             })?
         };
+        trace_stage("regional evaluation");
         let image = select_preview_image(&image, requested_region, request.mip)?;
+        trace_stage("preview selection");
         let latest_revision = current_editor
             .lock()
             .map_err(|_| "editor state is unavailable".to_owned())?
@@ -827,6 +848,7 @@ pub fn render_preview(
             ));
         }
         let bytes = encode_png(&image)?;
+        trace_stage("PNG encoding");
         if manager.is_cancelled(&request.request_id) {
             return Err("preview cancelled".to_owned());
         }
@@ -868,6 +890,107 @@ mod tests {
     use rawweave_image::{
         ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
     };
+
+    #[test]
+    fn whole_image_preview_reuses_probe_but_partial_regions_still_evaluate_regionally() {
+        let mut editor = EditorCore::default();
+        crate::build_ordinary_workflow(&mut editor).unwrap();
+        let source = Image::from_pixels_with_origin(
+            Dimensions::new(4, 2),
+            (9, 11),
+            (0..8)
+                .map(|value| [value as f32 / 8.0, 0.5, 0.25, 1.0])
+                .collect(),
+            rawweave_image::PixelFormat::default(),
+            rawweave_image::ColorMetadata::default(),
+        )
+        .unwrap();
+        let current_editor = Arc::new(Mutex::new(editor.clone()));
+        let manager = PreviewManager::default();
+        let mut request = PreviewRequest {
+            request_id: "whole".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 2,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 1,
+            mask_display: MaskDisplayRequest::Grayscale,
+        };
+        let whole = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(source.clone())),
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                whole.width,
+                whole.height,
+                whole.full_width,
+                whole.full_height
+            ),
+            (2, 1, 4, 2)
+        );
+        assert_eq!(
+            editor.graph().render_cache().lock().unwrap().len(),
+            2,
+            "a whole-image request must not populate duplicate regional cache entries"
+        );
+        assert_eq!(
+            manager.store.get(&preview_path("whole")).unwrap(),
+            encode_png(&select_preview_image(&source, source.global_region(), 1).unwrap()).unwrap()
+        );
+        request.request_id = "other-tile".to_owned();
+        request.tile.x = 1;
+        render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(source.clone())),
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            editor.graph().render_cache().lock().unwrap().len(),
+            4,
+            "nondefault tiles must keep their regional evaluation identity"
+        );
+        request.tile.x = 0;
+        request.request_id = "part".to_owned();
+        request.region = PreviewRegionRequest {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 1,
+        };
+        request.mip = 0;
+        let part = render_preview(
+            &manager,
+            &editor,
+            &current_editor,
+            Some(crate::SourceAsset::Ordinary(source.clone())),
+            request,
+        )
+        .unwrap();
+        assert_eq!(
+            (part.width, part.height, part.origin_x, part.origin_y),
+            (2, 1, 10, 12)
+        );
+        assert_eq!(
+            manager.store.get(&preview_path("part")).unwrap(),
+            encode_png(&select_preview_image(&source, Region::new(10, 12, 2, 1), 0).unwrap())
+                .unwrap()
+        );
+    }
 
     #[test]
     fn encodes_float_rgba_pixels_as_a_browser_png() {
@@ -1508,6 +1631,103 @@ mod tests {
         assert_ne!(gray_bytes, overlay_bytes);
         assert_eq!(&gray_bytes[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&overlay_bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// Run optimized, single-threaded, with RAWWEAVE_PREVIEW_DIAGNOSTICS=1 for stage timings.
+    /// Fixture creation is excluded; open includes disk read/decode/default graph setup.
+    #[test]
+    #[ignore]
+    fn large_image_loading_benchmark() {
+        use std::time::Instant;
+        let directory = tempfile::tempdir().unwrap();
+        let jpeg = directory.path().join("synthetic-24mp.jpg");
+        image::RgbImage::from_fn(6000, 4000, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        })
+        .save(&jpeg)
+        .unwrap();
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../test-data/images/raw");
+        for path in [
+            jpeg,
+            corpus.join("nikon-d70s-12bit-lossy.nef"),
+            corpus.join("sony-ilce-7s-14bit-compressed.arw"),
+        ] {
+            let mut editor = EditorCore::default();
+            let start = Instant::now();
+            let (source, metadata) = crate::open_image_with_decoder(
+                &path,
+                &rawweave_raw::RawloaderDecoder::default(),
+                &mut editor,
+            )
+            .unwrap();
+            eprintln!(
+                "BENCH {} {}x{} open: {:.2} ms",
+                path.file_name().unwrap().to_string_lossy(),
+                metadata.width,
+                metadata.height,
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+            let raw = matches!(source, crate::SourceAsset::Raw { .. });
+            if !raw {
+                editor.add_node("exposure", "core.exposure").unwrap();
+                editor
+                    .disconnect("input", "image", "output", "image")
+                    .unwrap();
+                editor
+                    .connect("input", "image", "exposure", "image")
+                    .unwrap();
+                editor
+                    .connect("exposure", "image", "output", "image")
+                    .unwrap();
+            }
+            let manager = PreviewManager::default();
+            let current_editor = Arc::new(Mutex::new(editor.clone()));
+            for iteration in 0..5 {
+                if iteration == 3 {
+                    editor
+                        .set_node_parameter(
+                            if raw { "white-balance" } else { "exposure" },
+                            if raw { "red_gain" } else { "exposure" },
+                            rawweave_node_api::ParameterValue::Float(1.1),
+                        )
+                        .unwrap();
+                    *current_editor.lock().unwrap() = editor.clone();
+                }
+                let request = PreviewRequest {
+                    request_id: format!("large-{iteration}"),
+                    revision: editor.graph().revision(),
+                    node_id: if raw { "display-transform" } else { "output" }.to_owned(),
+                    output_port: if raw { "display" } else { "image" }.to_owned(),
+                    quality: PreviewQualityRequest::Preview,
+                    region: PreviewRegionRequest {
+                        x: 0,
+                        y: 0,
+                        width: metadata.width,
+                        height: metadata.height,
+                    },
+                    tile: PreviewTileRequest { x: 0, y: 0 },
+                    mip: 2,
+                    mask_display: MaskDisplayRequest::Grayscale,
+                };
+                let start = Instant::now();
+                let rendered = render_preview(
+                    &manager,
+                    &editor,
+                    &current_editor,
+                    Some(source.clone()),
+                    request,
+                )
+                .unwrap();
+                eprintln!(
+                    "BENCH {} preview {iteration}: {:.2} ms ({}x{})",
+                    path.file_name().unwrap().to_string_lossy(),
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    rendered.width,
+                    rendered.height
+                );
+                manager.discard(&format!("large-{iteration}"));
+            }
+        }
     }
 
     #[test]

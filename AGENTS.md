@@ -48,6 +48,22 @@ scripts/                 repository validation scripts
 - Never invent camera/lens calibration data. Mark unavailable profiles honestly until data is sourced and validated.
 - Keep CPU and GPU paths behaviorally equivalent within a documented tolerance. GPU absence must produce a real fallback, not simulated availability.
 
+## Documentation and measured improvements
+
+- Read the relevant implementation and current documentation before changing behavior. Keep documentation synchronized with the change; distinguish implemented functionality from plans and known limitations.
+- For UI/UX work, consult and update `docs/EDITOR_IMPROVEMENT_LOG.md`. Iterate through a concrete problem, evidence, focused change, running-app verification, regression checks, and recorded result rather than an unsupported redesign.
+- For image-loading or rendering performance work, consult and update `docs/LARGE_IMAGE_PERFORMANCE.md`. Profile first, fix the largest measured cost, rerun the same workload, and record files changed, before/after measurements, tests, and remaining concerns.
+- Record build mode, source dimensions, region/mip/quality, cache state, sample counts, and timing boundaries. Separate open/decode, first preview, unchanged repeats, parameter edits, and end-to-end display latency. Backend benchmarks and browser adapters do not establish native UI performance.
+- Keep benchmark commands reproducible and fixtures deterministic or licensed. Do not turn host-specific timings into CI thresholds, product guarantees, or claims of camera-wide compatibility. Report blocked or failing gates honestly.
+
+Run the current optimized large-image benchmark from the repository root:
+
+```sh
+RAWWEAVE_PREVIEW_DIAGNOSTICS=1 cargo test --release --locked \
+  --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features \
+  large_image_loading_benchmark -- --ignored --nocapture --test-threads=1
+```
+
 ## Rust conventions
 
 - The root workspace uses Rust edition 2024; the Tauri crate currently uses edition 2021.

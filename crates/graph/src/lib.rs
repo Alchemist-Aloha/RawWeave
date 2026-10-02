@@ -2178,11 +2178,7 @@ fn hash_image(image: &rawweave_image::Image, hasher: &mut impl Hasher) {
     image.origin().hash(hasher);
     image.pixel_format().hash(hasher);
     image.color_metadata().hash(hasher);
-    for pixel in image.pixels() {
-        for channel in pixel {
-            channel.to_bits().hash(hasher);
-        }
-    }
+    image.pixel_content_hash().hash(hasher);
 }
 
 fn has_cycle_from<'a>(

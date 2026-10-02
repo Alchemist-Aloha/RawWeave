@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1289,6 +1289,8 @@ pub struct Image {
     #[serde(default)]
     color_metadata: ColorMetadata,
     pixels: Arc<Vec<Pixel>>,
+    #[serde(skip)]
+    pixel_content_hash: Arc<OnceLock<u64>>,
     #[serde(default)]
     revision: u64,
 }
@@ -1353,6 +1355,7 @@ impl Image {
             pixel_format: PixelFormat::default(),
             color_metadata: ColorMetadata::default(),
             pixels: Arc::new(vec![[0.0; 4]; count]),
+            pixel_content_hash: Arc::new(OnceLock::new()),
             revision: next_revision(),
         })
     }
@@ -1410,6 +1413,7 @@ impl Image {
             pixel_format,
             color_metadata,
             pixels: Arc::new(pixels),
+            pixel_content_hash: Arc::new(OnceLock::new()),
             revision: next_revision(),
         })
     }
@@ -1439,6 +1443,7 @@ impl Image {
             pixel_format,
             color_metadata,
             pixels: Arc::new(pixels),
+            pixel_content_hash: Arc::new(OnceLock::new()),
             revision: next_revision(),
         })
     }
@@ -1486,6 +1491,7 @@ impl Image {
             pixel_format,
             color_metadata,
             pixels: Arc::new(pixels),
+            pixel_content_hash: Arc::new(OnceLock::new()),
             revision,
         })
     }
@@ -1528,6 +1534,22 @@ impl Image {
 
     pub fn pixels(&self) -> &[Pixel] {
         self.pixels.as_slice()
+    }
+
+    /// Hash immutable pixel bits once per shared backing buffer. Runtime cache
+    /// keys must also include dimensions, origin, format, color and revision.
+    /// This memo is never trusted from serialized input.
+    pub fn pixel_content_hash(&self) -> u64 {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        *self.pixel_content_hash.get_or_init(|| {
+            let mut hasher = DefaultHasher::new();
+            for pixel in self.pixels.iter() {
+                for channel in pixel {
+                    channel.to_bits().hash(&mut hasher);
+                }
+            }
+            hasher.finish()
+        })
     }
 
     pub fn backing_ptr(&self) -> *const Pixel {

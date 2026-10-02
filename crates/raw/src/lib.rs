@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use exif::{In, Reader, Tag, Value};
 use rawweave_image::Dimensions;
@@ -182,7 +183,7 @@ impl CfaPattern {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Mosaic {
     dimensions: Dimensions,
-    samples: Vec<f32>,
+    samples: Arc<Vec<f32>>,
     bit_depth: u8,
     cfa: CfaPattern,
     orientation: Orientation,
@@ -244,7 +245,7 @@ impl Mosaic {
         }
         Ok(Self {
             dimensions,
-            samples,
+            samples: Arc::new(samples),
             bit_depth,
             cfa,
             orientation,
