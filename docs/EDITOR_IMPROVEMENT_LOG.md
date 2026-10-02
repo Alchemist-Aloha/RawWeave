@@ -90,6 +90,12 @@ Change: a 480px minimum in both landscape flex and portrait grid layouts. Excess
 Evidence: regression assertion failed at 363px before the fix; Chrome measurements now show 480px at 600×1000 and 960×640. Controls and overview remain within the workflow and do not overlap. Scrolling makes the complete 480px workflow reachable at a 600px viewport; screenshot inspected.
 Verification: 196 unit tests, native build and five focused native layout/editing checks pass. Extended browser regression covers minimum width and widget bounds; its equivalent assertions were executed through Chrome DevTools because the standard browser driver remains unavailable. `git diff --check` passes. Existing graph-node accent-stripe detector warning remains outside scope.
 
+## Iteration 9 — fit portrait workflow to the window
+
+Change: portrait overrides the workflow minimum to zero and uses a shrinkable grid track, so graph and preview/info fit the width beside the library. Landscape retains its 480px minimum.
+Evidence: the new viewport-bound assertion failed before the fix (workflow right edge 717px in a 600px viewport); afterward the workflow spans 237–600px, with controls and overview contained and separated. Chrome checks also cover 900×1200, landscape restoration and the retained landscape minimum. Screenshot inspected.
+Verification: 196 unit tests and frontend/native build pass; browser assertions executed through Chrome DevTools. Native portrait tests could not enter portrait orientation in the current desktop environment and timed out at their orientation waits; native validation is not claimed. Standard browser driver limitation remains. `git diff --check` passes.
+
 ## Performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.

@@ -17,7 +17,12 @@ describe('adaptive workbench', () => {
       });
       expect(boxes.library.right).toBeLessThanOrEqual(boxes.graph.left);
       expect(boxes.overflow).toBe(false);
-      expect(boxes.graph.width).toBeGreaterThanOrEqual(480);
+      if (portrait) {
+        expect(boxes.graph.right).toBeLessThanOrEqual(width);
+        expect(boxes.graph.width).toBeGreaterThan(0);
+      } else {
+        expect(boxes.graph.width).toBeGreaterThanOrEqual(480);
+      }
       const widgets = await browser.execute(() => {
         const rect = selector => { const { left, right } = document.querySelector(selector).getBoundingClientRect(); return { left, right }; };
         return { controls: rect('.react-flow__controls'), overview: rect('.react-flow__minimap') };

@@ -1002,10 +1002,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   html, body, #root { height: 100%; min-height: 0; }
   body { overflow: hidden; }
   .app-shell { height: 100%; min-height: 0; overflow: hidden; }
-  .workbench { display: grid; grid-template-columns: auto 5px minmax(480px, 1fr); grid-template-rows: minmax(0, 1fr) var(--right-divider-height) minmax(0, min(var(--right-dock-height), 60%)); }
+  .workbench { display: grid; grid-template-columns: auto 5px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--right-divider-height) minmax(0, min(var(--right-dock-height), 60%)); }
   .workbench > .dock--left { grid-column: 1; grid-row: 1 / -1; }
   .workbench > .dock--left + .splitter { grid-column: 2; grid-row: 1 / -1; }
-  .workbench > .canvas-panel { grid-column: 3; grid-row: 1; }
+  .workbench > .canvas-panel { grid-column: 3; grid-row: 1; min-width: 0; }
   .workbench > .canvas-panel + .splitter { grid-column: 3; grid-row: 2; }
   .workbench > .dock--right { grid-column: 3; grid-row: 3; flex-direction: row; width: auto; border-left: 0; }
   .dock--right > .dock-section { border-bottom: 0; }

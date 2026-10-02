@@ -1192,6 +1192,8 @@ impl Graph {
             state.memo.insert(memo_key.clone(), evaluated.clone());
             return Ok(evaluated);
         }
+        let diagnostics = std::env::var_os("RAWWEAVE_NODE_DIAGNOSTICS").is_some();
+        let evaluation_started = std::time::Instant::now();
         let result = if node.type_id == "core.imageset-map"
             && inputs
                 .values()
@@ -1217,10 +1219,15 @@ impl Graph {
                     source,
                 })?
         };
+        let evaluation_elapsed = evaluation_started.elapsed();
+        let hashing_started = std::time::Instant::now();
         let evaluated = EvaluatedNode {
             output_hash: hash_node_result(&result),
             result,
         };
+        if diagnostics {
+            eprintln!("graph {:?} {:?}: evaluate {:.2} ms, output hash {:.2} ms", node.id.as_str(), node.type_id, evaluation_elapsed.as_secs_f64() * 1000.0, hashing_started.elapsed().as_secs_f64() * 1000.0);
+        }
         if generation_target == Some(node_id) {
             state.visiting.remove(node_id);
             state.memo.insert(memo_key, evaluated.clone());
