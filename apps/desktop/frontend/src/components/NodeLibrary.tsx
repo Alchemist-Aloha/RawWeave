@@ -3,6 +3,8 @@ import type { NodeDescriptor } from '../editor/types';
 import { dataTypesCompatible } from '../editor/connections';
 import { Icon } from '../ui/Icon';
 
+export const NODE_DRAG_TYPE = 'application/x-rawweave-node';
+
 interface NodeLibraryProps {
   descriptors: NodeDescriptor[];
   onAdd: (typeId: string) => void;
@@ -128,7 +130,7 @@ export function NodeLibrary({
         />
       </label>
       <div className="node-library__toolbar">
-        <span id="node-library-hint">Enter adds the first result · ⌘K focuses search</span>
+        <span id="node-library-hint">Drag nodes into the workflow · Click or Enter to add</span>
         {hasCompatibleTypes && (
           <label className="filter-chip">
             <input
@@ -167,8 +169,14 @@ export function NodeLibrary({
             {items.map((descriptor) => (
               <button
                 className="node-library__item"
+                draggable
                 key={descriptor.typeId}
                 onClick={() => onAdd(descriptor.typeId)}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData(NODE_DRAG_TYPE, descriptor.typeId);
+                  event.dataTransfer.effectAllowed = 'copy';
+                }}
+                title="Drag into the workflow or click to add"
                 type="button"
               >
                 <span className="node-library__icon"><Icon name="plus" /></span>

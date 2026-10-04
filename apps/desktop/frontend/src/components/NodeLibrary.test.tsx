@@ -19,6 +19,25 @@ const descriptors: NodeDescriptor[] = [
 ];
 
 describe('NodeLibrary', () => {
+  it('drags a node type without adding it until dropped', async () => {
+    const onAdd = vi.fn();
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<NodeLibrary descriptors={descriptors} onAdd={onAdd} />));
+    const item = host.querySelector<HTMLButtonElement>('.node-library__item');
+    expect(item?.draggable).toBe(true);
+    const dataTransfer = { setData: vi.fn(), effectAllowed: '' };
+    const event = new Event('dragstart', { bubbles: true });
+    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+    await act(async () => item?.dispatchEvent(event));
+    expect(dataTransfer.setData).toHaveBeenCalledWith('application/x-rawweave-node', 'core.exposure');
+    expect(dataTransfer.effectAllowed).toBe('copy');
+    expect(onAdd).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
   it('creates the first filtered node from the keyboard', async () => {
     const onAdd = vi.fn();
     const host = document.createElement('div');

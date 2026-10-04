@@ -79,6 +79,20 @@ describe('editor controller', () => {
     expect(editor.state.nodes[0].typeId).toBe('core.image-input');
   });
 
+  it('creates a dropped node at its workflow position in one undo entry', async () => {
+    const editor = await controller();
+    const position = { x: -135, y: 287 };
+    const id = await editor.createNode('core.exposure', undefined, position);
+
+    expect(editor.state.nodes.find((node) => node.id === id)?.position).toEqual(position);
+    expect(JSON.parse(await editor.saveWorkflow()).positions[id]).toEqual(position);
+    await editor.undo();
+    expect(editor.state.nodes).toHaveLength(0);
+    expect(editor.state.canUndo).toBe(false);
+    await editor.redo();
+    expect(editor.state.nodes.find((node) => node.id === id)?.position).toEqual(position);
+  });
+
   it('undoes and redoes bounded graph edits', async () => {
     const editor = await controller();
 

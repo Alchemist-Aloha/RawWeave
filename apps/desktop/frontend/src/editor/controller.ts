@@ -340,7 +340,7 @@ export class EditorController {
     }
   }
 
-  public async createNode(typeId: string, requestedId?: string): Promise<string> {
+  public async createNode(typeId: string, requestedId?: string, position?: Position): Promise<string> {
     const descriptor = this.state.descriptors.find((candidate) => candidate.typeId === typeId);
     if (!descriptor) {
       const error = new Error(`node type '${typeId}' is not registered`);
@@ -352,7 +352,10 @@ export class EditorController {
     let nodeId = baseId;
     let suffix = 2;
     while (existing.has(nodeId)) nodeId = `${baseId}-${suffix++}`;
-    await this.command(() => this.platform.addNode(nodeId, typeId));
+    await this.command(async () => {
+      await this.platform.addNode(nodeId, typeId);
+      if (position) this.positions.set(nodeId, { ...position });
+    });
     this.setState({ selectedNodeId: nodeId, notification: `${descriptor.name} added` });
     return nodeId;
   }

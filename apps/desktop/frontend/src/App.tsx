@@ -40,7 +40,7 @@ import type {
   CheckpointOutputPort,
   CheckpointPreviewActions,
 } from './components/CheckpointPanel';
-import { NodeLibrary } from './components/NodeLibrary';
+import { NODE_DRAG_TYPE, NodeLibrary } from './components/NodeLibrary';
 import { ImageNodeControls } from './components/ImageNodeControls';
 import { DRAWABLE_NODES } from './viewer/region';
 import { targetsFor, Viewer } from './components/Viewer';
@@ -419,6 +419,7 @@ export default function App() {
   const [showSubgraphForm, setShowSubgraphForm] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [workflowCanvasKey, setWorkflowCanvasKey] = useState(0);
+  const manuallyPlacedCanvasKey = useRef<number | null>(null);
   const [dock, setDock] = useState<DockLayout>(loadDockLayout);
   const [portrait, setPortrait] = useState(() => window.matchMedia('(orientation: portrait)').matches);
   const [lamp, setLamp] = useState<'on' | 'off'>(loadLamp);
@@ -1471,7 +1472,24 @@ export default function App() {
               <DependencySummary report={controller.state.dependencyReport} hash={controller.state.workflowHash} />
             </div>
           </div>
-          <div className="flow-canvas">
+          <div
+            className="flow-canvas"
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes(NODE_DRAG_TYPE)) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+            }}
+            onDrop={(event) => {
+              if (!event.dataTransfer.types.includes(NODE_DRAG_TYPE)) return;
+              event.preventDefault();
+              const typeId = event.dataTransfer.getData(NODE_DRAG_TYPE);
+              if (!flowInstance.current || !controller.state.descriptors.some((node) => node.typeId === typeId)) return;
+              const position = flowInstance.current.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+              // An empty canvas still has its initial fit queued; do not move a dropped node away from the pointer.
+              manuallyPlacedCanvasKey.current = workflowCanvasKey;
+              void controller.createNode(typeId, undefined, position).catch(() => undefined);
+            }}
+          >
             <GraphNodeActionsContext.Provider value={nodeActions}>
               <ReactFlow
                 connectionLineStyle={{ stroke: 'var(--wax-amber)', strokeWidth: 2 }}
@@ -1479,7 +1497,7 @@ export default function App() {
                 deleteKeyCode={null}
                 edgeTypes={edgeTypes}
                 edgesReconnectable
-                fitView
+                fitView={manuallyPlacedCanvasKey.current !== workflowCanvasKey}
                 isValidConnection={isValidConnection}
                 minZoom={0.05}
                 key={workflowCanvasKey}
@@ -1516,7 +1534,7 @@ export default function App() {
               <div className="canvas-empty">
                 <span className="canvas-empty__icon"><Icon name="plus" /></span>
                 <strong>Start weaving</strong>
-                <p>Add a node from the library to build your first graph.</p>
+                <p>Drag a node from the library into the workflow, or click one to add it.</p>
               </div>
             )}
           </div>

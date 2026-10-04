@@ -380,6 +380,9 @@ Cards are 3px radius on Room Raise with a hairline border, and they are the exce
 ### The Contact Sheet
 Tiles are frames butted on the plane: no border and no radius, the photograph inside a 1px mount line, its filename and dimensions printed in a ruled ledger row beneath it, and the plane's ground showing through the 11px gaps. A selected tile lifts its mount line to wax. This is the same frame device the canvas uses, so the two planes read as one material rather than as a canvas and a grid of cards.
 
+### Node Library Dragging
+Library rows remain buttons for click/keyboard creation and also support native HTML dragging into the workflow canvas. The browser's drag image and copy cursor provide feedback; screen coordinates are converted through the current graph viewport. Explicitly dropped placement does not trigger initial auto-fit, and creation plus placement is one undoable action. Library and empty-canvas hints describe dragging without making it the only way to add a node.
+
 ### The Minimap
 The minimap is a **window cut into the plane**, not a panel laid over it: the recessed ground, the frames inside it drawn in the plane's line tone, a hairline mask outline showing where you are, and a footprint bounded by 148×100 that follows the workflow viewport's aspect ratio, small enough to stay out of the way on a narrow window. Its dimensions are supplied to React Flow's MiniMap itself so the SVG, viewport mask and pointer coordinates stay aligned when the window or docks resize. React Flow's own light-theme defaults painted a 60%-white mask over the plane; its consumed variables are set from the plane's tokens instead, so the window follows the lamp.
 
