@@ -24,6 +24,8 @@ function node(id: string, outputs: Array<{ id: string; name: string; dataType: s
   };
 }
 
+afterEach(() => vi.useRealTimers());
+
 describe('Viewer', () => {
   it('passes DPR and displays a mip bitmap at full-coordinate size without multiplying zoom', async () => {
     const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(750);
@@ -162,6 +164,63 @@ describe('Viewer', () => {
     await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Compare A and B"]')!.click());
     expect(controller.state.panes.A.target?.nodeId).toBe('output');
     expect(controller.state.panes.B.target).toBeNull();
+    await act(async () => root.unmount()); host.remove();
+  });
+
+  it('shows compact source indicators and wipes A on the left, B on the right', async () => {
+    const controller = new ViewerController({ requestPreview: () => new Promise(() => undefined), cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); input.typeId = 'core.image-input';
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); output.typeId = 'core.output';
+    const host = document.createElement('div'); document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer docked controller={controller} nodes={[input, output]} revision={1}
+      source={{ kind: 'ordinary', width: 640, height: 480, revision: 1, metadata: null }} />));
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Compare A and B"]')!.click());
+    expect(host.querySelector('.viewer-source[data-viewer="A"]')?.textContent).toContain('input');
+    expect(host.querySelector('.viewer-source[data-viewer="B"]')?.textContent).toContain('output');
+    const count = vi.spyOn(controller, 'setTarget');
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Viewer layout: stacked"]')!.click());
+    expect(host.querySelector('.viewer-grid--split')).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Viewer layout: side by side"]')!.click());
+    expect(host.querySelector('.viewer-grid--side-by-side')).not.toBeNull();
+    expect(count).not.toHaveBeenCalled();
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Wipe"]')!.click());
+    expect(host.querySelectorAll('.viewer-source')).toHaveLength(2);
+    const wipe = host.querySelector<HTMLInputElement>('input[aria-label="Wipe position"]')!;
+    for (const position of [0, 25, 100]) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(wipe, String(position));
+        wipe.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(host.querySelector<HTMLElement>('.viewer-pane--comparison-a')!.style.clipPath).toBe(`inset(0 ${100 - position}% 0 0)`);
+      expect(host.querySelector<HTMLElement>('.viewer-pane--comparison-b')!.style.clipPath).toBe(`inset(0 0 0 ${position}%)`);
+      expect(host.querySelectorAll('.viewer-source')).toHaveLength(position === 25 ? 2 : 1);
+      if (position === 0 || position === 100) {
+        expect(host.querySelector('.viewer-source')?.getAttribute('data-viewer')).toBe(position === 0 ? 'B' : 'A');
+      }
+    }
+    await act(async () => root.unmount()); host.remove();
+  });
+
+  it('identifies the visible blink source without requesting new previews on each blink', async () => {
+    vi.useFakeTimers();
+    const requestPreview = vi.fn<PreviewTransport['requestPreview']>(() => new Promise(() => undefined));
+    const controller = new ViewerController({ requestPreview, cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); input.typeId = 'core.image-input';
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); output.typeId = 'core.output';
+    const host = document.createElement('div'); document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer controller={controller} nodes={[input, output]} revision={1}
+      source={{ kind: 'ordinary', width: 640, height: 480, revision: 1, metadata: null }} />));
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Blink"]')!.click());
+    const count = requestPreview.mock.calls.length;
+    expect(host.querySelectorAll('.viewer-source')).toHaveLength(1);
+    expect(host.querySelector('.viewer-source')?.getAttribute('data-viewer')).toBe('A');
+    expect(host.querySelector('.viewer-source')?.textContent).toContain('input');
+    await act(async () => vi.advanceTimersByTime(450));
+    expect(host.querySelector('.viewer-source')?.getAttribute('data-viewer')).toBe('B');
+    expect(host.querySelector('.viewer-source')?.textContent).toContain('output');
+    expect(requestPreview).toHaveBeenCalledTimes(count);
     await act(async () => root.unmount()); host.remove();
   });
 

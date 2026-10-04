@@ -612,14 +612,14 @@ describe('real Tauri viewer comparisons', () => {
       expect(geometry.image?.height).toBeGreaterThan(20);
     }
 
-    // Wipe at 100% shows Viewer B alone; the difference against an identical
+    // Wipe at 0% shows Viewer B alone; the difference against an identical
     // Viewer A must go black. A blend confined to Viewer B's own stacking
     // context never reaches A and renders B unchanged instead.
     await clickViewerAction('Wipe');
     await browser.execute(() => {
       const slider = document.querySelector('input[aria-label="Wipe position"]');
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(slider, '100');
+      setter.call(slider, '0');
       slider.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await browser.pause(500);

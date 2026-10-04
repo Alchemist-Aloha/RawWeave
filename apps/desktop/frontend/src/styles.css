@@ -783,7 +783,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 
 .viewer-section { display: grid; grid-template-rows: auto minmax(160px, 1fr) auto; min-height: 0; border-top: 0; padding: 0 10px 10px; background: var(--room-strip); }
 .viewer-section--collapsed { grid-template-rows: auto; }
-.viewer-section--docked .viewer-grid--side-by-side { grid-template-columns: minmax(0, 1fr); }
 /* A definite scope track so the tabbed panel can shrink/grow inside it; an
    `auto` track left the scope canvas overflowing its card. Only applied when a
    scope strip is actually rendered, or the empty track would reserve its space. */
@@ -806,7 +805,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-section--docked .viewer-pane__header { padding: 4px 8px; gap: 8px; }
 .viewer-section--docked .viewer-pane__header strong { display: none; }
 .viewer-section--docked .viewer-pane__header .eyebrow { display: block; }
-.viewer-section--docked .viewer-pane__target { min-width: 118px; padding: 3px 6px; font-size: 10px; }
+.viewer-section--docked .viewer-pane__target { flex: 1; min-width: 0; max-width: none; padding: 3px 6px; font-size: 10px; }
 .viewer-section--docked .viewer-pane__controls { padding: 4px 8px; }
 .viewer-section__toolbar strong { display: block; margin-top: 3px; font-size: 12px; }
 .viewer-section__layout { display: flex; gap: 4px; }
@@ -817,8 +816,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-section__clipping { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--room-line-strong); border-radius: 3px; padding: 4px 6px; color: var(--room-ink-dim); font-size: 10px; }
 .viewer-section__clipping input { width: 12px; height: 12px; accent-color: var(--wax-white); }
 .viewer-grid { display: grid; min-height: 0; gap: 10px; }
-.viewer-grid--side-by-side { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.viewer-grid--split { grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.viewer-grid--side-by-side { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); }
+.viewer-grid--split { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .viewer-comparison { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; border: 1px solid var(--room-line); border-radius: 3px; background: repeating-conic-gradient(var(--room-raise) 0% 25%, var(--room-panel) 0% 50%) 50% / 16px 16px; }
 .viewer-comparison__selectors { position: relative; z-index: 4; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border-bottom: 1px solid var(--room-line); padding: 7px 9px; background: rgba(26, 22, 17, .94); }
 .viewer-comparison__selectors label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px; min-width: 0; color: var(--room-ink-dim); font-family: var(--face-data); font-size: 9px; text-transform: uppercase; }
@@ -840,7 +839,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-comparison--difference .viewer-pane--comparison-b { mix-blend-mode: difference; }
 .viewer-comparison__wipe { position: absolute; right: 10px; bottom: 10px; left: 10px; z-index: 5; display: flex; border: 1px solid rgba(68, 58, 45, .9); border-radius: 3px; padding: 5px 7px; background: rgba(20, 17, 13, .88); }
 .viewer-comparison__wipe input { width: 100%; accent-color: var(--wax-white); }
-.viewer-comparison__status { position: absolute; right: 10px; bottom: 10px; z-index: 5; border: 1px solid rgba(68, 58, 45, .9); border-radius: 3px; padding: 4px 6px; color: var(--room-ink-body); background: rgba(20, 17, 13, .88); font-family: var(--face-data); font-size: 10px; }
+.viewer-source { position: absolute; top: 8px; left: 8px; z-index: 3; display: flex; align-items: center; gap: 5px; max-width: calc(100% - 16px); border: 1px solid var(--room-line); border-radius: 3px; padding: 3px 5px; color: var(--room-ink-body); background: var(--room-sunk); font-family: var(--face-data); font-size: 10px; pointer-events: none; }
+.viewer-source strong { flex-shrink: 0; color: var(--room-ink); }
+.viewer-source span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-source[data-viewer='B'] { right: 8px; left: auto; }
+.viewer-comparison > .viewer-source { top: 47px; }
+.viewer-comparison--wipe > .viewer-source { max-width: calc(50% - 12px); }
+.viewer-comparison--blink > .viewer-source { right: auto; left: 8px; }
 .viewer-pane__clipping-overlay { position: absolute; z-index: 1; display: block; pointer-events: none; mix-blend-mode: screen; }
 .viewer-pane { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--room-line); border-radius: 3px; background: var(--room-panel); }
 .viewer-pane__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; border-bottom: 1px solid var(--room-line); padding: 7px 9px; }
@@ -868,7 +873,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .viewer-pane__error strong { color: var(--wax-red-ink); font-size: 12px; }
 .viewer-pane__error small { color: var(--wax-red-ink-soft); font-size: 11px; }
 .viewer-pane__error button { justify-self: start; border: 1px solid var(--wax-red-dim); border-radius: 3px; padding: 4px 6px; color: var(--wax-red-ink-soft); background: var(--wax-red-tint); font-size: 11px; font-weight: 700; }
-.viewer-pane__controls { display: flex; align-items: center; justify-content: flex-end; gap: 4px; border-top: 1px solid var(--room-line); padding: 6px 8px; }
+.viewer-pane__controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; border-top: 1px solid var(--room-line); padding: 6px 8px; }
 .viewer-pane__controls button { padding: 4px 7px; font-size: 11px; }
 .viewer-pane__zoom { min-width: 44px; color: var(--room-ink-dim); font-family: var(--face-data); font-size: 10px; text-align: center; }
 

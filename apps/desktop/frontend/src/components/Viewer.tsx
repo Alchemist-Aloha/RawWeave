@@ -183,6 +183,16 @@ function TargetSelect({ viewer, pane, options, controller }: {
   );
 }
 
+function SourceIndicator({ viewer, target }: { viewer: ViewerId; target: PreviewTarget | null }) {
+  const source = target ? `${target.nodeName} · ${target.outputName}` : 'No source selected';
+  return (
+    <span className="viewer-source" data-viewer={viewer} aria-label={`Viewer ${viewer} source: ${source}`}
+      title={`Viewer ${viewer}: ${source}${target ? ` (${targetKey(target)})` : ''}`}>
+      <strong>{viewer}</strong><span>{source}</span>
+    </span>
+  );
+}
+
 function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode, onPaintedMaskChange, onAnalysis, analysis = null, surface = false, clippingOverlay = false, className = '', style }: {
   geometryEditing?: GeometryEditing;
   viewer: ViewerId;
@@ -358,6 +368,7 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
           if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
         }}
       >
+        {!surface && <SourceIndicator viewer={viewer} target={pane.target} />}
         {imageUrl ? (
           <img
             alt={pane.target ? `${pane.target.nodeName} preview` : 'Preview'}
@@ -522,7 +533,10 @@ function ComparisonSurface({
         paintedNode={paintedNode}
         pane={paneA}
         surface
-        style={visiblePane === 'B' ? { visibility: 'hidden' } : undefined}
+        style={{
+          clipPath: comparison === 'wipe' ? `inset(0 ${100 - wipePosition}% 0 0)` : undefined,
+          visibility: visiblePane === 'B' ? 'hidden' : undefined,
+        }}
         viewer="A"
       />
       <Pane
@@ -537,7 +551,7 @@ function ComparisonSurface({
         pane={paneB}
         surface
         style={{
-          clipPath: comparison === 'wipe' ? `inset(0 ${100 - wipePosition}% 0 0)` : undefined,
+          clipPath: comparison === 'wipe' ? `inset(0 0 0 ${wipePosition}%)` : undefined,
           visibility: visiblePane === 'A' ? 'hidden' : undefined,
         }}
         viewer="B"
@@ -555,7 +569,11 @@ function ComparisonSurface({
           />
         </label>
       )}
-      {comparison === 'blink' && <span aria-live="polite" className="viewer-comparison__status">Showing Viewer {blinkViewer}</span>}
+      {comparison === 'wipe' && <>
+        {wipePosition > 0 && <SourceIndicator viewer="A" target={paneA.target} />}
+        {wipePosition < 100 && <SourceIndicator viewer="B" target={paneB.target} />}
+      </>}
+      {comparison === 'blink' && <SourceIndicator viewer={blinkViewer} target={controller.state.panes[blinkViewer].target} />}
     </div>
   );
 }
