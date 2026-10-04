@@ -1253,6 +1253,26 @@ input, select, textarea { caret-color: var(--wax-amber); }
 .color-hue small { font-size: 11px; color: var(--judge-ink-dim); }
 .curve-preview small, .curve-preview__invalid, .parameter-transfer-preview > small, .color-parameter-preview > small { display: block; font-size: 11px; color: var(--bench-ink-dim); }
 .curve-preview__invalid { grid-column: 1 / -1; }
+.curve-editor { grid-column: 1 / -1; min-width: 0; }
+.curve-editor svg { touch-action: none; cursor: crosshair; }
+.curve-editor .curve-editor__point { cursor: grab; fill: var(--bench-ink); stroke: var(--bench-sunk); stroke-width: 1; }
+.curve-editor .curve-editor__point.is-selected, .curve-editor .curve-editor__point:focus { fill: var(--wax-amber); stroke: var(--bench-ink); outline: none; }
+.curve-editor svg:focus-visible { outline: 1px solid var(--wax-amber); outline-offset: 2px; }
+.curve-editor__coordinates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 6px 0; }
+.curve-editor__coordinates label { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--bench-ink-body); font-size: 11px; }
+.curve-editor__coordinates label:first-child { grid-column: 1 / -1; }
+.curve-editor__coordinates input, .curve-editor__coordinates select { width: 100%; min-width: 0; }
+.curve-editor__picker { position: relative; display: block; }
+.curve-editor__picker select { padding-right: 26px; background-image: none; }
+.curve-editor__picker .icon { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--bench-ink-dim); pointer-events: none; }
+.curve-editor__coordinates input:disabled { opacity: .4; cursor: not-allowed; }
+.curve-editor__actions { display: flex; gap: 6px; margin: 6px 0; }
+.curve-editor__actions button { border: 1px solid var(--bench-line-strong); border-radius: 3px; padding: 4px 6px; background: var(--bench-ground); color: var(--bench-ink); font: inherit; font-size: 11px; cursor: pointer; }
+.curve-editor__actions button:hover:enabled { background: var(--bench-hover); }
+.curve-editor__actions button:disabled { opacity: .4; cursor: not-allowed; }
+.curve-editor > small { display: block; color: var(--bench-ink-dim); font-size: 11px; max-width: 260px; }
+.curve-editor > .curve-preview__invalid { color: var(--wax-red-ink); }
+.curve-editor__readout { display: block; color: var(--bench-ink); font: 400 10px/1.45 var(--face-data); }
 .image-node-controls { display: grid; gap: 8px; margin: 8px 0 12px; font-size: 11px; }
 .image-node-controls > div { display: flex; gap: 6px; }
 .geometry-overlay { position: absolute; inset: 0; z-index: 2; cursor: crosshair; touch-action: none; }

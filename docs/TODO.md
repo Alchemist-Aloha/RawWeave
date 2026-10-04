@@ -1,6 +1,6 @@
 # TODO
 
-- [x] Implement curve-based displays for compatible nodes: Curve, Curves (gamma), LUT/LUT Tools and Film Curve. Live plots follow local drafts; point edits apply once on Enter/blur. Saved parameter formats and Rust evaluation are unchanged. Direct point dragging remains a possible follow-up, not implemented.
+- [x] Implement curve-based displays for compatible nodes: Curve, Curves (gamma), LUT/LUT Tools and Film Curve. Live plots follow local drafts; point edits apply once on Enter/blur. Saved parameter formats and Rust evaluation are unchanged. Direct point editing is implemented: click-drag to insert, drag handles, keyboard nudges/add/delete, protected endpoints and one release commit. Exact per-point input/output fields, a point selector and Alt-click deletion are also implemented, including Film Simulation. See `EDITOR_IMPROVEMENT_LOG.md`, iterations 24–25.
 - [x] Review opaque value-only controls and add appropriate visual representations (initial pass complete).
   - [x] Review existing parameter UX and image/geometry helpers; promote curve points out of Advanced and add a bounded gamma slider with a live plot. See `EDITOR_IMPROVEMENT_LOG.md`, iteration 21.
   - [x] Levels: combined black/white/gamma transfer display with clipping boundaries and coupled invalid-value messages. Exact fields and Rust validation remain unchanged; plot updates on commit.

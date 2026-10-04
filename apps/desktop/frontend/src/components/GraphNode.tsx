@@ -3,6 +3,7 @@ import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } from '../editor/types';
 import { isRecommendedValue, parameterUX, POINT_CURVE_NODES } from '../editor/parameter-ux';
 import { CurvePreview, curvePlot } from './CurvePreview';
+import { CurveEditor } from './CurveEditor';
 import { ParameterTransferPreview } from './ParameterTransferPreview';
 import { ColorParameterPreview } from './ColorParameterPreview';
 import { inputDataType } from '../editor/connections';
@@ -72,6 +73,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   const draftRef = useRef<string | null>(null);
   const committed = useRef(value);
   const editing = useRef(false);
+  const curveGesture = useRef(false);
   const updateDraft = (text: string | null) => {
     draftRef.current = text;
     setDraft(text);
@@ -165,7 +167,12 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   const sliderValue = typeof value === 'number' ? Math.min(max! * factor, Math.max(min! * factor, value * factor)) : min! * factor;
   return (
     <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
-      {(pointCurve || gammaCurve) && <CurvePreview typeId={typeId} value={draft === null ? value : pointCurve ? draft : Number(draft) / factor} />}
+      {pointCurve && <CurveEditor typeId={typeId} value={draft ?? value} committedValue={value}
+        onBegin={() => { curveGesture.current = true; editing.current = true; }}
+        onDraft={(text) => { editing.current = true; updateDraft(text); }}
+        onCommit={() => { curveGesture.current = false; commit(); }}
+        onCancel={() => { curveGesture.current = false; cancel(); }} />}
+      {gammaCurve && <CurvePreview typeId={typeId} value={draft === null ? value : Number(draft) / factor} />}
       <label className="parameter__field parameter__label" data-tooltip={ux.description}>
         <span>{ux.name}{ux.unit ? ` (${ux.unit})` : ''}</span>
         <span className="parameter__value-row">
@@ -206,7 +213,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); event.currentTarget.blur(); }
             if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
           }}
-          onBlur={() => { if (pointCurve) commit(); else setDraft(null); }}
+          onBlur={() => { if (pointCurve) { if (!curveGesture.current) commit(); } else setDraft(null); }}
           onChange={(event) => {
             if (pointCurve) { editing.current = true; updateDraft(event.target.value); }
             else { setDraft(event.target.value); onChange(event.target.value); }

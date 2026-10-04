@@ -1,6 +1,6 @@
 import type { ParameterDescriptor, ParameterValue } from './types';
 
-export const POINT_CURVE_NODES = new Set(['core.curve', 'pro.lut', 'pro.lut-tools', 'pro.film-curve']);
+export const POINT_CURVE_NODES = new Set(['core.curve', 'pro.lut', 'pro.lut-tools', 'pro.film-curve', 'pro.film-simulation']);
 
 export interface ParameterUX {
   name: string;

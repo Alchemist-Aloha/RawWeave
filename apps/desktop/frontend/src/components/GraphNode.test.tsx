@@ -88,6 +88,55 @@ describe('GraphNode parameters', () => {
     await act(async () => root.unmount());
     container.remove();
   });
+  it.each(['core.curve', 'pro.lut', 'pro.lut-tools', 'pro.film-curve', 'pro.film-simulation'])('shares %s curve drafts with the text field and publishes exactly once on release', async (typeId) => {
+    const curve: EditorNode = { ...node, typeId, parameters: { points: '0,0;1,1' },
+      descriptor: { ...node.descriptor, parameters: [{ id: 'points', name: 'Control Points', parameterType: 'String', default: '0,0;1,1', min: null, max: null }] } };
+    const value = actions();
+    const { container, root } = await renderNode(curve, value);
+    const svg = container.querySelector<SVGSVGElement>('.curve-editor svg')!;
+    expect(svg).not.toBeNull();
+    Object.assign(svg, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, inverse() { return this; } }), setPointerCapture: vi.fn(), hasPointerCapture: () => false });
+    const pointer = (type: string, x: number, y: number) => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      svg.dispatchEvent(event);
+    };
+    await act(async () => { pointer('pointerdown', 100, 60); pointer('pointermove', 100, 39.2); });
+    const field = container.querySelector<HTMLTextAreaElement>('textarea')!;
+    expect(field.value).toBe('0,0;0.5,0.7;1,1');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => pointer('pointerup', 100, 39.2));
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'points', '0,0;0.5,0.7;1,1');
+    await act(async () => { field.focus(); field.blur(); });
+    expect(value.onParameterChange).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+  it('does not discard valid point-text drafts when selecting a handle without moving it', async () => {
+    const curve: EditorNode = { ...node, typeId: 'core.curve', parameters: { points: '0,0;1,1' },
+      descriptor: { ...node.descriptor, parameters: [{ id: 'points', name: 'Control Points', parameterType: 'String', default: '0,0;1,1', min: null, max: null }] } };
+    const value = actions();
+    const { container, root } = await renderNode(curve, value);
+    const field = container.querySelector<HTMLTextAreaElement>('textarea')!;
+    await act(async () => {
+      field.focus();
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(field, '0,0;0.5,0.7;1,1');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const svg = container.querySelector<SVGSVGElement>('.curve-editor svg')!;
+    Object.assign(svg, { getScreenCTM: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, inverse() { return this; } }), setPointerCapture: vi.fn(), hasPointerCapture: () => false });
+    await act(async () => {
+      for (const type of ['pointerdown', 'pointerup']) {
+        const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 100, clientY: 39.2 });
+        Object.defineProperty(event, 'pointerId', { value: 1 });
+        svg.dispatchEvent(event);
+      }
+    });
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'points', '0,0;0.5,0.7;1,1');
+    expect(field.value).toBe('0,0;0.5,0.7;1,1');
+    await act(async () => root.unmount());
+    container.remove();
+  });
   it('plots the gamma slider draft without publishing it and restores on Escape', async () => {
     const curve: EditorNode = {
       ...node, typeId: 'core.curves', parameters: { gamma: 1 },
