@@ -126,6 +126,20 @@ Files: `src/components/NodeLibrary.tsx`, `NodeLibrary.test.tsx`, browser `node-u
 Verification: all 232 frontend tests pass; production frontend and native E2E builds pass (existing bundle-size warning). Rebuilt native editing suite passes 4/4, including taxonomy, collapsed-category search, fixed library scrolling, search shortcut and Exposure creation/editing. Native category-search screenshot inspected. UI detector reports no findings; `git diff --check` passes.
 Limitations: standard browser E2E timed out after 90 seconds before producing test results; no browser E2E pass or full native-suite clearance claimed. New first-party node IDs require a taxonomy entry; unknown nodes remain discoverable without one.
 
+## Iteration 14 — workflow overview viewport shape
+
+Problem/evidence: the overview container was styled at 148×100 while React Flow still rendered its default 200×150 SVG; the diagram overflowed and the widget did not follow the canvas shape. A new native aspect-ratio regression failed before the fix.
+Change: `WorkflowOverview.tsx` reads the existing React Flow viewport dimensions and fits the overview to their aspect ratio within 148×100. Dimensions are passed to MiniMap's style prop, which also controls SVG rendering and pointer mapping; removed conflicting CSS dimensions. The component subscribes only to aspect changes, not pan/zoom. Existing pannable/zoomable behavior and palette remain unchanged.
+Verification: 232 frontend tests pass; frontend/native E2E build passes. Rebuilt native overview regression passes, checking canvas/SVG/mask ratios and containment before and after library collapse/expand; native screenshot inspected. Browser portrait/landscape regression extended but runner fails downloading the matching chromedriver, so browser clearance is not claimed. Detector reports only the existing graph-node pseudo-element warning outside this change.
+Files: `src/components/WorkflowOverview.tsx`, `src/App.tsx`, `src/styles.css`, browser `portrait-layout.spec.mjs`, native `workflow-overview.spec.mjs` under `apps/desktop/frontend`, plus `DESIGN.md`. No graph, processing, dependency or persistence changes.
+
+## Iteration 15 — publish measured node sizes to the overview
+
+Problem/evidence: a newly added Invert appeared on the canvas but not in the overview; the native node-count regression timed out before the fix. `onNodesChange` stored measurements in a ref without invalidating the controlled `flowNodes` memo. React Flow's MiniMap skips user nodes without dimensions, even when its internal node has been measured.
+Change: publish one local measurement revision per changed dimensions batch, feed it into the existing flow-node memo, and ignore identical measurements. Cached node objects and drag-time measurements remain reused. No graph commands, persistence changes or preview requests are added for measuring nodes.
+Verification: all 232 frontend tests and frontend/native builds pass. Rebuilt native overview suite passes 2/2: newly created nodes immediately have positive-sized overview shapes, and viewport geometry remains correct after dock collapse/expand. Screenshot inspected; App detector and `git diff --check` pass. Standard browser runner remains blocked by the matching chromedriver download documented above; full native-suite clearance is not claimed.
+Files: `apps/desktop/frontend/src/App.tsx`, `apps/desktop/frontend/e2e/native/workflow-overview.spec.mjs`.
+
 ## Earlier performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.

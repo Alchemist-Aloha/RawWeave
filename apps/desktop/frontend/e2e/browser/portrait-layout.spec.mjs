@@ -30,6 +30,13 @@ describe('adaptive workbench', () => {
       expect(widgets.controls.left).toBeGreaterThanOrEqual(boxes.graph.left);
       expect(widgets.controls.right).toBeLessThanOrEqual(widgets.overview.left);
       expect(widgets.overview.right).toBeLessThanOrEqual(boxes.graph.right);
+      await browser.waitUntil(() => browser.execute(() => {
+        const canvas = document.querySelector('.react-flow').getBoundingClientRect();
+        const panel = document.querySelector('.react-flow__minimap').getBoundingClientRect();
+        const svg = document.querySelector('.react-flow__minimap-svg').getBoundingClientRect();
+        return Math.abs(svg.width / svg.height - canvas.width / canvas.height) < 0.02
+          && svg.right <= panel.right + 1 && svg.bottom <= panel.bottom + 1;
+      }));
       if (portrait) {
         expect(boxes.info.top).toBeGreaterThanOrEqual(boxes.graph.bottom);
         expect(boxes.info.left).toBe(boxes.graph.left);

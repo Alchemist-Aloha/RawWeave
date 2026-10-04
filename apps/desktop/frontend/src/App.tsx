@@ -3,7 +3,6 @@ import {
   Background,
   BackgroundVariant,
   Controls,
-  MiniMap,
   ReactFlow,
   type Connection,
   type Edge,
@@ -18,6 +17,7 @@ import { checkConnection } from './editor/connections';
 import type { EditorNode, OpenImageResult, ParameterValue, SourceResult, WorkflowMetadata } from './editor/types';
 import { CanvasContextMenu, type ContextMenuState } from './components/CanvasContextMenu';
 import { WorkflowEdge, type WorkflowFlowEdge } from './components/WorkflowEdge';
+import { WorkflowOverview } from './components/WorkflowOverview';
 import { createPlatform } from './platform/editor';
 import { Splitter } from './components/Splitter';
 import {
@@ -539,6 +539,7 @@ export default function App() {
    * measured again, which flickers the node to nothing for most of a drag.
    */
   const measuredSizes = useRef(new Map<string, { width: number; height: number }>());
+  const [measurementRevision, setMeasurementRevision] = useState(0);
   const flowNodes = useMemo<RawWeaveFlowNode[]>(
     () => {
       const liveIds = new Set(controller.state.nodes.map((node) => node.id));
@@ -572,7 +573,7 @@ export default function App() {
         return flow;
       });
     },
-    [checkpointController.state.statuses, controller.state.nodes, controller.state.selectedNodeIds],
+    [checkpointController.state.statuses, controller.state.nodes, controller.state.selectedNodeIds, measurementRevision],
   );
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -818,19 +819,27 @@ export default function App() {
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      let dimensionsChanged = false;
       for (const change of changes) {
         if (change.type === 'position' && change.position) {
           controller.updateNodePosition(change.id, change.position, change.dragging ?? false);
         } else if (change.type === 'dimensions' && change.dimensions) {
-          measuredSizes.current.set(change.id, {
-            width: change.dimensions.width,
-            height: change.dimensions.height,
-          });
+          const previous = measuredSizes.current.get(change.id);
+          if (previous?.width !== change.dimensions.width || previous?.height !== change.dimensions.height) {
+            measuredSizes.current.set(change.id, {
+              width: change.dimensions.width,
+              height: change.dimensions.height,
+            });
+            dimensionsChanged = true;
+          }
         } else if (change.type === 'remove') {
           measuredSizes.current.delete(change.id);
           void controller.removeNode(change.id).catch(() => undefined);
         }
       }
+      // MiniMap reads dimensions from the controlled user nodes, not just the
+      // internal measured nodes. Publish real size changes once per batch.
+      if (dimensionsChanged) setMeasurementRevision((revision) => revision + 1);
       const selection = selectionFromNodeChanges(controller.state.selectedNodeIds, changes);
       if (selection) controller.selectNodes(selection);
     },
@@ -1500,7 +1509,7 @@ export default function App() {
                 <Controls />
                 {/* Its palette lives in the stylesheet with the rest of the plane's, so
                     the minimap follows the lamp without this component carrying colours. */}
-                <MiniMap pannable zoomable />
+                <WorkflowOverview />
               </ReactFlow>
             </GraphNodeActionsContext.Provider>
             {controller.state.nodes.length === 0 && (

@@ -569,7 +569,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 /* A window cut into the bench, not a panel laid on top of it: recessed ground,
    the frames inside drawn in the plane's own line tone, and small enough to stay
    out of the way when the window is narrow. */
-.react-flow__minimap { width: 148px; height: 100px; border: 1px solid var(--bench-line); border-radius: 3px; }
+.react-flow__minimap { border: 1px solid var(--bench-line); border-radius: 3px; }
 
 /* --- the frame ------------------------------------------------------------ */
 /* A node is a frame on the strip. Its identity is printed along the edge like a
