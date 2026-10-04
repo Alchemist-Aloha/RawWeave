@@ -1,0 +1,210 @@
+{
+  "nodes": {
+    "00-input": {
+      "id": "00-input",
+      "type_id": "core.image-input",
+      "descriptor": {
+        "type_id": "core.image-input",
+        "name": "Image Input",
+        "version": 1,
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    },
+    "10-exposure": {
+      "id": "10-exposure",
+      "type_id": "core.exposure",
+      "descriptor": {
+        "type_id": "core.exposure",
+        "name": "Exposure",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          },
+          {
+            "id": "exposure",
+            "name": "Exposure",
+            "data_type": "value.Float",
+            "required": false
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "exposure",
+            "name": "Exposure",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "exposure": {
+          "Float": 0.35
+        }
+      },
+      "exposed_parameters": []
+    },
+    "20-levels": {
+      "id": "20-levels",
+      "type_id": "core.levels",
+      "descriptor": {
+        "type_id": "core.levels",
+        "name": "Levels",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "black_point",
+            "name": "Black Point",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "white_point",
+            "name": "White Point",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "gamma",
+            "name": "Gamma",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": 0.0001,
+            "max": null
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "black_point": {
+          "Float": 0.02
+        },
+        "gamma": {
+          "Float": 1.0
+        },
+        "white_point": {
+          "Float": 0.98
+        }
+      },
+      "exposed_parameters": []
+    },
+    "99-output": {
+      "id": "99-output",
+      "type_id": "core.output",
+      "descriptor": {
+        "type_id": "core.output",
+        "name": "Output",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    }
+  },
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-exposure",
+      "to_port": "image"
+    },
+    {
+      "from_node": "10-exposure",
+      "from_port": "image",
+      "to_node": "20-levels",
+      "to_port": "image"
+    },
+    {
+      "from_node": "20-levels",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    }
+  ],
+  "revision": 10,
+  "checkpoints": {}
+}

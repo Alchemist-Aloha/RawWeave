@@ -1,0 +1,373 @@
+{
+  "nodes": {
+    "00-input": {
+      "id": "00-input",
+      "type_id": "core.image-input",
+      "descriptor": {
+        "type_id": "core.image-input",
+        "name": "Image Input",
+        "version": 1,
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    },
+    "10-monochrome": {
+      "id": "10-monochrome",
+      "type_id": "core.color-matrix",
+      "descriptor": {
+        "type_id": "core.color-matrix",
+        "name": "Color Matrix",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "m00",
+            "name": "Matrix 00",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m01",
+            "name": "Matrix 01",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m02",
+            "name": "Matrix 02",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m03",
+            "name": "Matrix 03",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m10",
+            "name": "Matrix 10",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m11",
+            "name": "Matrix 11",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m12",
+            "name": "Matrix 12",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m13",
+            "name": "Matrix 13",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m20",
+            "name": "Matrix 20",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m21",
+            "name": "Matrix 21",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m22",
+            "name": "Matrix 22",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m23",
+            "name": "Matrix 23",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m30",
+            "name": "Matrix 30",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m31",
+            "name": "Matrix 31",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m32",
+            "name": "Matrix 32",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "m33",
+            "name": "Matrix 33",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "offset_r",
+            "name": "Red Offset",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "offset_g",
+            "name": "Green Offset",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "offset_b",
+            "name": "Blue Offset",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "offset_a",
+            "name": "Alpha Offset",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "Gpu",
+          "TileLocal",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "m00": {
+          "Float": 0.2126
+        },
+        "m01": {
+          "Float": 0.7152
+        },
+        "m02": {
+          "Float": 0.0722
+        },
+        "m03": {
+          "Float": 0.0
+        },
+        "m10": {
+          "Float": 0.2126
+        },
+        "m11": {
+          "Float": 0.7152
+        },
+        "m12": {
+          "Float": 0.0722
+        },
+        "m13": {
+          "Float": 0.0
+        },
+        "m20": {
+          "Float": 0.2126
+        },
+        "m21": {
+          "Float": 0.7152
+        },
+        "m22": {
+          "Float": 0.0722
+        },
+        "m23": {
+          "Float": 0.0
+        },
+        "m30": {
+          "Float": 0.0
+        },
+        "m31": {
+          "Float": 0.0
+        },
+        "m32": {
+          "Float": 0.0
+        },
+        "m33": {
+          "Float": 1.0
+        },
+        "offset_a": {
+          "Float": 0.0
+        },
+        "offset_b": {
+          "Float": 0.0
+        },
+        "offset_g": {
+          "Float": 0.0
+        },
+        "offset_r": {
+          "Float": 0.0
+        }
+      },
+      "exposed_parameters": []
+    },
+    "99-output": {
+      "id": "99-output",
+      "type_id": "core.output",
+      "descriptor": {
+        "type_id": "core.output",
+        "name": "Output",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    }
+  },
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-monochrome",
+      "to_port": "image"
+    },
+    {
+      "from_node": "10-monochrome",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    }
+  ],
+  "revision": 14,
+  "checkpoints": {}
+}

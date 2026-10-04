@@ -1,0 +1,182 @@
+{
+  "nodes": {
+    "00-input": {
+      "id": "00-input",
+      "type_id": "core.image-input",
+      "descriptor": {
+        "type_id": "core.image-input",
+        "name": "Image Input",
+        "version": 1,
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    },
+    "10-luminance": {
+      "id": "10-luminance",
+      "type_id": "core.mask-luminance",
+      "descriptor": {
+        "type_id": "core.mask-luminance",
+        "name": "Luminance Mask",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "mask",
+            "name": "Mask",
+            "data_type": "core.Mask",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    },
+    "20-local-exposure": {
+      "id": "20-local-exposure",
+      "type_id": "core.local-exposure",
+      "descriptor": {
+        "type_id": "core.local-exposure",
+        "name": "Local Exposure",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          },
+          {
+            "id": "mask",
+            "name": "Mask",
+            "data_type": "core.Mask",
+            "required": false
+          },
+          {
+            "id": "exposure",
+            "name": "Exposure",
+            "data_type": "value.Float",
+            "required": false
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "exposure",
+            "name": "Exposure",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": null,
+            "max": null
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "exposure": {
+          "Float": -0.7
+        }
+      },
+      "exposed_parameters": []
+    },
+    "99-output": {
+      "id": "99-output",
+      "type_id": "core.output",
+      "descriptor": {
+        "type_id": "core.output",
+        "name": "Output",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    }
+  },
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "20-local-exposure",
+      "to_port": "image"
+    },
+    {
+      "from_node": "20-local-exposure",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    },
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-luminance",
+      "to_port": "image"
+    },
+    {
+      "from_node": "10-luminance",
+      "from_port": "mask",
+      "to_node": "20-local-exposure",
+      "to_port": "mask"
+    }
+  ],
+  "revision": 9,
+  "checkpoints": {}
+}

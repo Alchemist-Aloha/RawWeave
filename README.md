@@ -78,6 +78,12 @@ Without the `custom-protocol` feature the shell loads `devUrl`
 (`http://localhost:5173`), so the Vite server must be running first. With the
 Tauri CLI installed, `cargo tauri dev` in `apps/desktop/src-tauri` runs both.
 
+### Example workflows
+
+Six ready-to-open graphs are available in [`examples/workflows`](examples/workflows/README.md):
+basic tone, monochrome, highlight masking, web resize, film look, and RAW development.
+Open a workflow JSON first, then choose a compatible image to attach to it.
+
 ### Release build
 
 ```sh

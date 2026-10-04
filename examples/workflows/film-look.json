@@ -1,0 +1,242 @@
+{
+  "nodes": {
+    "00-input": {
+      "id": "00-input",
+      "type_id": "core.image-input",
+      "descriptor": {
+        "type_id": "core.image-input",
+        "name": "Image Input",
+        "version": 1,
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    },
+    "10-film-curve": {
+      "id": "10-film-curve",
+      "type_id": "pro.film-curve",
+      "descriptor": {
+        "type_id": "pro.film-curve",
+        "name": "Film Curve",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "points",
+            "name": "Control Points",
+            "parameter_type": "String",
+            "default": {
+              "String": "0,0;0.25,0.2;1,1"
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "exposure",
+            "name": "Exposure",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.0
+            },
+            "min": -8.0,
+            "max": 8.0
+          },
+          {
+            "id": "amount",
+            "name": "Amount",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": 0.0,
+            "max": 1.0
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "amount": {
+          "Float": 0.65
+        },
+        "exposure": {
+          "Float": 0.0
+        },
+        "points": {
+          "String": "0,0;0.25,0.2;1,1"
+        }
+      },
+      "exposed_parameters": []
+    },
+    "20-grain": {
+      "id": "20-grain",
+      "type_id": "pro.grain",
+      "descriptor": {
+        "type_id": "pro.grain",
+        "name": "Grain",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "id": "amount",
+            "name": "Amount",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 0.05
+            },
+            "min": 0.0,
+            "max": 1.0
+          },
+          {
+            "id": "size",
+            "name": "Size",
+            "parameter_type": "Float",
+            "default": {
+              "Float": 1.0
+            },
+            "min": 0.1,
+            "max": 64.0
+          },
+          {
+            "id": "seed",
+            "name": "Seed",
+            "parameter_type": "Integer",
+            "default": {
+              "Integer": 0
+            },
+            "min": null,
+            "max": null
+          },
+          {
+            "id": "monochrome",
+            "name": "Monochrome",
+            "parameter_type": "Boolean",
+            "default": {
+              "Boolean": false
+            },
+            "min": null,
+            "max": null
+          }
+        ],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {
+        "amount": {
+          "Float": 0.02
+        },
+        "monochrome": {
+          "Boolean": true
+        },
+        "seed": {
+          "Integer": 0
+        },
+        "size": {
+          "Float": 1.0
+        }
+      },
+      "exposed_parameters": []
+    },
+    "99-output": {
+      "id": "99-output",
+      "type_id": "core.output",
+      "descriptor": {
+        "type_id": "core.output",
+        "name": "Output",
+        "version": 1,
+        "inputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": true
+          }
+        ],
+        "outputs": [
+          {
+            "id": "image",
+            "name": "Image",
+            "data_type": "core.Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ]
+      },
+      "parameters": {},
+      "exposed_parameters": []
+    }
+  },
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-film-curve",
+      "to_port": "image"
+    },
+    {
+      "from_node": "10-film-curve",
+      "from_port": "image",
+      "to_node": "20-grain",
+      "to_port": "image"
+    },
+    {
+      "from_node": "20-grain",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    }
+  ],
+  "revision": 10,
+  "checkpoints": {}
+}
