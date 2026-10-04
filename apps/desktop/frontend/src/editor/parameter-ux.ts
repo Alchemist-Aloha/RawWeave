@@ -1,5 +1,7 @@
 import type { ParameterDescriptor, ParameterValue } from './types';
 
+export const POINT_CURVE_NODES = new Set(['core.curve', 'pro.lut', 'pro.lut-tools', 'pro.film-curve']);
+
 export interface ParameterUX {
   name: string;
   description: string;
@@ -20,7 +22,8 @@ const specific: Record<string, Partial<ParameterUX>> = {
   'core.blur:radius': { name: 'Blur Radius', description: 'Controls how far the blur reaches from each pixel. Larger radii soften broader structures; smaller radii soften fine detail. Very large radii can erase local contrast.', unit: 'px', min: 0, max: 20, step: 0.1, precision: 1 },
   'core.levels:black_point': { name: 'Black Point', description: 'Sets the input level mapped to black. Raise it to deepen shadows, but values set too high can crush shadow detail.', min: 0, max: 0.25, step: 0.001, precision: 3 },
   'core.levels:white_point': { name: 'White Point', description: 'Sets the input level mapped to white. Lower it to brighten highlights, but values set too low can clip detail.', min: 0.75, max: 1.5, step: 0.001, precision: 3 },
-  'core.levels:gamma': { name: 'Midtone Gamma', description: 'Adjusts the brightness of midtones between the black and white points. Lower values brighten midtones; higher values darken them without moving the endpoints.', min: 0.25, max: 4, step: 0.01, precision: 2 },
+  'core.curves:gamma': { name: 'Midtone Gamma', description: 'Shapes the transfer curve. Higher values brighten midtones; lower values darken them. 1 is the neutral diagonal.', min: 0.25, max: 4, step: 0.01, precision: 2 },
+  'core.levels:gamma': { name: 'Midtone Gamma', description: 'Adjusts the brightness of midtones between the black and white points. Higher values brighten midtones; lower values darken them without moving the endpoints.', min: 0.25, max: 4, step: 0.01, precision: 2 },
   'core.crop:x': { name: 'Left Edge', description: 'Sets the crop’s horizontal starting position in the image.', unit: 'px', advanced: true },
   'core.crop:y': { name: 'Top Edge', description: 'Sets the crop’s vertical starting position in the image.', unit: 'px', advanced: true },
   'core.crop:width': { name: 'Crop Width', description: 'Sets the width of the cropped area.', unit: 'px' },
@@ -129,6 +132,7 @@ export function parameterUX(typeId: string, parameter: ParameterDescriptor): Par
     ...(advancedIds.has(parameter.id) || /^m\d{2}$/.test(parameter.id) || parameter.id.startsWith('offset_') ? { advanced: true } : {}),
     ...(exact?.min != null && exact.max != null ? { recommendedRange: true } : {}),
     ...exact,
+    ...(parameter.id === 'points' && POINT_CURVE_NODES.has(typeId) ? { advanced: false, description: 'Linear interpolation between x,y pairs separated by semicolons. Input is horizontal; output is vertical. Enter or leave the field to apply; Escape cancels.' } : {}),
   };
 }
 

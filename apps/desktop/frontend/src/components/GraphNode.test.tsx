@@ -63,6 +63,69 @@ async function renderNode(editorNode: EditorNode, value: GraphNodeActions, selec
 }
 
 describe('GraphNode parameters', () => {
+  it('shows point curves in primary controls and commits valid point drafts once', async () => {
+    const curve: EditorNode = {
+      ...node, typeId: 'core.curve', parameters: { points: '0,0;1,1' },
+      descriptor: { ...node.descriptor, typeId: 'core.curve', name: 'Curve', parameters: [
+        { id: 'points', name: 'Control Points', parameterType: 'String', default: '0,0;1,1', min: null, max: null },
+      ] },
+    };
+    const value = actions();
+    const { container, root } = await renderNode(curve, value);
+    const input = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Curve Points"]')!;
+    expect(input.closest('.parameter-advanced')).toBeNull();
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    const type = (text: string) => { setter.call(input, text); input.dispatchEvent(new Event('input', { bubbles: true })); };
+    await act(async () => { input.focus(); type('0,0;0.5,0.7;1,1'); });
+    expect(container.querySelector('.curve-preview polyline')).not.toBeNull();
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'points', '0,0;0.5,0.7;1,1');
+    await act(async () => { input.focus(); type('broken'); input.blur(); });
+    expect(value.onParameterChange).toHaveBeenCalledTimes(1);
+    await act(async () => { input.focus(); type('0,0;1,0'); input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); input.blur(); });
+    expect(value.onParameterChange).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+  it('plots the gamma slider draft without publishing it and restores on Escape', async () => {
+    const curve: EditorNode = {
+      ...node, typeId: 'core.curves', parameters: { gamma: 1 },
+      descriptor: { ...node.descriptor, parameters: [
+        { id: 'gamma', name: 'Gamma', parameterType: 'Float', default: 1, min: 0.0001, max: null },
+      ] },
+    };
+    const value = actions();
+    const { container, root } = await renderNode(curve, value);
+    const plot = () => container.querySelector('polyline')!.getAttribute('points');
+    const initial = plot();
+    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(slider, '2');
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(plot()).not.toBe(initial);
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    expect(plot()).toBe(initial);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+  it.each(['core.levels', 'core.map-range', 'core.clamp'])('shows an authored mapping for %s only while parameters are open', async (typeId) => {
+    const editorNode = { ...node, typeId };
+    const value = actions();
+    const { container, root } = await renderNode(editorNode, value);
+    expect(container.querySelector('.parameter-transfer-preview')).toBeNull();
+    const details = container.querySelector<HTMLDetailsElement>('.graph-node__details')!;
+    await act(async () => { details.open = true; details.dispatchEvent(new Event('toggle')); });
+    expect(container.querySelector('.parameter-transfer-preview svg')).not.toBeNull();
+    expect(container.textContent).toContain('Applied parameter values');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => { details.open = false; details.dispatchEvent(new Event('toggle')); });
+    expect(container.querySelector('.parameter-transfer-preview')).toBeNull();
+    await act(async () => root.unmount());
+    container.remove();
+  });
   it('mounts live image helpers only while parameters are open', async () => {
     const imageControls = vi.fn(() => <span>Live image helpers</span>);
     const { container, root } = await renderNode(node, actions({ imageControls }));

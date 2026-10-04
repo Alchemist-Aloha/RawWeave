@@ -1,7 +1,9 @@
 import { createContext, useRef, useContext, useState, useEffect, useId, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } from '../editor/types';
-import { isRecommendedValue, parameterUX } from '../editor/parameter-ux';
+import { isRecommendedValue, parameterUX, POINT_CURVE_NODES } from '../editor/parameter-ux';
+import { CurvePreview, curvePlot } from './CurvePreview';
+import { ParameterTransferPreview } from './ParameterTransferPreview';
 import { inputDataType } from '../editor/connections';
 import type { CheckpointStatus } from '../checkpoint/types';
 import { dataTypeColor } from '../ui/data-type-colors';
@@ -81,6 +83,9 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   const ux = parameterUX(typeId, parameter);
   const modified = !isRecommendedValue(value, parameter.default);
   const numeric = parameter.parameterType === 'Float' || parameter.parameterType === 'Integer';
+  const pointCurve = parameter.id === 'points' && POINT_CURVE_NODES.has(typeId);
+  const gammaCurve = typeId === 'core.curves' && parameter.id === 'gamma';
+  const transactional = numeric || pointCurve;
   const factor = ux.factor ?? 1;
   const min = ux.min ?? parameter.min ?? undefined;
   const max = ux.max ?? parameter.max ?? undefined;
@@ -95,10 +100,10 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   };
   const commit = () => {
     const text = draftRef.current;
-    if (!numeric || text === null) return;
+    if (!transactional || text === null) return;
     editing.current = false;
-    const next = Number(text) / factor;
-    if (text.trim() === '' || !validNumericValue(next)) { cancel(); return; }
+    const next = pointCurve ? text : Number(text) / factor;
+    if (pointCurve ? curvePlot(typeId, text) === null : text.trim() === '' || !validNumericValue(Number(next))) { cancel(); return; }
     if (next !== committed.current) {
       committed.current = next;
       onChange(next);
@@ -159,6 +164,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   const sliderValue = typeof value === 'number' ? Math.min(max! * factor, Math.max(min! * factor, value * factor)) : min! * factor;
   return (
     <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
+      {(pointCurve || gammaCurve) && <CurvePreview typeId={typeId} value={draft === null ? value : pointCurve ? draft : Number(draft) / factor} />}
       <label className="parameter__field parameter__label" data-tooltip={ux.description}>
         <span>{ux.name}{ux.unit ? ` (${ux.unit})` : ''}</span>
         <span className="parameter__value-row">
@@ -192,8 +198,18 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
           className="parameter__field--multiline"
           aria-label={ux.name}
           aria-description={ux.description}
-          onBlur={() => setDraft(null)}
-          onChange={(event) => { setDraft(event.target.value); onChange(event.target.value); }}
+          aria-invalid={pointCurve && draft !== null && curvePlot(typeId, draft) === null ? true : undefined}
+          title={pointCurve ? 'Enter or leave the field to apply; Escape to cancel' : undefined}
+          onKeyDown={(event) => {
+            if (!pointCurve || event.nativeEvent.isComposing) return;
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); event.currentTarget.blur(); }
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+          }}
+          onBlur={() => { if (pointCurve) commit(); else setDraft(null); }}
+          onChange={(event) => {
+            if (pointCurve) { editing.current = true; updateDraft(event.target.value); }
+            else { setDraft(event.target.value); onChange(event.target.value); }
+          }}
           value={draft ?? String(value)}
         /> : <input
           list={suggestions ? suggestionId : undefined}
@@ -372,6 +388,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
         <details className="graph-node__details nodrag" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
           <summary className="graph-node__details-summary">Parameters</summary>
           {detailsOpen && actions?.imageControls?.(node)}
+          {detailsOpen && <ParameterTransferPreview node={node} />}
           <div className="parameter-list">
             {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
               const exposed = (node.exposedParameters ?? []).includes(parameter.id);
