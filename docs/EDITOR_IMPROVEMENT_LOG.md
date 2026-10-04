@@ -117,6 +117,15 @@ Verification: 196 unit tests and frontend/native build pass; browser assertions 
 - Final release mip-2 backend measurements: JPEG warm ~24 ms (unchanged), Nikon RAW ~30 ms versus ~701 ms, Sony RAW ~29 ms versus ~588 ms. First RAW previews remain hundreds of milliseconds. Conditions, individual timings, cache boundaries and remaining costs are in `docs/LARGE_IMAGE_PERFORMANCE.md`.
 - Root tests/format/Clippy and desktop tests/Clippy pass. A broad native attempt had 13 passes / 10 failures; workflow/batch/restoration gates are not cleared by the six focused preview passes. Standard browser E2E is still blocked by matching chromedriver availability. No dependency additions or commits.
 
+## Iteration 13 — task-based node categories
+
+Problem/evidence: the library grouped every node by its pack prefix, mixing image adjustments, masks, constants, logic and multi-image operations in Core and unrelated operations in Pro Tools. New category regressions failed against those broad groups.
+Change: 18 ordered, collapsible task categories, from Input & output and RAW development through tone, color, geometry, detail, film, mask sources/combine/refine, multi-image, values, math, logic, analysis and AI masks/analysis/editing. Empty groups are omitted; unknown nodes retain their pack-label fallback. Node IDs, descriptors, processing and saved workflows are unchanged.
+Search: category names are searchable when no node name/ID matches. A native check caught category matches displacing Exposure with Curves; a failing unit regression now guards name/ID precedence and Enter creation.
+Files: `src/components/NodeLibrary.tsx`, `NodeLibrary.test.tsx`, browser `node-usability.spec.mjs`, native `parameter-editing.spec.mjs` under `apps/desktop/frontend`.
+Verification: all 232 frontend tests pass; production frontend and native E2E builds pass (existing bundle-size warning). Rebuilt native editing suite passes 4/4, including taxonomy, collapsed-category search, fixed library scrolling, search shortcut and Exposure creation/editing. Native category-search screenshot inspected. UI detector reports no findings; `git diff --check` passes.
+Limitations: standard browser E2E timed out after 90 seconds before producing test results; no browser E2E pass or full native-suite clearance claimed. New first-party node IDs require a taxonomy entry; unknown nodes remain discoverable without one.
+
 ## Earlier performance investigation and remaining work
 
 - Existing optimized RAW preview corpus benchmark run unchanged: 933.37, 901.14, 895.64, 903.48 ms for four repeated 512×512, mip-2 requests. Median ~902 ms. Debug run ~7.1 s/request is recorded only to distinguish build modes, not a product latency claim. This narrow single-camera synthetic request is not a RAW-open benchmark or camera matrix.

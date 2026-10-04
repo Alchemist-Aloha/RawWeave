@@ -32,6 +32,24 @@ describe('node parameter usability', () => {
     await $('input[placeholder="Search nodes"]').waitForDisplayed();
   });
 
+  it('browses task categories and searches inside a collapsed group', async () => {
+    const labels = await browser.execute(() => [...document.querySelectorAll('.node-library__group-summary > span:first-child')].map((el) => el.textContent));
+    expect(labels).toContain('Tone & exposure');
+    expect(labels).toContain('Mask sources');
+    expect(labels).toContain('Mask combine');
+    expect(labels).not.toContain('Core');
+    const group = await $('summary*=Tone & exposure');
+    await group.click();
+    await expect(await group.parentElement()).not.toHaveAttribute('open');
+    await setNodeSearch('tone & exposure');
+    await expect(await group.parentElement()).toHaveAttribute('open');
+    await expect($('.node-library__item')).toBeDisplayed();
+    await browser.saveScreenshot('./logs/node-categories.png');
+    await setNodeSearch('Exposure');
+    await $('.node-library__item').click();
+    await expect($('[aria-label="Exposure node"]')).toBeDisplayed();
+  });
+
   it('keeps bounded sliders and reset controls usable', async () => {
     await addNode('Blur');
     const node = await openDetails('Blur');

@@ -93,10 +93,9 @@ describe('NodeLibrary', () => {
     await act(async () => root.render(<NodeLibrary descriptors={[...descriptors, upscale]} onAdd={vi.fn()} />));
 
     const groups = [...host.querySelectorAll<HTMLDetailsElement>('details.node-library__group')];
-    expect(groups.map((group) => group.querySelector('summary')?.textContent)).toEqual(['Core2', 'AI1']);
+    expect(groups.map((group) => group.querySelector('summary')?.textContent)).toEqual(['Tone & exposure1', 'Values1', 'AI editing1']);
     expect(groups.every((group) => group.open)).toBe(true);
-    // The category heading is the node's own identity in the tree.
-    expect(groups[0].querySelectorAll('.node-library__item')).toHaveLength(2);
+    expect(groups[0].querySelectorAll('.node-library__item')).toHaveLength(1);
 
     // Collapsing a branch keeps its nodes out of the way without a search.
     await act(async () => {
@@ -115,6 +114,61 @@ describe('NodeLibrary', () => {
     expect(host.querySelectorAll<HTMLDetailsElement>('details.node-library__group')[0].open).toBe(true);
     expect(host.textContent).toContain('Exposure');
     expect(host.textContent).not.toContain('AI Upscale');
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it('organizes packs by task, keeps unknown nodes, and searches category names', async () => {
+    const nodes = [
+      ['vendor.custom', 'Custom'], ['pro.grain', 'Grain'],
+      ['core.mask-add', 'Mask Add'], ['core.mask-painted', 'Painted Mask'],
+      ['core.mask-feather', 'Mask Feather'], ['pro.sharpen', 'Sharpen'],
+      ['core.crop', 'Crop'], ['raw.decode', 'RAW Decode'],
+      ['core.image-input', 'Image Input'], ['pro.color-zones', 'Color Zones'],
+      ['core.expression', 'Expression'], ['core.compare', 'Compare'],
+      ['core.hdr-merge', 'HDR Merge'], ['pro.histogram', 'Histogram'],
+      ['ai.sky-mask', 'Sky Mask'], ['ai.scene-analysis', 'Scene Analysis'],
+    ].map(([typeId, name]) => ({ ...descriptors[0], typeId, name }));
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const onAdd = vi.fn();
+    await act(async () => root.render(<NodeLibrary descriptors={nodes} onAdd={onAdd} />));
+    expect([...host.querySelectorAll('summary')].map((summary) => summary.textContent)).toEqual([
+      'Input & output1', 'RAW development1', 'Color1', 'Geometry & lens1', 'Detail & noise1',
+      'Film & effects1', 'Mask sources1', 'Mask combine1', 'Mask refine1', 'Multi-image1',
+      'Math & expressions1', 'Logic & routing1', 'Analysis1', 'AI masks1', 'AI analysis1', 'Vendor1',
+    ]);
+    expect(host.querySelectorAll('.node-library__item')).toHaveLength(nodes.length);
+    await act(async () => {
+      const search = host.querySelector('input[type="search"]');
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, 'geometry');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(host.querySelectorAll('.node-library__item')).toHaveLength(1);
+    expect(host.textContent).toContain('Crop');
+    await act(async () => host.querySelector<HTMLButtonElement>('.node-library__item')?.click());
+    expect(onAdd).toHaveBeenCalledWith('core.crop');
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it('prioritizes name matches over category matches for keyboard creation', async () => {
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    const onAdd = vi.fn();
+    await act(async () => root.render(<NodeLibrary descriptors={[
+      { ...descriptors[0], typeId: 'core.curves', name: 'Curves' }, descriptors[0],
+    ]} onAdd={onAdd} />));
+    const search = host.querySelector('input[type="search"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, 'Exposure');
+      search?.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => search?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(onAdd).toHaveBeenCalledWith('core.exposure');
+    expect(host.querySelector('.node-library__item strong')?.textContent).toBe('Exposure');
     await act(async () => root.unmount());
     host.remove();
   });

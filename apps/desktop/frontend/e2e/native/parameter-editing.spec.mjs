@@ -11,6 +11,26 @@ async function typeDraft(element, text) {
 
 // Self-contained: do not depend on the restored source graph or other specs.
 describe('editing accelerators in the native WebView', () => {
+  it('organizes native descriptors by task and searches collapsed categories', async () => {
+    const labels = await browser.execute(() => [...document.querySelectorAll('.node-library__group-summary > span:first-child')].map((el) => el.textContent));
+    expect(labels).toContain('Tone & exposure');
+    expect(labels).toContain('Mask sources');
+    expect(labels).toContain('AI editing');
+    expect(labels).not.toContain('Core');
+    expect(labels).not.toContain('Pro Tools');
+    await browser.execute(() => {
+      const group = [...document.querySelectorAll('.node-library__group')].find((el) => el.querySelector('summary').textContent.includes('Tone & exposure'));
+      group.open = false;
+      group.dispatchEvent(new Event('toggle'));
+    });
+    const search = await $('input[placeholder="Search nodes"]');
+    await typeDraft(search, 'tone & exposure');
+    await expect($('.node-library__group')).toHaveAttribute('open');
+    await expect($('.node-library__item')).toBeDisplayed();
+    await browser.saveScreenshot('./logs/node-categories-native.png');
+    await typeDraft(search, '');
+  });
+
   it('scrolls only the node list while the title and search stay visible', async () => {
     for (const height of [900, 600]) {
       await browser.setWindowSize(1280, height);
