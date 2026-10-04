@@ -225,7 +225,7 @@ describe('GraphNode parameters', () => {
     expect(value.onParameterChange).toHaveBeenCalledWith('exposure', 'amount', 0.8);
     vi.mocked(value.onParameterChange).mockClear();
     await type(slider, '0.7');
-    expect(amount.value).toBe('0.6');
+    expect(amount.value).toBe('0.7');
     vi.mocked(value.onParameterChange).mockClear();
     await type(amount, '');
     expect(value.onParameterChange).not.toHaveBeenCalled();
@@ -247,6 +247,111 @@ describe('GraphNode parameters', () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it('leaves pointer capture to the native range control', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')!;
+    const capture = vi.fn();
+    slider.setPointerCapture = capture;
+    await act(async () => slider.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 })));
+    await act(async () => slider.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 })));
+    expect(capture).not.toHaveBeenCalled();
+    expect(slider.value).toBe('0');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => root.unmount()); container.remove();
+  });
+
+  it('keeps native slider input events local and commits once on release', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')!;
+    const field = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    // Native range controls may send input without a React pointerdown.
+    for (const text of ['1', '1.2', '1.25']) {
+      await act(async () => {
+        setter.call(slider, text);
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    expect(field.value).toBe('1.25');
+    await act(async () => {
+      slider.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      slider.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+      slider.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'exposure', 1.25);
+    // Keep the committed value visible while the backend acknowledges it.
+    expect(field.value).toBe('1.25');
+    await act(async () => root.unmount()); container.remove();
+  });
+
+  it('groups repeated slider keys and numeric stepper edits until release', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    for (const selector of ['input[type="range"]', 'input[type="number"]']) {
+      const field = container.querySelector<HTMLInputElement>(selector)!;
+      vi.mocked(value.onParameterChange).mockClear();
+      for (const text of selector.includes('range') ? ['0.01', '0.02', '0.03'] : ['0.04', '0.05', '0.06']) {
+        await act(async () => {
+          setter.call(field, text);
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+      expect(value.onParameterChange).not.toHaveBeenCalled();
+      await act(async () => field.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowUp', bubbles: true })));
+      expect(value.onParameterChange).toHaveBeenCalledTimes(1);
+      // Return to the saved value to begin a distinct spinner gesture.
+      await act(async () => field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    }
+    const number = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+    vi.mocked(value.onParameterChange).mockClear();
+    await act(async () => {
+      setter.call(number, '0.05');
+      number.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => number.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })));
+    expect(value.onParameterChange).toHaveBeenCalledExactlyOnceWith('exposure', 'exposure', 0.05);
+    await act(async () => root.unmount()); container.remove();
+  });
+
+  it('does not apply a typed draft when cursor-navigation keys are released', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const field = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, '1.25');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    for (const key of ['ArrowLeft', 'ArrowRight', 'Home', 'End']) {
+      await act(async () => field.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true })));
+    }
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => root.unmount()); container.remove();
+  });
+
+  it('cancels range drafts without publishing and skips unchanged releases', async () => {
+    const value = actions();
+    const { container, root } = await renderNode(node, value);
+    const slider = container.querySelector<HTMLInputElement>('input[type="range"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(slider, '2'); slider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => slider.dispatchEvent(new MouseEvent('pointercancel', { bubbles: true })));
+    await act(async () => slider.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })));
+    expect(slider.value).toBe('0');
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => {
+      setter.call(slider, '0'); slider.dispatchEvent(new Event('input', { bubbles: true }));
+      slider.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => root.unmount()); container.remove();
   });
 
   it('uses whole-pixel editing for crop geometry and multiline fields', async () => {

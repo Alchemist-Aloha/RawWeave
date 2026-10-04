@@ -565,6 +565,7 @@ export function Viewer({ geometryEditing, controller, nodes, revision, source, p
   const options = useMemo(() => targetsFor(nodes), [nodes]);
   const [wipePosition, setWipePosition] = useState(50);
   const [showCompare, setShowCompare] = useState(false);
+  const automaticTargets = useRef<Record<ViewerId, PreviewTarget | null>>({ A: null, B: null });
   const [blinkViewer, setBlinkViewer] = useState<ViewerId>('A');
   const [analyses, setAnalyses] = useState<Record<ViewerId, ImageAnalysis | null>>({ A: null, B: null });
   const [scopesVisible, setScopesVisible] = useState(true);
@@ -574,7 +575,12 @@ export function Viewer({ geometryEditing, controller, nodes, revision, source, p
 
   const paneAnalysis = analyses.A ?? analyses.B;
 
-  useEffect(() => controller.subscribe(() => setRender((value) => value + 1)), [controller]);
+  useEffect(() => controller.subscribe(() => {
+    for (const viewer of ['A', 'B'] as const) {
+      if (controller.state.panes[viewer].target !== automaticTargets.current[viewer]) automaticTargets.current[viewer] = null;
+    }
+    setRender((value) => value + 1);
+  }), [controller]);
   useEffect(() => controller.setRevision(revision), [controller, revision]);
   useEffect(() => {
     setAnalyses((current) => {
@@ -604,18 +610,29 @@ export function Viewer({ geometryEditing, controller, nodes, revision, source, p
     const available = (target: PreviewTarget | null) => target && options.some(
       (option) => option.nodeId === target.nodeId && option.outputPort === target.outputPort,
     );
-    if (controller.state.panes.B.target && !available(controller.state.panes.B.target)) {
-      controller.setTarget('B', null);
-    }
-    if (available(controller.state.panes.A.target)) return;
-    const preferredNode = source.kind === 'raw'
-      ? nodes.find((node) => node.typeId === 'raw.display-transform')
-      : nodes.find((node) => node.typeId === 'core.output');
-    const target = options.find((option) => option.nodeId === preferredNode?.id)
+    const preferredOutput = nodes.find((node) => node.typeId === (source.kind === 'raw' ? 'raw.display-transform' : 'core.output'));
+    const output = options.find((option) => option.nodeId === preferredOutput?.id)
       ?? options.find((option) => option.dataType === 'core.Image' || option.dataType === 'color.DisplayRGB')
-      ?? options[0];
-    controller.setTarget('A', target ?? null);
-  }, [controller, nodes, options, source?.kind, source?.revision]);
+      ?? options[0] ?? null;
+    // RAW bytes/mosaics are not image preview targets; demosaic is the earliest
+    // previewable RAW image, before camera/lens/display transforms.
+    const preferredInput = nodes.find((node) => node.typeId === (source.kind === 'raw' ? 'raw.demosaic' : 'core.image-input'));
+    const input = options.find((option) => option.nodeId === preferredInput?.id)
+      ?? options.find((option) => option.dataType === 'core.Image' || option.dataType === 'color.SceneLinearRGB')
+      ?? output;
+    const selectDefault = (viewer: ViewerId, target: PreviewTarget | null) => {
+      const current = controller.state.panes[viewer].target;
+      if (available(current) && current !== automaticTargets.current[viewer]) return;
+      if (current === target || current && target && targetKey(current) === targetKey(target)) return;
+      automaticTargets.current[viewer] = target;
+      controller.setTarget(viewer, target);
+    };
+    selectDefault('A', showCompare ? input : output);
+    if (showCompare) selectDefault('B', output);
+    else if (controller.state.panes.B.target && (
+      !available(controller.state.panes.B.target) || controller.state.panes.B.target === automaticTargets.current.B
+    )) controller.setTarget('B', null);
+  }, [controller, nodes, options, showCompare, source?.kind, source?.revision]);
 
   return (
     <section

@@ -1,4 +1,4 @@
-import { createContext, useRef, useContext, useState, useId, type ReactNode } from 'react';
+import { createContext, useRef, useContext, useState, useEffect, useId, type ReactNode } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } from '../editor/types';
 import { isRecommendedValue, parameterUX } from '../editor/parameter-ux';
@@ -61,11 +61,22 @@ interface ParameterFieldProps {
 
 /**
  * Numeric edits stay local until Enter or blur so one edit produces one graph
- * command. Escape discards the draft; sliders still commit on pointer release.
+ * command. Slider/stepper input stays local until release (including repeated
+ * keyboard steps). Escape discards drafts; release and blur never double-commit.
  */
 function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumber = false, multiline = false, choices, suggestions }: ParameterFieldProps) {
   const [draft, setDraft] = useState<string | null>(null);
-  const sliding = useRef(false);
+  const draftRef = useRef<string | null>(null);
+  const committed = useRef(value);
+  const editing = useRef(false);
+  const updateDraft = (text: string | null) => {
+    draftRef.current = text;
+    setDraft(text);
+  };
+  useEffect(() => {
+    committed.current = value;
+    if (!editing.current) updateDraft(null);
+  }, [value]);
   const suggestionId = useId();
   const ux = parameterUX(typeId, parameter);
   const modified = !isRecommendedValue(value, parameter.default);
@@ -78,9 +89,31 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
     && (parameter.parameterType !== 'Integer' && !wholeNumber || Number.isInteger(next))
     && (parameter.min == null || next >= parameter.min)
     && (parameter.max == null || next <= parameter.max);
+  const cancel = () => {
+    editing.current = false;
+    updateDraft(null);
+  };
+  const commit = () => {
+    const text = draftRef.current;
+    if (!numeric || text === null) return;
+    editing.current = false;
+    const next = Number(text) / factor;
+    if (text.trim() === '' || !validNumericValue(next)) { cancel(); return; }
+    if (next !== committed.current) {
+      committed.current = next;
+      onChange(next);
+    }
+    // Keep the final value visible until the asynchronous graph update arrives.
+    if (next === value) updateDraft(null);
+  };
   const reset = () => {
-    setDraft(null);
+    cancel();
+    committed.current = parameter.default;
     onChange(parameter.default);
+  };
+  const step = (wholeNumber || parameter.parameterType === 'Integer' ? 1 : ux.step ?? 0.01) * factor;
+  const finishKey = (key: string) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End'].includes(key)) commit();
   };
 
   if (parameter.parameterType === 'Boolean') {
@@ -132,32 +165,28 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
         {hasSlider && <input
           aria-description={ux.description}
           aria-label={`${ux.name} slider`}
+          title="Release to apply; Escape to cancel"
           max={max! * factor}
           min={min! * factor}
-          onPointerDown={(event) => {
-            sliding.current = true;
-            try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* Continue within the surface. */ }
+          // Native range controls own thumb dragging and pointer capture.
+          // Capturing on the input overrides the browser's internal slider thumb.
+          onPointerUp={commit}
+          onMouseUp={commit}
+          onTouchEnd={commit}
+          onLostPointerCapture={commit}
+          onPointerCancel={cancel}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
           }}
-          onPointerUp={(event) => {
-            if (!sliding.current) return;
-            sliding.current = false;
-            setDraft(null);
-            const next = Number(event.currentTarget.value) / factor;
-            if (validNumericValue(next)) onChange(next);
-          }}
-          onPointerCancel={() => { sliding.current = false; setDraft(null); }}
+          onKeyUp={(event) => finishKey(event.key)}
           onChange={(event) => {
-            const text = event.target.value;
-            if (sliding.current) setDraft(text);
-            else {
-              setDraft(null);
-              const next = Number(text) / factor;
-              if (validNumericValue(next)) onChange(next);
-            }
+            editing.current = true;
+            updateDraft(event.target.value);
           }}
-          step={(wholeNumber ? 1 : ux.step ?? 0.01) * factor}
+          step={step}
           type="range"
-          value={draft != null && Number.isFinite(Number(draft)) ? Number(draft) : sliderValue}
+          value={draft != null && draft.trim() !== '' && Number.isFinite(Number(draft)) ? Number(draft) : sliderValue}
         />}
         {multiline && !numeric ? <textarea
           className="parameter__field--multiline"
@@ -173,14 +202,13 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
           aria-description={ux.description}
           aria-label={ux.name}
           aria-invalid={numeric && draft !== null && (draft.trim() === '' || !validNumericValue(Number(draft) / factor)) ? true : undefined}
-          title={numeric ? 'Enter or leave the field to apply; Escape to cancel' : undefined}
-          onBlur={() => {
-            if (numeric && draft !== null && draft.trim() !== '') {
-              const next = Number(draft) / factor;
-              if (validNumericValue(next) && next !== value) onChange(next);
-            }
-            setDraft(null);
-          }}
+          title={numeric ? 'Enter or leave the field to apply; arrows apply on release; Escape to cancel' : undefined}
+          onBlur={() => { if (numeric) commit(); else updateDraft(null); }}
+          onPointerUp={() => { if (numeric) commit(); }}
+          onMouseUp={() => { if (numeric) commit(); }}
+          onTouchEnd={() => { if (numeric) commit(); }}
+          onPointerCancel={() => { if (numeric) cancel(); }}
+          onKeyUp={(event) => { if (numeric && ['ArrowUp', 'ArrowDown'].includes(event.key)) commit(); }}
           onKeyDown={(event) => {
             if (!numeric || event.nativeEvent.isComposing) return;
             if (event.key === 'Enter') {
@@ -190,15 +218,16 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
             } else if (event.key === 'Escape') {
               event.preventDefault();
               event.stopPropagation();
-              setDraft(null);
+              cancel();
             }
           }}
           onChange={(event) => {
             const text = event.target.value;
-            setDraft(text);
+            editing.current = true;
+            updateDraft(text);
             if (!numeric) onChange(text);
           }}
-          step={(wholeNumber ? 1 : ux.step ?? 0.01) * factor}
+          step={step}
           type={numeric ? 'number' : 'text'}
           value={draft ?? String(displayValue)}
         />}
@@ -206,7 +235,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
         </span>
       </label>
       {outsideRecommended && <span className="parameter__warning">Outside recommended range</span>}
-      {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onClick={() => onChange(parameter.default)} type="button">Reset</button>}
+      {modified && <button aria-label={`Reset ${ux.name}`} className="parameter__reset" onMouseDown={(event) => event.preventDefault()} onClick={reset} type="button">Reset</button>}
       {toggle}
     </div>
   );

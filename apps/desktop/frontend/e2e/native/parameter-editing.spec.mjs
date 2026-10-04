@@ -110,4 +110,51 @@ describe('editing accelerators in the native WebView', () => {
     expect(await invoke('workflow_hash')).toBe(committed);
     await typeDraft(search, '');
   });
+
+  it('publishes one slider or stepper edit on release, with one undo entry', async () => {
+    const search = await $('input[placeholder="Search nodes"]');
+    await typeDraft(search, 'Blur');
+    await browser.execute((element) => element.click(), await $('.node-library__item'));
+    const node = await $('[aria-label="Blur node"]');
+    await node.waitForExist();
+    await browser.execute((element) => { element.querySelector('details').open = true; }, node);
+    const slider = await node.$('input[type="range"]');
+    const field = await node.$('input[aria-label="Blur Radius"]');
+    const before = await invoke('workflow_hash');
+    for (const text of ['2', '3', '4']) {
+      await typeDraft(slider, text);
+      expect(await invoke('workflow_hash')).toBe(before);
+    }
+    await expect(field).toHaveValue('4');
+    await browser.execute((element) => element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })), slider);
+    await browser.waitUntil(async () => (await invoke('workflow_hash')) !== before);
+    const released = await invoke('workflow_hash');
+    await browser.execute((element) => {
+      element.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+      element.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    }, slider);
+    expect(await invoke('workflow_hash')).toBe(released);
+    for (const text of ['5', '6', '7']) {
+      await typeDraft(slider, text);
+      expect(await invoke('workflow_hash')).toBe(released);
+    }
+    await browser.execute((element) => element.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowUp', bubbles: true })), slider);
+    await browser.waitUntil(async () => (await invoke('workflow_hash')) !== released);
+    const keyboard = await invoke('workflow_hash');
+    for (const text of ['8', '9', '10']) {
+      await typeDraft(field, text);
+      expect(await invoke('workflow_hash')).toBe(keyboard);
+    }
+    await browser.execute((element) => element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })), field);
+    await browser.waitUntil(async () => (await invoke('workflow_hash')) !== keyboard);
+    const saved = JSON.parse(await invoke('save_workflow'));
+    expect(Object.values(saved.nodes).some((value) => value.parameters.radius?.Float === 10)).toBe(true);
+    await browser.execute(() => {
+      document.activeElement?.blur();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    await browser.waitUntil(async () => (await invoke('workflow_hash')) === keyboard);
+    await browser.saveScreenshot('./logs/numeric-interactions.png');
+    await typeDraft(search, '');
+  });
 });

@@ -138,6 +138,54 @@ describe('Viewer', () => {
     host.remove();
   });
 
+  it.each(['Compare A and B', 'Wipe', 'Blink', 'Difference'])('defaults %s to image input and output', async (label) => {
+    const requestPreview = vi.fn<PreviewTransport['requestPreview']>(() => new Promise(() => undefined));
+    const controller = new ViewerController({ requestPreview, cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    input.typeId = 'core.image-input';
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    output.typeId = 'core.output';
+    const host = document.createElement('div'); document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer controller={controller} nodes={[output, input]} revision={1}
+      source={{ kind: 'ordinary', width: 640, height: 480, revision: 1, metadata: null }} />));
+    expect(controller.state.panes.A.target?.nodeId).toBe('output');
+    expect(controller.state.panes.B.target).toBeNull();
+    const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+    await act(async () => button.click());
+    expect(controller.state.panes.A.target?.nodeId).toBe('input');
+    expect(controller.state.panes.B.target?.nodeId).toBe('output');
+    const count = requestPreview.mock.calls.length;
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Difference"]')!.click());
+    expect(requestPreview).toHaveBeenCalledTimes(count);
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Compare A and B"]')!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Compare A and B"]')!.click());
+    expect(controller.state.panes.A.target?.nodeId).toBe('output');
+    expect(controller.state.panes.B.target).toBeNull();
+    await act(async () => root.unmount()); host.remove();
+  });
+
+  it('preserves explicitly selected comparison targets across modes', async () => {
+    const controller = new ViewerController({ requestPreview: () => new Promise(() => undefined), cancelPreview: async () => undefined, releasePreview: async () => undefined });
+    const input = node('input', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); input.typeId = 'core.image-input';
+    const output = node('output', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]); output.typeId = 'core.output';
+    const intermediate = node('exposure', [{ id: 'image', name: 'Image', dataType: 'core.Image' }]);
+    const nodes = [input, intermediate, output];
+    const host = document.createElement('div'); document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<Viewer controller={controller} nodes={nodes} revision={1}
+      source={{ kind: 'ordinary', width: 640, height: 480, revision: 1, metadata: null }} />));
+    await act(async () => controller.setTarget('A', targetsFor([intermediate])[0]));
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Wipe"]')!.click());
+    expect(controller.state.panes.A.target?.nodeId).toBe('exposure');
+    expect(controller.state.panes.B.target?.nodeId).toBe('output');
+    await act(async () => controller.setTarget('B', targetsFor([input])[0]));
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Blink"]')!.click());
+    expect(controller.state.panes.A.target?.nodeId).toBe('exposure');
+    expect(controller.state.panes.B.target?.nodeId).toBe('input');
+    await act(async () => root.unmount()); host.remove();
+  });
+
   it('selects the RAW display transform when a RAW image opens', async () => {
     const requests: string[] = [];
     const controller = new ViewerController({
@@ -153,11 +201,13 @@ describe('Viewer', () => {
     const root = createRoot(host);
     const display = node('display', [{ id: 'display', name: 'Display', dataType: 'color.DisplayRGB' }]);
     display.typeId = 'raw.display-transform';
+    const demosaic = node('demosaic', [{ id: 'scene', name: 'Scene', dataType: 'color.SceneLinearRGB' }]);
+    demosaic.typeId = 'raw.demosaic';
 
     await act(async () => root.render(
       <Viewer
         controller={controller}
-        nodes={[display]}
+        nodes={[display, demosaic]}
         revision={1}
         source={{ kind: 'raw', width: 640, height: 480, revision: 1, metadata: null }}
       />,
@@ -165,6 +215,9 @@ describe('Viewer', () => {
 
     expect(controller.state.panes.A.target?.nodeId).toBe('display');
     expect(requests).toContain('display:display');
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Wipe"]')!.click());
+    expect(controller.state.panes.A.target?.nodeId).toBe('demosaic');
+    expect(controller.state.panes.B.target?.nodeId).toBe('display');
 
     await act(async () => root.unmount());
     host.remove();
