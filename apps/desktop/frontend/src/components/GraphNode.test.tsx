@@ -126,6 +126,19 @@ describe('GraphNode parameters', () => {
     await act(async () => root.unmount());
     container.remove();
   });
+  it.each(['core.mask-color-qualifier', 'pro.color-zones', 'pro.split-toning'])('shows the color reference for %s without publishing graph edits', async (typeId) => {
+    const value = actions();
+    const { container, root } = await renderNode({ ...node, typeId }, value);
+    expect(container.querySelector('.color-parameter-preview')).toBeNull();
+    const details = container.querySelector<HTMLDetailsElement>('.graph-node__details')!;
+    await act(async () => { details.open = true; details.dispatchEvent(new Event('toggle')); });
+    expect(container.querySelector('.color-parameter-preview [role="img"]')).not.toBeNull();
+    expect(value.onParameterChange).not.toHaveBeenCalled();
+    await act(async () => { details.open = false; details.dispatchEvent(new Event('toggle')); });
+    expect(container.querySelector('.color-parameter-preview')).toBeNull();
+    await act(async () => root.unmount());
+    container.remove();
+  });
   it('mounts live image helpers only while parameters are open', async () => {
     const imageControls = vi.fn(() => <span>Live image helpers</span>);
     const { container, root } = await renderNode(node, actions({ imageControls }));

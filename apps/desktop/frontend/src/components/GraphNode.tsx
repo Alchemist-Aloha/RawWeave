@@ -4,6 +4,7 @@ import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } fr
 import { isRecommendedValue, parameterUX, POINT_CURVE_NODES } from '../editor/parameter-ux';
 import { CurvePreview, curvePlot } from './CurvePreview';
 import { ParameterTransferPreview } from './ParameterTransferPreview';
+import { ColorParameterPreview } from './ColorParameterPreview';
 import { inputDataType } from '../editor/connections';
 import type { CheckpointStatus } from '../checkpoint/types';
 import { dataTypeColor } from '../ui/data-type-colors';
@@ -389,6 +390,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
           <summary className="graph-node__details-summary">Parameters</summary>
           {detailsOpen && actions?.imageControls?.(node)}
           {detailsOpen && <ParameterTransferPreview node={node} />}
+          {detailsOpen && <ColorParameterPreview node={node} />}
           <div className="parameter-list">
             {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
               const exposed = (node.exposedParameters ?? []).includes(parameter.id);

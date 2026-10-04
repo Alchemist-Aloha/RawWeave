@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { createMemoryPlatform } from './editor';
 
 describe('memory platform workflow hashes', () => {
+  it.each([
+    ['core.mask-color-qualifier', 'target_r', 1],
+    ['pro.color-zones', 'width', 0.2],
+    ['pro.split-toning', 'shadow_hue', 0.6],
+  ] as const)('registers %s color controls for browser UI regression coverage', async (typeId, parameterId, defaultValue) => {
+    const platform = createMemoryPlatform();
+    await platform.addNode('color', typeId);
+    const descriptors = await platform.nodeDescriptors();
+    expect(descriptors.find((descriptor) => descriptor.typeId === typeId)?.parameters.find((parameter) => parameter.id === parameterId)?.default).toBe(defaultValue);
+  });
   it('uses the canonical SHA-256 hash for an empty workflow', async () => {
     const platform = createMemoryPlatform();
 

@@ -214,6 +214,33 @@ levels.parameters.push(parameter('gamma', 'Gamma', 1, 0.0001));
 const curves = imageProcessingDescriptor('core.curves', 'Curves');
 curves.parameters.push(parameter('gamma', 'Gamma', 1, 0.0001));
 
+// Mirror Rust descriptors for browser-only UI regression coverage, not processing.
+const colorQualifier = imageProcessingDescriptor('core.mask-color-qualifier', 'Color Qualifier');
+colorQualifier.outputs = [{ id: 'mask', name: 'Mask', dataType: 'core.Mask', required: false }];
+colorQualifier.capabilities = tileCapabilities;
+colorQualifier.parameters = [
+  parameter('target_r', 'Target Red', 1, 0, 1),
+  parameter('target_g', 'Target Green', 1, 0, 1),
+  parameter('target_b', 'Target Blue', 1, 0, 1),
+  parameter('tolerance', 'Tolerance', 0.1, 0, 2),
+  parameter('softness', 'Softness', 0, 0, 2),
+];
+const colorZones = imageProcessingDescriptor('pro.color-zones', 'Color Zones');
+colorZones.parameters = [
+  parameter('hue', 'Hue', 0, 0, 1),
+  parameter('width', 'Width', 0.2, 0.001, 0.5),
+  parameter('saturation', 'Saturation', 0, -4, 4),
+  parameter('lightness', 'Lightness', 0, -4, 4),
+];
+const splitToning = imageProcessingDescriptor('pro.split-toning', 'Split Toning');
+splitToning.parameters = [
+  parameter('shadow_hue', 'Shadow Hue', 0.6, 0, 1),
+  parameter('highlight_hue', 'Highlight Hue', 0.1, 0, 1),
+  parameter('shadow_saturation', 'Shadow Saturation', 0, 0, 1),
+  parameter('highlight_saturation', 'Highlight Saturation', 0, 0, 1),
+  parameter('balance', 'Balance', 0.5, 0, 1),
+];
+
 const colorMatrix = imageProcessingDescriptor('core.color-matrix', 'Color Matrix');
 colorMatrix.capabilities = ['CPU', 'GPU', 'TileLocal', 'RegionAware'];
 for (let row = 0; row < 4; row += 1) {
@@ -487,6 +514,9 @@ export const builtInDescriptors: NodeDescriptor[] = [
   blur,
   levels,
   curves,
+  colorQualifier,
+  colorZones,
+  splitToning,
   colorMatrix,
   output,
   ...logicDescriptors,

@@ -1239,8 +1239,19 @@ input, select, textarea { caret-color: var(--wax-amber); }
 .curve-preview__grid { fill: none; stroke: var(--bench-grid); stroke-width: 1; }
 .curve-preview__neutral { stroke: var(--bench-ink-dim); stroke-dasharray: 3 3; }
 .curve-preview figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; margin-top: 4px; font: 400 10px/1.45 var(--face-data); color: var(--bench-ink-dim); }
-.parameter-transfer-preview { display: grid; gap: 6px; max-width: 260px; margin-bottom: 12px; overflow-wrap: anywhere; }
-.curve-preview small, .curve-preview__invalid, .parameter-transfer-preview > small { display: block; font-size: 11px; color: var(--bench-ink-dim); }
+.parameter-transfer-preview, .color-parameter-preview { display: grid; gap: 6px; max-width: 260px; margin-bottom: 12px; overflow-wrap: anywhere; }
+/* Chromatic ramps and swatches are parameter data, never chrome/state colors. */
+.color-reference { display: flex; align-items: center; gap: 8px; padding: 4px; background: var(--judge-ground); color: var(--judge-ink); }
+.color-reference__swatch { display: block; flex: 0 0 32px; height: 32px; border: 1px solid var(--judge-ink-dim); }
+.color-reference__readout, .color-hue figcaption, .color-hue__scale { font: 400 10px/1.45 var(--face-data); }
+.color-hue { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 4px; color: var(--judge-ink); background: var(--judge-ground); }
+.color-hue__spectrum { position: relative; height: 16px; margin: 0 2px; background: linear-gradient(to right, hsl(0 100% 50%), hsl(60 100% 50%), hsl(120 100% 50%), hsl(180 100% 50%), hsl(240 100% 50%), hsl(300 100% 50%), hsl(360 100% 50%)); }
+.color-hue__marker { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--judge-ink); outline: 1px solid var(--judge-sunk); pointer-events: none; }
+.color-hue__range { position: relative; height: 4px; margin: 0 2px; background: var(--judge-line); }
+.color-hue__interval { position: absolute; height: 100%; background: var(--judge-ink); }
+.color-hue__scale { display: flex; justify-content: space-between; color: var(--judge-ink-dim); }
+.color-hue small { font-size: 11px; color: var(--judge-ink-dim); }
+.curve-preview small, .curve-preview__invalid, .parameter-transfer-preview > small, .color-parameter-preview > small { display: block; font-size: 11px; color: var(--bench-ink-dim); }
 .curve-preview__invalid { grid-column: 1 / -1; }
 .image-node-controls { display: grid; gap: 8px; margin: 8px 0 12px; font-size: 11px; }
 .image-node-controls > div { display: flex; gap: 6px; }
