@@ -1,0 +1,503 @@
+{
+  "checkpoints": {},
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "20-local-exposure",
+      "to_port": "image"
+    },
+    {
+      "from_node": "20-local-exposure",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    },
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-luminance",
+      "to_port": "image"
+    },
+    {
+      "from_node": "10-luminance",
+      "from_port": "mask",
+      "to_node": "20-local-exposure",
+      "to_port": "mask"
+    },
+    {
+      "from_node": "12-requested-ev",
+      "from_port": "value",
+      "to_node": "13-negative",
+      "to_port": "a"
+    },
+    {
+      "from_node": "12-zero",
+      "from_port": "value",
+      "to_node": "13-negative",
+      "to_port": "b"
+    },
+    {
+      "from_node": "11-enabled",
+      "from_port": "value",
+      "to_node": "14-enabled-negative",
+      "to_port": "a"
+    },
+    {
+      "from_node": "13-negative",
+      "from_port": "result",
+      "to_node": "14-enabled-negative",
+      "to_port": "b"
+    },
+    {
+      "from_node": "14-enabled-negative",
+      "from_port": "result",
+      "to_node": "15-dose",
+      "to_port": "condition"
+    },
+    {
+      "from_node": "12-requested-ev",
+      "from_port": "value",
+      "to_node": "15-dose",
+      "to_port": "true"
+    },
+    {
+      "from_node": "12-zero",
+      "from_port": "value",
+      "to_node": "15-dose",
+      "to_port": "false"
+    },
+    {
+      "from_node": "15-dose",
+      "from_port": "value",
+      "to_node": "20-local-exposure",
+      "to_port": "exposure"
+    }
+  ],
+  "nodes": {
+    "00-input": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [],
+        "name": "Image Input",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.image-input",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "00-input",
+      "parameters": {},
+      "type_id": "core.image-input"
+    },
+    "10-luminance": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Luminance Mask",
+        "outputs": [
+          {
+            "data_type": "core.Mask",
+            "id": "mask",
+            "name": "Mask",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.mask-luminance",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "10-luminance",
+      "parameters": {},
+      "type_id": "core.mask-luminance"
+    },
+    "11-enabled": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Boolean",
+        "outputs": [
+          {
+            "data_type": "value.Boolean",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Boolean": false
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Boolean"
+          }
+        ],
+        "type_id": "core.constant-boolean",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "11-enabled",
+      "parameters": {
+        "value": {
+          "Boolean": true
+        }
+      },
+      "type_id": "core.constant-boolean"
+    },
+    "12-requested-ev": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Float",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.constant-float",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "12-requested-ev",
+      "parameters": {
+        "value": {
+          "Float": -0.7
+        }
+      },
+      "type_id": "core.constant-float"
+    },
+    "12-zero": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Float",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.constant-float",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "12-zero",
+      "parameters": {
+        "value": {
+          "Float": 0.0
+        }
+      },
+      "type_id": "core.constant-float"
+    },
+    "13-negative": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Float",
+            "id": "a",
+            "name": "A",
+            "required": true
+          },
+          {
+            "data_type": "value.Float",
+            "id": "b",
+            "name": "B",
+            "required": true
+          }
+        ],
+        "name": "Less Than",
+        "outputs": [
+          {
+            "data_type": "value.Condition",
+            "id": "result",
+            "name": "Result",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 1e-6
+            },
+            "id": "epsilon",
+            "max": null,
+            "min": 0.0,
+            "name": "Epsilon",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.less-than",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "13-negative",
+      "parameters": {
+        "epsilon": {
+          "Float": 1e-6
+        }
+      },
+      "type_id": "core.less-than"
+    },
+    "14-enabled-negative": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Condition",
+            "id": "a",
+            "name": "A",
+            "required": true
+          },
+          {
+            "data_type": "value.Condition",
+            "id": "b",
+            "name": "B",
+            "required": true
+          }
+        ],
+        "name": "And",
+        "outputs": [
+          {
+            "data_type": "value.Condition",
+            "id": "result",
+            "name": "Result",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.and",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "14-enabled-negative",
+      "parameters": {},
+      "type_id": "core.and"
+    },
+    "15-dose": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Condition",
+            "id": "condition",
+            "name": "Condition",
+            "required": true
+          },
+          {
+            "data_type": "core.Any",
+            "id": "true",
+            "name": "True",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "false",
+            "name": "False",
+            "required": false
+          }
+        ],
+        "lazy_inputs": [
+          {
+            "branches": [
+              {
+                "condition": "True",
+                "inputs": [
+                  "true"
+                ]
+              },
+              {
+                "condition": "False",
+                "inputs": [
+                  "false"
+                ]
+              }
+            ],
+            "required": [
+              "condition"
+            ],
+            "selector": "condition"
+          }
+        ],
+        "name": "Switch",
+        "outputs": [
+          {
+            "data_type": "core.Any",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.switch",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "15-dose",
+      "parameters": {},
+      "type_id": "core.switch"
+    },
+    "20-local-exposure": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          },
+          {
+            "data_type": "core.Mask",
+            "id": "mask",
+            "name": "Mask",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "exposure",
+            "name": "Exposure",
+            "required": false
+          }
+        ],
+        "name": "Local Exposure",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "exposure",
+            "max": null,
+            "min": null,
+            "name": "Exposure",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.local-exposure",
+        "version": 1
+      },
+      "exposed_parameters": [
+        "exposure"
+      ],
+      "id": "20-local-exposure",
+      "parameters": {
+        "exposure": {
+          "Float": 0.0
+        }
+      },
+      "type_id": "core.local-exposure"
+    },
+    "99-output": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Output",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.output",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "99-output",
+      "parameters": {},
+      "type_id": "core.output"
+    }
+  },
+  "revision": 28
+}

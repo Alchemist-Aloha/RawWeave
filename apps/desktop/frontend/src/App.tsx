@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { curveAxes } from './editor/curve-axes';
 import {
   Background,
   BackgroundVariant,
@@ -914,6 +915,7 @@ export default function App() {
   }, [controller, geometryNodeId, geometryNode?.id, geometryTarget?.nodeId, geometryTarget?.outputPort, viewerController]);
 
   const nodeActions = useMemo<GraphNodeActions>(() => ({
+    curveAxes: (node) => curveAxes(node, controller.state.nodes, controller.state.edges),
     imageControls: (node) => <ImageNodeControls
       node={node}
       target={inputTarget(node)}

@@ -1,0 +1,619 @@
+{
+  "checkpoints": {},
+  "edges": [
+    {
+      "from_node": "00-decode",
+      "from_port": "frame",
+      "to_node": "10-black-level",
+      "to_port": "frame"
+    },
+    {
+      "from_node": "10-black-level",
+      "from_port": "mosaic",
+      "to_node": "20-white-balance",
+      "to_port": "mosaic"
+    },
+    {
+      "from_node": "20-white-balance",
+      "from_port": "mosaic",
+      "to_node": "30-highlight",
+      "to_port": "mosaic"
+    },
+    {
+      "from_node": "30-highlight",
+      "from_port": "mosaic",
+      "to_node": "40-demosaic",
+      "to_port": "mosaic"
+    },
+    {
+      "from_node": "40-demosaic",
+      "from_port": "scene",
+      "to_node": "50-camera",
+      "to_port": "scene"
+    },
+    {
+      "from_node": "00-decode",
+      "from_port": "camera_profile",
+      "to_node": "50-camera",
+      "to_port": "camera_profile"
+    },
+    {
+      "from_node": "50-camera",
+      "from_port": "scene",
+      "to_node": "60-lens",
+      "to_port": "scene"
+    },
+    {
+      "from_node": "00-decode",
+      "from_port": "lens_profile",
+      "to_node": "60-lens",
+      "to_port": "lens_profile"
+    },
+    {
+      "from_node": "60-lens",
+      "from_port": "scene",
+      "to_node": "99-display",
+      "to_port": "scene"
+    },
+    {
+      "from_node": "00-decode",
+      "from_port": "camera",
+      "to_node": "10-metadata",
+      "to_port": "camera"
+    },
+    {
+      "from_node": "10-metadata",
+      "from_port": "iso",
+      "to_node": "15-recovery",
+      "to_port": "value"
+    },
+    {
+      "from_node": "15-recovery",
+      "from_port": "value",
+      "to_node": "30-highlight",
+      "to_port": "strength"
+    }
+  ],
+  "nodes": {
+    "00-decode": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Bytes",
+            "id": "bytes",
+            "name": "RAW Bytes",
+            "required": false
+          }
+        ],
+        "name": "RAW Decode",
+        "outputs": [
+          {
+            "data_type": "raw.Frame",
+            "id": "frame",
+            "name": "RAW Frame",
+            "required": false
+          },
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": false
+          },
+          {
+            "data_type": "raw.CameraMetadata",
+            "id": "camera",
+            "name": "Camera Metadata",
+            "required": false
+          },
+          {
+            "data_type": "raw.CameraProfile",
+            "id": "camera_profile",
+            "name": "Camera Profile",
+            "required": false
+          },
+          {
+            "data_type": "raw.LensProfile",
+            "id": "lens_profile",
+            "name": "Lens Profile",
+            "required": false
+          },
+          {
+            "data_type": "raw.ExifMetadata",
+            "id": "exif",
+            "name": "EXIF Metadata",
+            "required": false
+          },
+          {
+            "data_type": "raw.EmbeddedPreview",
+            "id": "preview",
+            "name": "Embedded Preview",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "raw.decode",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "00-decode",
+      "parameters": {},
+      "type_id": "raw.decode"
+    },
+    "10-black-level": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "raw.Frame",
+            "id": "frame",
+            "name": "RAW Frame",
+            "required": true
+          }
+        ],
+        "name": "Black Level",
+        "outputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "raw.black-level",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "10-black-level",
+      "parameters": {},
+      "type_id": "raw.black-level"
+    },
+    "10-metadata": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "raw.CameraMetadata",
+            "id": "camera",
+            "name": "Camera Metadata",
+            "required": false
+          },
+          {
+            "data_type": "raw.ExifMetadata",
+            "id": "exif",
+            "name": "EXIF Metadata",
+            "required": false
+          }
+        ],
+        "name": "Metadata",
+        "outputs": [
+          {
+            "data_type": "core.Metadata",
+            "id": "metadata",
+            "name": "Metadata",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "make",
+            "name": "Make",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "model",
+            "name": "Model",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "camera_model",
+            "name": "Camera Model",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "lens_model",
+            "name": "Lens Model",
+            "required": false
+          },
+          {
+            "data_type": "value.Integer",
+            "id": "iso",
+            "name": "ISO",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "aperture",
+            "name": "Aperture",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "shutter_seconds",
+            "name": "Shutter Speed",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "focal_length",
+            "name": "Focal Length",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "capture_time",
+            "name": "Capture Time",
+            "required": false
+          },
+          {
+            "data_type": "value.String",
+            "id": "orientation",
+            "name": "Orientation",
+            "required": false
+          },
+          {
+            "data_type": "value.Integer",
+            "id": "rating",
+            "name": "Rating",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.metadata",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "10-metadata",
+      "parameters": {},
+      "type_id": "core.metadata"
+    },
+    "15-recovery": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": true
+          }
+        ],
+        "name": "Curve",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": "0,0;1,1"
+            },
+            "id": "points",
+            "max": null,
+            "min": null,
+            "name": "Control Points",
+            "parameter_type": "String"
+          }
+        ],
+        "type_id": "core.curve",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "15-recovery",
+      "parameters": {
+        "points": {
+          "String": "0,1;100,1;1600,0.9;6400,0.75;25600,0.5"
+        }
+      },
+      "type_id": "core.curve"
+    },
+    "20-white-balance": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": true
+          }
+        ],
+        "name": "White Balance",
+        "outputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "red_gain",
+            "max": null,
+            "min": 0.0,
+            "name": "Red Gain",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "green_gain",
+            "max": null,
+            "min": 0.0,
+            "name": "Green Gain",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "blue_gain",
+            "max": null,
+            "min": 0.0,
+            "name": "Blue Gain",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "raw.white-balance",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "20-white-balance",
+      "parameters": {
+        "blue_gain": {
+          "Float": 1.0
+        },
+        "green_gain": {
+          "Float": 1.0
+        },
+        "red_gain": {
+          "Float": 1.0
+        }
+      },
+      "type_id": "raw.white-balance"
+    },
+    "30-highlight": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": true
+          }
+        ],
+        "name": "Highlight Reconstruction",
+        "outputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "threshold",
+            "max": null,
+            "min": 0.0,
+            "name": "Threshold",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "strength",
+            "max": 1.0,
+            "min": 0.0,
+            "name": "Recovery Strength",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "raw.highlight-reconstruction",
+        "version": 1
+      },
+      "exposed_parameters": [
+        "strength"
+      ],
+      "id": "30-highlight",
+      "parameters": {
+        "strength": {
+          "Float": 1.0
+        },
+        "threshold": {
+          "Float": 1.0
+        }
+      },
+      "type_id": "raw.highlight-reconstruction"
+    },
+    "40-demosaic": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "raw.Mosaic",
+            "id": "mosaic",
+            "name": "Mosaic",
+            "required": true
+          }
+        ],
+        "name": "Demosaic",
+        "outputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "raw.demosaic",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "40-demosaic",
+      "parameters": {},
+      "type_id": "raw.demosaic"
+    },
+    "50-camera": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": true
+          },
+          {
+            "data_type": "raw.CameraProfile",
+            "id": "camera_profile",
+            "name": "Camera Profile",
+            "required": false
+          }
+        ],
+        "name": "Camera Transform",
+        "outputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": "sRGB"
+            },
+            "id": "working_space",
+            "max": null,
+            "min": null,
+            "name": "Working Space",
+            "parameter_type": "String"
+          }
+        ],
+        "type_id": "raw.camera-transform",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "50-camera",
+      "parameters": {
+        "working_space": {
+          "String": "sRGB"
+        }
+      },
+      "type_id": "raw.camera-transform"
+    },
+    "60-lens": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": true
+          },
+          {
+            "data_type": "raw.LensProfile",
+            "id": "lens_profile",
+            "name": "Lens Profile",
+            "required": false
+          }
+        ],
+        "name": "Lens Correction",
+        "outputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "raw.lens-correction",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "60-lens",
+      "parameters": {},
+      "type_id": "raw.lens-correction"
+    },
+    "99-display": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "FullFrame"
+        ],
+        "inputs": [
+          {
+            "data_type": "color.SceneLinearRGB",
+            "id": "scene",
+            "name": "Scene Linear RGB",
+            "required": true
+          }
+        ],
+        "name": "Display Transform",
+        "outputs": [
+          {
+            "data_type": "color.DisplayRGB",
+            "id": "display",
+            "name": "Display RGB",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "raw.display-transform",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "99-display",
+      "parameters": {},
+      "type_id": "raw.display-transform"
+    }
+  },
+  "revision": 24
+}

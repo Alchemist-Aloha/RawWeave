@@ -1,0 +1,358 @@
+{
+  "checkpoints": {},
+  "edges": [
+    {
+      "from_node": "10-ev",
+      "from_port": "value",
+      "to_node": "20-expression",
+      "to_port": "a"
+    },
+    {
+      "from_node": "11-strength",
+      "from_port": "value",
+      "to_node": "20-expression",
+      "to_port": "b"
+    },
+    {
+      "from_node": "20-expression",
+      "from_port": "value",
+      "to_node": "30-clamp",
+      "to_port": "value"
+    },
+    {
+      "from_node": "30-clamp",
+      "from_port": "value",
+      "to_node": "40-exposure",
+      "to_port": "exposure"
+    },
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "40-exposure",
+      "to_port": "image"
+    },
+    {
+      "from_node": "40-exposure",
+      "from_port": "image",
+      "to_node": "99-output",
+      "to_port": "image"
+    }
+  ],
+  "nodes": {
+    "00-input": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [],
+        "name": "Image Input",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.image-input",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "00-input",
+      "parameters": {},
+      "type_id": "core.image-input"
+    },
+    "10-ev": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Float",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.constant-float",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "10-ev",
+      "parameters": {
+        "value": {
+          "Float": 1.5
+        }
+      },
+      "type_id": "core.constant-float"
+    },
+    "11-strength": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Float",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.constant-float",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "11-strength",
+      "parameters": {
+        "value": {
+          "Float": 0.5
+        }
+      },
+      "type_id": "core.constant-float"
+    },
+    "20-expression": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Float",
+            "id": "a",
+            "name": "A",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "b",
+            "name": "B",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "c",
+            "name": "C",
+            "required": false
+          },
+          {
+            "data_type": "value.Float",
+            "id": "d",
+            "name": "D",
+            "required": false
+          }
+        ],
+        "name": "Expression",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": "0"
+            },
+            "id": "expression",
+            "max": null,
+            "min": null,
+            "name": "Expression",
+            "parameter_type": "String"
+          }
+        ],
+        "type_id": "core.expression",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "20-expression",
+      "parameters": {
+        "expression": {
+          "String": "a * b"
+        }
+      },
+      "type_id": "core.expression"
+    },
+    "30-clamp": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": true
+          }
+        ],
+        "name": "Clamp",
+        "outputs": [
+          {
+            "data_type": "value.Float",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "min",
+            "max": null,
+            "min": null,
+            "name": "Minimum",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "max",
+            "max": null,
+            "min": null,
+            "name": "Maximum",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.clamp",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "30-clamp",
+      "parameters": {
+        "max": {
+          "Float": 2.0
+        },
+        "min": {
+          "Float": -2.0
+        }
+      },
+      "type_id": "core.clamp"
+    },
+    "40-exposure": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "TileLocal",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          },
+          {
+            "data_type": "value.Float",
+            "id": "exposure",
+            "name": "Exposure",
+            "required": false
+          }
+        ],
+        "name": "Exposure",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "exposure",
+            "max": null,
+            "min": null,
+            "name": "Exposure",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.exposure",
+        "version": 1
+      },
+      "exposed_parameters": [
+        "exposure"
+      ],
+      "id": "40-exposure",
+      "parameters": {
+        "exposure": {
+          "Float": 0.0
+        }
+      },
+      "type_id": "core.exposure"
+    },
+    "99-output": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Output",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.output",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "99-output",
+      "parameters": {},
+      "type_id": "core.output"
+    }
+  },
+  "revision": 19
+}

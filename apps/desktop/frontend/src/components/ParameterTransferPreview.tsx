@@ -1,5 +1,6 @@
 import type { EditorNode } from '../editor/types';
 import { TransferPlot, type Point } from './CurvePreview';
+import { curveAxes, type CurveAxes } from '../editor/curve-axes';
 
 interface Transfer {
   points?: Point[];
@@ -59,11 +60,11 @@ export function parameterTransferPlot(node: EditorNode): Transfer | null {
   return { points, inputDomain: [points[0][0], points[points.length - 1][0]], description };
 }
 
-export function ParameterTransferPreview({ node }: { node: EditorNode }) {
+export function ParameterTransferPreview({ node, axes = curveAxes(node) }: { node: EditorNode; axes?: CurveAxes }) {
   const plot = parameterTransferPlot(node);
   if (!plot) return null;
   return <section className="parameter-transfer-preview" aria-label={`${node.descriptor.name} parameter mapping`}>
-    {plot.points ? <TransferPlot points={plot.points} inputDomain={plot.inputDomain} label={`${node.descriptor.name} transfer curve`}>
+    {plot.points ? <TransferPlot points={plot.points} inputDomain={plot.inputDomain} axes={axes} label={`${node.descriptor.name} transfer curve`}>
       <small>{plot.description}</small>
     </TransferPlot> : <span className="curve-preview__invalid" role="status">{plot.error}</span>}
     <small>Applied parameter values; edits update this plot on commit. Exposed inputs may override them.</small>

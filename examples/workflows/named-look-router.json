@@ -1,0 +1,862 @@
+{
+  "checkpoints": {},
+  "edges": [
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "10-monochrome",
+      "to_port": "image"
+    },
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "30-film",
+      "to_port": "image"
+    },
+    {
+      "from_node": "20-look",
+      "from_port": "value",
+      "to_node": "40-router",
+      "to_port": "selector"
+    },
+    {
+      "from_node": "31-neutral-index",
+      "from_port": "value",
+      "to_node": "40-router",
+      "to_port": "a"
+    },
+    {
+      "from_node": "32-mono-index",
+      "from_port": "value",
+      "to_node": "40-router",
+      "to_port": "b"
+    },
+    {
+      "from_node": "33-film-index",
+      "from_port": "value",
+      "to_node": "40-router",
+      "to_port": "c"
+    },
+    {
+      "from_node": "40-router",
+      "from_port": "value",
+      "to_node": "45-look",
+      "to_port": "index"
+    },
+    {
+      "from_node": "00-input",
+      "from_port": "image",
+      "to_node": "45-look",
+      "to_port": "a"
+    },
+    {
+      "from_node": "10-monochrome",
+      "from_port": "image",
+      "to_node": "45-look",
+      "to_port": "b"
+    },
+    {
+      "from_node": "30-film",
+      "from_port": "image",
+      "to_node": "45-look",
+      "to_port": "c"
+    },
+    {
+      "from_node": "45-look",
+      "from_port": "value",
+      "to_node": "99-output",
+      "to_port": "image"
+    }
+  ],
+  "nodes": {
+    "00-input": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [],
+        "name": "Image Input",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.image-input",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "00-input",
+      "parameters": {},
+      "type_id": "core.image-input"
+    },
+    "10-monochrome": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "Gpu",
+          "TileLocal",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Color Matrix",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "m00",
+            "max": null,
+            "min": null,
+            "name": "Matrix 00",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m01",
+            "max": null,
+            "min": null,
+            "name": "Matrix 01",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m02",
+            "max": null,
+            "min": null,
+            "name": "Matrix 02",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m03",
+            "max": null,
+            "min": null,
+            "name": "Matrix 03",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m10",
+            "max": null,
+            "min": null,
+            "name": "Matrix 10",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "m11",
+            "max": null,
+            "min": null,
+            "name": "Matrix 11",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m12",
+            "max": null,
+            "min": null,
+            "name": "Matrix 12",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m13",
+            "max": null,
+            "min": null,
+            "name": "Matrix 13",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m20",
+            "max": null,
+            "min": null,
+            "name": "Matrix 20",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m21",
+            "max": null,
+            "min": null,
+            "name": "Matrix 21",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "m22",
+            "max": null,
+            "min": null,
+            "name": "Matrix 22",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m23",
+            "max": null,
+            "min": null,
+            "name": "Matrix 23",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m30",
+            "max": null,
+            "min": null,
+            "name": "Matrix 30",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m31",
+            "max": null,
+            "min": null,
+            "name": "Matrix 31",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "m32",
+            "max": null,
+            "min": null,
+            "name": "Matrix 32",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "m33",
+            "max": null,
+            "min": null,
+            "name": "Matrix 33",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "offset_r",
+            "max": null,
+            "min": null,
+            "name": "Red Offset",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "offset_g",
+            "max": null,
+            "min": null,
+            "name": "Green Offset",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "offset_b",
+            "max": null,
+            "min": null,
+            "name": "Blue Offset",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "offset_a",
+            "max": null,
+            "min": null,
+            "name": "Alpha Offset",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "core.color-matrix",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "10-monochrome",
+      "parameters": {
+        "m00": {
+          "Float": 0.2126
+        },
+        "m01": {
+          "Float": 0.7152
+        },
+        "m02": {
+          "Float": 0.0722
+        },
+        "m03": {
+          "Float": 0.0
+        },
+        "m10": {
+          "Float": 0.2126
+        },
+        "m11": {
+          "Float": 0.7152
+        },
+        "m12": {
+          "Float": 0.0722
+        },
+        "m13": {
+          "Float": 0.0
+        },
+        "m20": {
+          "Float": 0.2126
+        },
+        "m21": {
+          "Float": 0.7152
+        },
+        "m22": {
+          "Float": 0.0722
+        },
+        "m23": {
+          "Float": 0.0
+        },
+        "m30": {
+          "Float": 0.0
+        },
+        "m31": {
+          "Float": 0.0
+        },
+        "m32": {
+          "Float": 0.0
+        },
+        "m33": {
+          "Float": 1.0
+        },
+        "offset_a": {
+          "Float": 0.0
+        },
+        "offset_b": {
+          "Float": 0.0
+        },
+        "offset_g": {
+          "Float": 0.0
+        },
+        "offset_r": {
+          "Float": 0.0
+        }
+      },
+      "type_id": "core.color-matrix"
+    },
+    "20-look": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant String",
+        "outputs": [
+          {
+            "data_type": "value.String",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": ""
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "String"
+          }
+        ],
+        "type_id": "core.constant-string",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "20-look",
+      "parameters": {
+        "value": {
+          "String": "film"
+        }
+      },
+      "type_id": "core.constant-string"
+    },
+    "30-film": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Film Curve",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": "0,0;0.25,0.2;1,1"
+            },
+            "id": "points",
+            "max": null,
+            "min": null,
+            "name": "Control Points",
+            "parameter_type": "String"
+          },
+          {
+            "default": {
+              "Float": 0.0
+            },
+            "id": "exposure",
+            "max": 8.0,
+            "min": -8.0,
+            "name": "Exposure",
+            "parameter_type": "Float"
+          },
+          {
+            "default": {
+              "Float": 1.0
+            },
+            "id": "amount",
+            "max": 1.0,
+            "min": 0.0,
+            "name": "Amount",
+            "parameter_type": "Float"
+          }
+        ],
+        "type_id": "pro.film-curve",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "30-film",
+      "parameters": {
+        "amount": {
+          "Float": 0.65
+        },
+        "exposure": {
+          "Float": 0.0
+        },
+        "points": {
+          "String": "0,0;0.25,0.2;1,1"
+        }
+      },
+      "type_id": "pro.film-curve"
+    },
+    "31-neutral-index": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Integer",
+        "outputs": [
+          {
+            "data_type": "value.Integer",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Integer": 0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Integer"
+          }
+        ],
+        "type_id": "core.constant-integer",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "31-neutral-index",
+      "parameters": {
+        "value": {
+          "Integer": 0
+        }
+      },
+      "type_id": "core.constant-integer"
+    },
+    "32-mono-index": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Integer",
+        "outputs": [
+          {
+            "data_type": "value.Integer",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Integer": 0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Integer"
+          }
+        ],
+        "type_id": "core.constant-integer",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "32-mono-index",
+      "parameters": {
+        "value": {
+          "Integer": 1
+        }
+      },
+      "type_id": "core.constant-integer"
+    },
+    "33-film-index": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [],
+        "name": "Constant Integer",
+        "outputs": [
+          {
+            "data_type": "value.Integer",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "Integer": 0
+            },
+            "id": "value",
+            "max": null,
+            "min": null,
+            "name": "Value",
+            "parameter_type": "Integer"
+          }
+        ],
+        "type_id": "core.constant-integer",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "33-film-index",
+      "parameters": {
+        "value": {
+          "Integer": 2
+        }
+      },
+      "type_id": "core.constant-integer"
+    },
+    "40-router": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.String",
+            "id": "selector",
+            "name": "Selector",
+            "required": true
+          },
+          {
+            "data_type": "core.Any",
+            "id": "a",
+            "name": "A",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "b",
+            "name": "B",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "c",
+            "name": "C",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "d",
+            "name": "D",
+            "required": false
+          }
+        ],
+        "name": "Enum Select",
+        "outputs": [
+          {
+            "data_type": "core.Any",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [
+          {
+            "default": {
+              "String": ""
+            },
+            "id": "match_a",
+            "max": null,
+            "min": null,
+            "name": "A Matches",
+            "parameter_type": "String"
+          },
+          {
+            "default": {
+              "String": ""
+            },
+            "id": "match_b",
+            "max": null,
+            "min": null,
+            "name": "B Matches",
+            "parameter_type": "String"
+          },
+          {
+            "default": {
+              "String": ""
+            },
+            "id": "match_c",
+            "max": null,
+            "min": null,
+            "name": "C Matches",
+            "parameter_type": "String"
+          },
+          {
+            "default": {
+              "String": ""
+            },
+            "id": "match_d",
+            "max": null,
+            "min": null,
+            "name": "D Matches",
+            "parameter_type": "String"
+          }
+        ],
+        "type_id": "core.enum-select",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "40-router",
+      "parameters": {
+        "match_a": {
+          "String": "neutral"
+        },
+        "match_b": {
+          "String": "monochrome"
+        },
+        "match_c": {
+          "String": "film"
+        },
+        "match_d": {
+          "String": ""
+        }
+      },
+      "type_id": "core.enum-select"
+    },
+    "45-look": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu"
+        ],
+        "inputs": [
+          {
+            "data_type": "value.Integer",
+            "id": "index",
+            "name": "Index",
+            "required": true
+          },
+          {
+            "data_type": "core.Any",
+            "id": "a",
+            "name": "A",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "b",
+            "name": "B",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "c",
+            "name": "C",
+            "required": false
+          },
+          {
+            "data_type": "core.Any",
+            "id": "d",
+            "name": "D",
+            "required": false
+          }
+        ],
+        "lazy_inputs": [
+          {
+            "branches": [
+              {
+                "condition": {
+                  "Index": 0
+                },
+                "inputs": [
+                  "a"
+                ]
+              },
+              {
+                "condition": {
+                  "Index": 1
+                },
+                "inputs": [
+                  "b"
+                ]
+              },
+              {
+                "condition": {
+                  "Index": 2
+                },
+                "inputs": [
+                  "c"
+                ]
+              },
+              {
+                "condition": {
+                  "Index": 3
+                },
+                "inputs": [
+                  "d"
+                ]
+              }
+            ],
+            "required": [
+              "index"
+            ],
+            "selector": "index"
+          }
+        ],
+        "name": "Select",
+        "outputs": [
+          {
+            "data_type": "core.Any",
+            "id": "value",
+            "name": "Value",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.select",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "45-look",
+      "parameters": {},
+      "type_id": "core.select"
+    },
+    "99-output": {
+      "descriptor": {
+        "capabilities": [
+          "Cpu",
+          "RegionAware"
+        ],
+        "inputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": true
+          }
+        ],
+        "name": "Output",
+        "outputs": [
+          {
+            "data_type": "core.Image",
+            "id": "image",
+            "name": "Image",
+            "required": false
+          }
+        ],
+        "parameters": [],
+        "type_id": "core.output",
+        "version": 1
+      },
+      "exposed_parameters": [],
+      "id": "99-output",
+      "parameters": {},
+      "type_id": "core.output"
+    }
+  },
+  "revision": 40
+}

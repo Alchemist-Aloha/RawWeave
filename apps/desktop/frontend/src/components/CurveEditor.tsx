@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ParameterValue } from '../editor/types';
+import { curveAxes, type CurveAxes } from '../editor/curve-axes';
 import { Icon } from '../ui/Icon';
 import { CurvePreview, TransferPlot, curveDomain, curvePlot, type CurveDomain, type Point } from './CurvePreview';
 
@@ -42,8 +43,8 @@ function coordinatePoints(typeId: string, points: Point[], index: number, axis: 
 
 interface Gesture { points: Point[]; initial: string; original: string; domain: CurveDomain; index: number; pointerId?: number; anchor?: { position: Point; point: Point; client: Point }; dragged?: boolean }
 
-export function CurveEditor({ typeId, value, committedValue, onBegin, onDraft, onCommit, onCancel }: {
-  typeId: string; value: ParameterValue; committedValue: ParameterValue;
+export function CurveEditor({ typeId, value, committedValue, axes = curveAxes({ id: '', typeId }), onBegin, onDraft, onCommit, onCancel }: {
+  typeId: string; value: ParameterValue; committedValue: ParameterValue; axes?: CurveAxes;
   onBegin: () => void; onDraft: (text: string) => void; onCommit: () => void; onCancel: () => void;
 }) {
   const svg = useRef<SVGSVGElement>(null);
@@ -151,8 +152,8 @@ export function CurveEditor({ typeId, value, committedValue, onBegin, onDraft, o
   const chosen = points[activeIndex];
   const invalidCoordinate = coordinate !== null && !coordinatePoints(typeId, points, coordinate.index, coordinate.axis, coordinate.text);
   return <div className="curve-editor nodrag nopan nowheel">
-    <TransferPlot points={points} domain={frozen} svgProps={{
-      ref: svg, role: 'group', tabIndex: 0, 'aria-label': 'Curve editor: input horizontal, output vertical',
+    <TransferPlot points={points} domain={frozen} axes={axes} svgProps={{
+      ref: svg, role: 'group', tabIndex: 0, 'aria-label': `Curve editor: ${axes.x} horizontally; ${axes.y} vertically`,
       'aria-description': 'Click or drag to add between endpoints. Drag handles to move; Alt-click deletes an interior point. Arrow keys nudge; Shift is coarse, Alt is fine. Delete removes an interior point. Escape cancels.',
       onPointerDown: (event) => {
         if (gesture.current?.pointerId === undefined) {

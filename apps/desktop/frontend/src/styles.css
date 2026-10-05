@@ -1238,6 +1238,11 @@ input, select, textarea { caret-color: var(--wax-amber); }
 .curve-preview circle { fill: currentColor; }
 .curve-preview__grid { fill: none; stroke: var(--bench-grid); stroke-width: 1; }
 .curve-preview__neutral { stroke: var(--bench-ink-dim); stroke-dasharray: 3 3; }
+.curve-preview__plot { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 4px; }
+.curve-preview__plot > svg { grid-column: 2; grid-row: 1; }
+.curve-preview__axis { color: var(--bench-ink-body); font: 400 11px/1.45 var(--face); white-space: nowrap; }
+.curve-preview__axis--y { grid-column: 1; grid-row: 1; align-self: center; justify-self: center; writing-mode: vertical-rl; transform: rotate(180deg); }
+.curve-preview__axis--x { grid-column: 2; grid-row: 2; text-align: center; }
 .curve-preview figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; margin-top: 4px; font: 400 10px/1.45 var(--face-data); color: var(--bench-ink-dim); }
 .parameter-transfer-preview, .color-parameter-preview { display: grid; gap: 6px; max-width: 260px; margin-bottom: 12px; overflow-wrap: anywhere; }
 /* Chromatic ramps and swatches are parameter data, never chrome/state colors. */
@@ -1252,6 +1257,7 @@ input, select, textarea { caret-color: var(--wax-amber); }
 .color-hue__scale { display: flex; justify-content: space-between; color: var(--judge-ink-dim); }
 .color-hue small { font-size: 11px; color: var(--judge-ink-dim); }
 .curve-preview small, .curve-preview__invalid, .parameter-transfer-preview > small, .color-parameter-preview > small { display: block; font-size: 11px; color: var(--bench-ink-dim); }
+.curve-preview > small { max-width: 260px; overflow-wrap: anywhere; }
 .curve-preview__invalid { grid-column: 1 / -1; }
 .curve-editor { grid-column: 1 / -1; min-width: 0; }
 .curve-editor svg { touch-action: none; cursor: crosshair; }

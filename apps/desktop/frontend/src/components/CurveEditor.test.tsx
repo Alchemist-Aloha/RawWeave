@@ -56,7 +56,7 @@ it('click-drags a new point with local feedback, fixed axes and one release comm
   expect(view.svg.setPointerCapture).toHaveBeenCalledWith(1);
   await view.pointer('pointermove', 100, 39.2);
   expect(curvePlot('core.curve', view.value())?.[1][1]).toBeCloseTo(0.7);
-  expect(view.host.textContent).toContain('Output 0 to 1');
+  expect(view.host.textContent).toContain('Mapped control value: 0 to 1');
   expect(view.onCommit).not.toHaveBeenCalled();
   await view.pointer('pointerup', 100, 39.2);
   await view.pointer('lostpointercapture', 100, 39.2);
@@ -143,7 +143,7 @@ it('edits selected coordinates locally, validates ordering and f32, commits once
   expect(view.onCommit).not.toHaveBeenCalled();
   await act(async () => output.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
   expect(view.onCommit).toHaveBeenCalledOnce();
-  expect(view.host.textContent).toContain('Output 0 to 2.5');
+  expect(view.host.textContent).toContain('RGB level after curve: 0 to 2.5');
   await view.ack(view.value());
   await type(input, '0.25');
   await act(async () => input.blur());

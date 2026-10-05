@@ -4,6 +4,7 @@ import type { EditorNode, ParameterDescriptor, ParameterValue, WorkflowPort } fr
 import { isRecommendedValue, parameterUX, POINT_CURVE_NODES } from '../editor/parameter-ux';
 import { CurvePreview, curvePlot } from './CurvePreview';
 import { CurveEditor } from './CurveEditor';
+import type { CurveAxes } from '../editor/curve-axes';
 import { ParameterTransferPreview } from './ParameterTransferPreview';
 import { ColorParameterPreview } from './ColorParameterPreview';
 import { inputDataType } from '../editor/connections';
@@ -33,6 +34,7 @@ export interface GraphNodeCheckpoint {
  */
 export interface GraphNodeActions {
   imageControls?: (node: EditorNode) => ReactNode;
+  curveAxes?: (node: EditorNode) => CurveAxes;
   onParameterChange: (nodeId: string, parameterId: string, value: ParameterValue) => void;
   onToggleExposed: (nodeId: string, parameterId: string, exposed: boolean) => void;
   onTogglePort: (nodeId: string, portId: string, direction: 'Input' | 'Output', exposed: boolean) => void;
@@ -61,6 +63,7 @@ interface ParameterFieldProps {
   multiline?: boolean;
   choices?: string[];
   suggestions?: string[];
+  axes?: CurveAxes;
 }
 
 /**
@@ -68,7 +71,7 @@ interface ParameterFieldProps {
  * command. Slider/stepper input stays local until release (including repeated
  * keyboard steps). Escape discards drafts; release and blur never double-commit.
  */
-function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumber = false, multiline = false, choices, suggestions }: ParameterFieldProps) {
+function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumber = false, multiline = false, choices, suggestions, axes }: ParameterFieldProps) {
   const [draft, setDraft] = useState<string | null>(null);
   const draftRef = useRef<string | null>(null);
   const committed = useRef(value);
@@ -167,7 +170,7 @@ function ParameterField({ typeId, parameter, value, onChange, toggle, wholeNumbe
   const sliderValue = typeof value === 'number' ? Math.min(max! * factor, Math.max(min! * factor, value * factor)) : min! * factor;
   return (
     <div className={`parameter${modified ? ' parameter--modified' : ''}`}>
-      {pointCurve && <CurveEditor typeId={typeId} value={draft ?? value} committedValue={value}
+      {pointCurve && <CurveEditor typeId={typeId} value={draft ?? value} committedValue={value} axes={axes}
         onBegin={() => { curveGesture.current = true; editing.current = true; }}
         onDraft={(text) => { editing.current = true; updateDraft(text); }}
         onCommit={() => { curveGesture.current = false; commit(); }}
@@ -396,7 +399,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
         <details className="graph-node__details nodrag" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
           <summary className="graph-node__details-summary">Parameters</summary>
           {detailsOpen && actions?.imageControls?.(node)}
-          {detailsOpen && <ParameterTransferPreview node={node} />}
+          {detailsOpen && <ParameterTransferPreview node={node} axes={['core.levels', 'core.map-range', 'core.clamp'].includes(node.typeId) ? actions?.curveAxes?.(node) : undefined} />}
           {detailsOpen && <ColorParameterPreview node={node} />}
           <div className="parameter-list">
             {node.descriptor.parameters.filter((parameter) => !parameterUX(node.typeId, parameter).advanced).map((parameter) => {
@@ -405,6 +408,7 @@ export function GraphNode({ data, selected }: NodeProps<RawWeaveFlowNode>) {
                 <ParameterField
                   key={parameter.id}
                   typeId={node.typeId}
+                  axes={parameter.id === 'points' ? actions?.curveAxes?.(node) : undefined}
                   onChange={(next) => actions?.onParameterChange(node.id, parameter.id, next)}
                   parameter={parameter}
                   multiline={['prompt', 'negative_prompt', 'workflow_definition', 'points', 'expression'].includes(parameter.id)}

@@ -45,8 +45,11 @@ it('labels the plot and its actual domain, with an honest invalid state', async 
   const root = createRoot(host);
   await act(async () => root.render(<CurvePreview typeId="core.curve" value="-1,-2;2,3" />));
   expect(host.querySelector('svg')?.getAttribute('aria-label')).toContain('Transfer curve');
-  expect(host.textContent).toContain('Input −1 to 2');
-  expect(host.textContent).toContain('Output −2 to 3');
+  expect(host.textContent).toContain('Source control value: −1 to 2');
+  expect(host.textContent).toContain('Mapped control value: −2 to 3');
+  expect(host.querySelector('.curve-preview__axis--x')?.textContent).toBe('Source control value');
+  expect(host.querySelector('.curve-preview__axis--y')?.textContent).toBe('Mapped control value');
+  expect(host.querySelector('.curve-preview__plot > svg')?.getAttribute('viewBox')).toBe('0 0 200 120');
   await act(async () => root.render(<CurvePreview typeId="core.curve" value="broken" />));
   expect(host.querySelector('svg')).toBeNull();
   expect(host.textContent).toContain('Enter at least two finite x,y pairs with distinct input values');

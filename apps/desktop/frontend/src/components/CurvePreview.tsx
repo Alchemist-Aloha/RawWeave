@@ -1,5 +1,6 @@
 import type { ReactNode, SVGProps } from 'react';
 import type { ParameterValue } from '../editor/types';
+import { curveAxes, type CurveAxes } from '../editor/curve-axes';
 
 export type Point = [number, number];
 export interface CurveDomain { xMin: number; xMax: number; yMin: number; yMax: number }
@@ -37,12 +38,12 @@ export function CurvePreview({ typeId, value }: { typeId: string; value: Paramet
   if (!points) return <span className="curve-preview__invalid" role="status">{typeId === 'core.curves'
     ? 'Enter a finite gamma greater than zero to display the curve.'
     : `Enter at least two finite x,y pairs with distinct input values (x,y;x,y). ${typeId === 'core.curve' ? '' : 'Input values must be between 0 and 1. '}Display limit: 4096 points / 64 KiB.`}</span>;
-  return <TransferPlot points={points} markers={typeId !== 'core.curves'}>
+  return <TransferPlot points={points} markers={typeId !== 'core.curves'} axes={curveAxes({ id: '', typeId })}>
     {typeId.startsWith('pro.') && <small>Point mapping only; exposure and effect strength apply separately.</small>}
   </TransferPlot>;
 }
 
-export function TransferPlot({ points, markers = false, inputDomain, domain, svgProps, renderPoints, label = 'Transfer curve', children }: {
+export function TransferPlot({ points, markers = false, inputDomain, domain, svgProps, renderPoints, label = 'Transfer curve', axes = curveAxes({ id: '', typeId: 'core.curve' }), children }: {
   points: Point[];
   markers?: boolean;
   inputDomain?: [number, number];
@@ -50,6 +51,7 @@ export function TransferPlot({ points, markers = false, inputDomain, domain, svg
   svgProps?: SVGProps<SVGSVGElement>;
   renderPoints?: (x: (n: number) => number, y: (n: number) => number) => ReactNode;
   label?: string;
+  axes?: CurveAxes;
   children?: ReactNode;
 }) {
   const bounds = domain ?? curveDomain(points);
@@ -61,13 +63,18 @@ export function TransferPlot({ points, markers = false, inputDomain, domain, svg
   // Point curves hold their endpoint values outside the authored input domain.
   const trace: Point[] = [[xMin, points[0][1]], ...points, [xMax, points[points.length - 1][1]]];
   return <figure className="curve-preview">
-    <svg viewBox="0 0 200 120" role="img" aria-label={`${label}: input on horizontal axis, output on vertical axis`} {...svgProps}>
+    <div className="curve-preview__plot">
+    <span className="curve-preview__axis curve-preview__axis--y">{axes.y}</span>
+    <svg viewBox="0 0 200 120" role="img" aria-label={`${label}: ${axes.x} on horizontal axis; ${axes.y} on vertical axis`} {...svgProps}>
       <path className="curve-preview__grid" d="M8 8H192V112H8Z M54 8V112 M100 8V112 M146 8V112 M8 34H192 M8 60H192 M8 86H192" />
       {Math.max(xMin, yMin) < Math.min(xMax, yMax) && <line className="curve-preview__neutral" x1={x(Math.max(xMin, yMin))} y1={y(Math.max(xMin, yMin))} x2={x(Math.min(xMax, yMax))} y2={y(Math.min(xMax, yMax))} />}
       <polyline points={trace.map(([a, b]) => `${x(a)},${y(b)}`).join(' ')} />
       {renderPoints ? renderPoints(x, y) : markers && points.map(([a, b], i) => <circle key={i} cx={x(a)} cy={y(b)} r="2.5" />)}
     </svg>
-    <figcaption><span>Input {format(xMin)} to {format(xMax)}</span><span>Output {format(yMin)} to {format(yMax)}</span></figcaption>
+    <span className="curve-preview__axis curve-preview__axis--x">{axes.x}</span>
+    </div>
+    <figcaption><span>{axes.x}: {format(xMin)} to {format(xMax)}</span><span>{axes.y}: {format(yMin)} to {format(yMax)}</span></figcaption>
+    <small>{axes.description}</small>
     {children}
   </figure>;
 }
