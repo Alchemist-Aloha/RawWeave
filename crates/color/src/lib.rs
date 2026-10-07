@@ -265,11 +265,8 @@ pub struct SrgbDisplayTransform;
 impl DisplayTransform for SrgbDisplayTransform {
     fn transform(&self, scene: &SceneLinearRGB) -> Result<DisplayRGB, ColorError> {
         let srgb_scene = MatrixWorkingSpaceTransform::new(WorkingSpace::Srgb).transform(scene)?;
-        let pixels = srgb_scene
-            .pixels()
-            .iter()
-            .map(|pixel| fit_srgb_gamut(*pixel).map(encode_srgb))
-            .collect();
+        let workers = std::thread::available_parallelism().map_or(1, usize::from);
+        let pixels = encode_display_pixels(srgb_scene.pixels(), workers);
         DisplayRGB::new(srgb_scene.dimensions(), pixels, WorkingSpace::Srgb)
     }
 
@@ -561,6 +558,40 @@ fn fit_srgb_gamut(mut pixel: [f32; 3]) -> [f32; 3] {
     pixel
 }
 
+fn encode_display_pixels(pixels: &[[f32; 3]], workers: usize) -> Vec<[f32; 3]> {
+    let encode = |input: &[[f32; 3]], output: &mut [[f32; 3]]| {
+        for (pixel, encoded) in input.iter().zip(output) {
+            *encoded = fit_srgb_gamut(*pixel).map(encode_srgb);
+        }
+    };
+    // ponytail: at most eight per-call workers; use a shared pool if concurrent
+    // preview jobs make thread creation/oversubscription a measured bottleneck.
+    let workers = workers.clamp(1, 8).min((pixels.len() / 262_144).max(1));
+    let mut output = vec![[0.0; 3]; pixels.len()];
+    if workers == 1 {
+        encode(pixels, &mut output);
+        return output;
+    }
+    let chunk_size = pixels.len().div_ceil(workers);
+    let failed = std::thread::scope(|scope| {
+        let mut failed = false;
+        for (input, output) in pixels.chunks(chunk_size).zip(output.chunks_mut(chunk_size)) {
+            if std::thread::Builder::new()
+                .spawn_scoped(scope, move || encode(input, output))
+                .is_err()
+            {
+                failed = true;
+            }
+        }
+        failed
+    });
+    // A host unable to create workers still gets a real serial result.
+    if failed {
+        encode(pixels, &mut output);
+    }
+    output
+}
+
 fn encode_srgb(value: f32) -> f32 {
     let value = value.max(0.0);
     let encoded = if value <= 0.0031308 {
@@ -574,6 +605,33 @@ fn encode_srgb(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{DisplayTransform, SceneLinearRGB, SrgbDisplayTransform};
+
+    #[test]
+    fn bounded_display_workers_match_serial_transfer_bit_for_bit() {
+        let samples = [-0.0, -0.5, 0.0031308, 0.0031309, 0.75, 1.0, 4.0, f32::MAX];
+        for count in [0, 1, 17, 524_289] {
+            let pixels: Vec<_> = (0..count)
+                .map(|index| {
+                    std::array::from_fn(|channel| samples[(index + channel) % samples.len()])
+                })
+                .collect();
+            let expected: Vec<_> = pixels
+                .iter()
+                .map(|pixel| {
+                    super::fit_srgb_gamut(*pixel)
+                        .map(super::encode_srgb)
+                        .map(f32::to_bits)
+                })
+                .collect();
+            for workers in [0, 1, 2, 8, usize::MAX] {
+                let actual: Vec<_> = super::encode_display_pixels(&pixels, workers)
+                    .into_iter()
+                    .map(|pixel| pixel.map(f32::to_bits))
+                    .collect();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
 
     #[test]
     fn srgb_transfer_clips_highlights_only_at_display_boundary() {

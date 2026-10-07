@@ -3932,6 +3932,7 @@ dependencies = [
 name = "rawweave-graph"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "rawweave-color",
  "rawweave-core",
  "rawweave-image",

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
 rawweave-color.workspace = true
 rawweave-core.workspace = true
 rawweave-image.workspace = true

@@ -1214,7 +1214,7 @@ fn checkpoint_context(source: Option<&SourceAsset>) -> EvaluationContext {
             EvaluationContext::default().with_source_image_set(set.as_ref().clone())
         }
         Some(SourceAsset::Raw { bytes, path }) => EvaluationContext::default()
-            .with_source_bytes(bytes.as_ref().clone())
+            .with_source_bytes(Arc::clone(bytes))
             .with_source_path(path),
         None => EvaluationContext::default(),
     }

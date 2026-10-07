@@ -543,7 +543,7 @@ impl NodeResult {
 pub struct EvaluationContext {
     pub source_image: Option<Image>,
     pub source_image_set: Option<ImageSet>,
-    pub source_bytes: Option<Vec<u8>>,
+    pub source_bytes: Option<Arc<Vec<u8>>>,
     pub source_path: Option<PathBuf>,
     pub external_inputs: BTreeMap<String, Value>,
     pub assets: BTreeMap<String, Vec<u8>>,
@@ -570,8 +570,8 @@ impl EvaluationContext {
         self
     }
 
-    pub fn with_source_bytes(mut self, source_bytes: Vec<u8>) -> Self {
-        self.source_bytes = Some(source_bytes);
+    pub fn with_source_bytes(mut self, source_bytes: impl Into<Arc<Vec<u8>>>) -> Self {
+        self.source_bytes = Some(source_bytes.into());
         self
     }
 

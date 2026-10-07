@@ -86,7 +86,7 @@ The frontend requests mip `floor(log2(1 / (zoom × DPR)))`, bounded to 0–6, wi
 
 The earlier cached mip-0 JPEG measurement was ~371 ms warm, including ~285 ms PNG encoding and ~86 ms selection. At mip 2 it is ~24 ms. This comparison changes requested resolution, not processing correctness or codec speed. `RAWWEAVE_BENCHMARK_MIP=0` (or 3) selects another benchmark mip; the default remains 2.
 
-## Final measured backend results
+## Previously measured backend results
 
 Same fixtures, whole-frame mip 2, release build, one test thread, diagnostics enabled and filesystem caches not flushed. Two unchanged repeats are averaged. This is one final observation, not a statistical latency guarantee or native open-to-display timing.
 
@@ -98,7 +98,7 @@ Same fixtures, whole-frame mip 2, release build, one test thread, diagnostics en
 
 Compared with the preceding implementation, RAW warm previews fell from ~701/~588 ms to ~30/~29 ms. JPEG warm reuse is preserved. A separate mip-3 diagnostic run under different load produced slower cold RAW timings; do not compare different mip/load conditions as an algorithm speedup.
 
-## Verification
+## Previous verification
 
 - `cargo test --locked --workspace --all-targets --all-features`: passes.
 - Desktop backend `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features`: 78 library tests and one binary test pass; two timing benchmarks ignored by default.
@@ -109,8 +109,67 @@ Compared with the preceding implementation, RAW warm previews fell from ~701/~58
 - `git diff --check`: passes.
 - No dependency additions, persisted identifier changes, JPEG/RAW path merging or frontend processing.
 
+## Additional backend iterations
+
+The next baseline was remeasured on this host rather than compared against the earlier table. Node diagnostics showed Bayer demosaic taking 378–595 ms, scene/display output hashing taking ~45–61 ms per buffer, and the serial display transfer taking ~150–174 ms in typical samples. Ambient host load caused large timing excursions; these are observations, not latency guarantees.
+
+### 7. Exact interior Bayer interpolation
+
+Recognize only the four ordinary 2×2 Bayer arrangements once per node evaluation. Interior pixels use their fixed axial/diagonal neighbors, preserving the reference's row-major floating-point addition order and initial zero. Borders, narrow images, non-Bayer 2×2 arrangements and X-Trans keep the existing bounded search. No demosaic quality or RAW working-space changes. Tests cover all four phases, small/narrow dimensions, signed zero, negative values and HDR samples, comparing float bits. The fast-path regression first failed because the implementation was absent, then passed. File: `node-packs/raw/src/lib.rs`.
+
+### 8. Batched runtime sample hashing
+
+Use the already-installed workspace `bytemuck` dependency to feed validated contiguous mosaic/scene/display float bits to the runtime hasher in one slice, instead of millions of tiny writes. Metadata still contributes to keys. A recording-hasher regression first failed the batch-size assertion, then verified both batching and byte-for-byte equivalence to the original native-endian bit stream, including signed zero. No durable checkpoint encoding or hash format changed. Typical RGB hash stages fell to ~14–17 ms. Files: `crates/graph/Cargo.toml`, `crates/graph/src/lib.rs`, both lockfiles; no dependency version changes.
+
+### 9. Shared compressed sources and sampled display expansion
+
+`EvaluationContext.source_bytes` now uses `Arc<Vec<u8>>`; the existing builder accepts either owned bytes or an existing Arc. Context cloning no longer copies compressed files at every graph stage. Both desktop source-context builders pass the existing shared source. The pointer-sharing regression failed before the change and passes afterward. This is a Rust runtime API field-type change, not a persisted workflow change.
+
+Keep DisplayRGB values in their three-channel shared storage while probing full dimensions; select the requested region/mip before allocating RGBA. Ordinary images and other visualization types retain their existing conversion paths. Full dimensions, origins, clipping, tile handling and PNG transport remain unchanged. The new regression first failed because the helpers were absent, then checked retained RGB storage, exact selected pixels and PNG equality for full/partial/clipped regions and mips 0/1/2/6. Out-of-bounds regions still fail. Files: `crates/node-api/src/lib.rs`, `crates/node-api/tests/raw_values.rs`, `apps/desktop/src-tauri/src/{lib,preview}.rs`.
+
+### 10. Bounded CPU display workers
+
+After demosaic and hashing improved, serial sRGB transfer was the largest typical RAW evaluation stage. The color crate now encodes disjoint chunks with scoped standard-library workers, preserving per-pixel arithmetic. Small images stay serial; large buffers use available CPU parallelism, capped at eight workers with at least ~262k pixels per worker. Thread creation failure recomputes the output serially after joining started workers. No GPU availability is simulated, and no thread-pool dependency was added. On this six-CPU host, typical display stages fell from ~150–174 ms to ~33–56 ms (loaded outliers remain). The regression first failed because the helper was absent, then compared serial/reference output bits against worker counts 0/1/2/8/usize::MAX, empty/small/large buffers, transfer-boundary values, signed zero and HDR. File: `crates/color/src/lib.rs`.
+
+### Measured outcome
+
+Same deterministic/licensed fixtures and benchmark entry point as above: release, whole frame, mip 2, Preview quality, one test thread, both diagnostic flags enabled, filesystem caches not flushed. Baseline: one run with two unchanged samples/source. Final: three fresh-editor runs of the same built test executable, each with first preview, two warm repeats, one edit and one edited repeat; no other validation builds were launched during these three runs. Final columns are medians across runs (warm repeats averaged within each run). Fixture creation remains outside timing; preview ends at encoded PNG storage, not WebView display.
+
+| Source | Operation | New baseline (ms) | Final median (ms) |
+|---|---|---:|---:|
+| JPEG 6000×4000 → 1500×1000 | Open | 204.84 | 184.41 |
+| | First preview | 729.75 | 515.77 |
+| | Unchanged | 46.25 | 45.00 |
+| | Exposure edit | 375.37 | 319.96 |
+| | Edited repeat | 54.80 | 42.81 |
+| Nikon 3040×2014 → 760×504 | Open | 203.21 | 62.27 |
+| | First preview | 1406.56 | 413.15 |
+| | Unchanged | 36.72 | 26.29 |
+| | Red-gain edit | 1473.36 | 458.68 |
+| | Edited repeat | 39.70 | 37.36 |
+| Sony 2816×1872 → 704×468 | Open | 30.95 | 32.83 |
+| | First preview | 1386.44 | 703.98 |
+| | Unchanged | 35.76 | 25.16 |
+| | Red-gain edit | 1072.70 | 321.23 |
+| | Edited repeat | 34.78 | 21.65 |
+
+Final first-preview ranges: JPEG 514–680 ms, Nikon 397–529 ms, Sony 532–741 ms. Edit ranges: JPEG 313–428 ms, Nikon 442–655 ms, Sony 265–513 ms. Warm per-run means: JPEG 43–46 ms, Nikon 18–41 ms, Sony 25–28 ms. Open was not optimized; its large fluctuations, especially Nikon, are not attributed to these changes. Intermediate builds also showed load excursions; the speedups of isolated stages are stronger evidence than any single end-to-end observation.
+
+Cached RAW backend previews are near frame-time at the measured mip, but full RAW parameter recomputation is **not near realtime**. The JPEG edit path is largely unchanged. No native large-image latency or peak-RSS claim is made. A final rerun through the documented Cargo command also passed; loaded Nikon edit/demosaic stages reached 659/231 ms, reinforcing that the medians are not latency guarantees.
+
+### Verification for these iterations
+
+- `env -u DISPLAY cargo test --locked --workspace --all-targets --all-features`: passes, including actual optional GPU checks, graph/cache/checkpoint tests and the new regressions. The initial inherited SSH-forwarded DISPLAY run hung in the existing GPU color-matrix test and was stopped; removing DISPLAY resolved adapter initialization. No GPU behavior was changed to bypass the test.
+- `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features`: passes, 79 library tests and one binary test; two timing benchmarks ignored by default.
+- Desktop `cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features`: passes.
+- Root and desktop `cargo clippy --locked` with all targets/features and `-D warnings`: pass. The initial root Clippy run found the new inline hashing test module before production items; moving it to the file end fixed the finding.
+- `cargo fmt --all -- --check` and `git diff --check`: pass. Only the single source-context line was changed in the desktop `lib.rs`; unrelated desktop formatting was not changed.
+- Focused release color, RAW-node, source-context and preview tests pass. Batched hashing, context-sharing and pixel-equivalence regressions were verified failing before implementation.
+- `pnpm run build:e2e:native`: passes, including frontend build (existing chunk-size warning). `DISPLAY=:0 pnpm run test:e2e:native --spec e2e/native/preview.spec.mjs --mochaOpts.grep 'reattaches a saved image|fits the preview image'`: two real-WebView tests pass. The first run inherited SSH DISPLAY and timed out starting the embedded driver; the local display resolved startup. These tests verify native source restoration, PNG display and scopes on the existing portrait fixture, not large-image latency or RAW-camera coverage. The full native suite was not rerun/cleared.
+- Build-generated E2E capability schemas were restored; no application permission changes are part of the optimization.
+
 ## Remaining work / stopping boundary
 
-RAW open still decodes for metadata and first preview decodes again. Source contexts still copy/hash compressed RAW bytes, and RGB-to-RGBA conversion remains measurable. Parameter edits still recompute affected processing stages. The 2 GiB conservative payload budget is not a measured peak-memory bound; allocator overhead, source state, temporary buffers and GPU allocations are separate. Broader cameras, high-resolution noisy photos, native end-to-end latency and peak RSS remain unmeasured.
+RAW open still decodes for metadata and first preview decodes again. Source contexts still hash compressed RAW bytes, and SceneLinearRGB target conversion still expands full-resolution buffers (DisplayRGB targets now select first). Parameter edits still recompute affected processing stages. The 2 GiB conservative payload budget is not a measured peak-memory bound; allocator overhead, source state, temporary buffers and GPU allocations are separate. Broader cameras, high-resolution noisy photos, native end-to-end latency and peak RSS remain unmeasured.
 
 GPU/codec rewrites and progressive demosaic were deliberately skipped: current desktop previews attach no GPU render context, and no native transfer/decode bottleneck was established. The unrestricted native suite still has workflow/batch/restore failures (initial broad run: 13 pass/10 fail); it is not cleared by six focused preview passes. Standard browser E2E remains blocked by the missing matching chromedriver. Changes are recorded, not committed.

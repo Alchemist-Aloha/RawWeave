@@ -2103,9 +2103,8 @@ fn hash_mosaic(mosaic: &rawweave_raw::Mosaic, hasher: &mut impl Hasher) {
     mosaic.cfa().width().hash(hasher);
     mosaic.cfa().height().hash(hasher);
     mosaic.cfa().colors().hash(hasher);
-    for sample in mosaic.samples() {
-        sample.to_bits().hash(hasher);
-    }
+    // Runtime keys hash the same native-endian float bits in one bounded slice.
+    hasher.write(bytemuck::cast_slice(mosaic.samples()));
 }
 
 fn hash_metadata(metadata: &rawweave_node_api::Metadata, hasher: &mut impl Hasher) {
@@ -2144,21 +2143,13 @@ fn hash_optional_float(value: Option<f32>, hasher: &mut impl Hasher) {
 fn hash_scene_linear(scene: &rawweave_color::SceneLinearRGB, hasher: &mut impl Hasher) {
     scene.dimensions().hash(hasher);
     hash_working_space(&scene.working_space(), hasher);
-    for pixel in scene.pixels() {
-        for channel in pixel {
-            channel.to_bits().hash(hasher);
-        }
-    }
+    hasher.write(bytemuck::cast_slice(scene.pixels()));
 }
 
 fn hash_display(display: &rawweave_color::DisplayRGB, hasher: &mut impl Hasher) {
     display.dimensions().hash(hasher);
     hash_working_space(&display.working_space(), hasher);
-    for pixel in display.pixels() {
-        for channel in pixel {
-            channel.to_bits().hash(hasher);
-        }
-    }
+    hasher.write(bytemuck::cast_slice(display.pixels()));
 }
 
 fn hash_working_space(space: &rawweave_color::WorkingSpace, hasher: &mut impl Hasher) {
@@ -2292,4 +2283,83 @@ fn has_cycle_from<'a>(
     visiting.remove(node);
     visited.insert(node);
     false
+}
+
+#[cfg(test)]
+mod hashing_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingHasher {
+        bytes: Vec<u8>,
+        largest_write: usize,
+    }
+
+    impl Hasher for RecordingHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            self.largest_write = self.largest_write.max(bytes.len());
+            self.bytes.extend_from_slice(bytes);
+        }
+    }
+
+    #[test]
+    fn raw_color_hashing_batches_samples_without_changing_bit_identity() {
+        let frame = rawweave_raw::DeterministicCorpus::bayer_12_bit();
+        let scene = rawweave_color::SceneLinearRGB::from_pixels(
+            2,
+            1,
+            vec![[-0.0, -0.5, 4.0], [0.0, 0.75, 2.0]],
+        )
+        .unwrap();
+        let display = rawweave_color::DisplayRGB::new(
+            scene.dimensions(),
+            scene.pixels().to_vec(),
+            scene.working_space(),
+        )
+        .unwrap();
+        for value in [
+            Value::Mosaic(frame.mosaic().clone()),
+            Value::SceneLinearRGB(scene),
+            Value::DisplayRGB(display),
+        ] {
+            let mut actual = RecordingHasher::default();
+            let mut expected = RecordingHasher::default();
+            let samples: Vec<f32> = match &value {
+                Value::Mosaic(mosaic) => {
+                    mosaic.dimensions().hash(&mut expected);
+                    mosaic.bit_depth().hash(&mut expected);
+                    mosaic.orientation().hash(&mut expected);
+                    mosaic.cfa().width().hash(&mut expected);
+                    mosaic.cfa().height().hash(&mut expected);
+                    mosaic.cfa().colors().hash(&mut expected);
+                    hash_mosaic(mosaic, &mut actual);
+                    mosaic.samples().to_vec()
+                }
+                Value::SceneLinearRGB(scene) => {
+                    scene.dimensions().hash(&mut expected);
+                    hash_working_space(&scene.working_space(), &mut expected);
+                    hash_scene_linear(scene, &mut actual);
+                    scene.pixels().iter().flatten().copied().collect()
+                }
+                Value::DisplayRGB(display) => {
+                    display.dimensions().hash(&mut expected);
+                    hash_working_space(&display.working_space(), &mut expected);
+                    hash_display(display, &mut actual);
+                    display.pixels().iter().flatten().copied().collect()
+                }
+                _ => unreachable!(),
+            };
+            for sample in &samples {
+                sample.to_bits().hash(&mut expected);
+            }
+            assert_eq!(actual.bytes, expected.bytes);
+            assert_eq!(
+                actual.largest_write,
+                std::mem::size_of_val(samples.as_slice())
+            );
+        }
+    }
 }

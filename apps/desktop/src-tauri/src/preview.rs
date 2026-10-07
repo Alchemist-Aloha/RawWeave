@@ -417,8 +417,25 @@ pub fn select_preview_image(
     requested_region: Region,
     mip: u8,
 ) -> Result<Image, String> {
-    let region = image
-        .global_region()
+    select_preview_pixels(
+        image.global_region(),
+        requested_region,
+        mip,
+        image.pixel_format(),
+        image.color_metadata(),
+        |x, y| image.pixel_global(x, y),
+    )
+}
+
+fn select_preview_pixels(
+    bounds: Region,
+    requested_region: Region,
+    mip: u8,
+    pixel_format: rawweave_image::PixelFormat,
+    color_metadata: rawweave_image::ColorMetadata,
+    mut pixel: impl FnMut(u32, u32) -> Option<[f32; 4]>,
+) -> Result<Image, String> {
+    let region = bounds
         .intersection(requested_region)
         .ok_or_else(|| "preview region is outside the evaluated image".to_owned())?;
     let scale = 1_u32.checked_shl(u32::from(mip)).unwrap_or(u32::MAX);
@@ -430,8 +447,7 @@ pub fn select_preview_image(
             let source_x = region.x + (x.saturating_mul(scale)).min(region.width - 1);
             let source_y = region.y + (y.saturating_mul(scale)).min(region.height - 1);
             pixels.push(
-                image
-                    .pixel_global(source_x, source_y)
+                pixel(source_x, source_y)
                     .ok_or_else(|| "preview region pixel is unavailable".to_owned())?,
             );
         }
@@ -440,8 +456,8 @@ pub fn select_preview_image(
         Dimensions::new(width, height),
         (region.x, region.y),
         pixels,
-        image.pixel_format(),
-        image.color_metadata(),
+        pixel_format,
+        color_metadata,
     )
     .map_err(|error| format!("could not create preview region: {error}"))
 }
@@ -460,7 +476,7 @@ fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
             EvaluationContext::default().with_source_image_set(set.as_ref().clone())
         }
         crate::SourceAsset::Raw { bytes, path } => EvaluationContext::default()
-            .with_source_bytes(bytes.as_ref().clone())
+            .with_source_bytes(Arc::clone(bytes))
             .with_source_path(path),
     }
 }
@@ -728,6 +744,53 @@ fn color_value_to_image(value: Value, mask_display: MaskDisplayRequest) -> Resul
     }
 }
 
+// Preserve RGB storage until the requested region/mip is selected, instead of
+// allocating and validating a full-resolution RGBA buffer for every warm preview.
+fn prepare_preview_value(
+    value: Value,
+    mask_display: MaskDisplayRequest,
+) -> Result<(Value, Region), String> {
+    if let Value::DisplayRGB(display) = &value {
+        let dimensions = display.dimensions();
+        return Ok((
+            value,
+            Region::new(0, 0, dimensions.width, dimensions.height),
+        ));
+    }
+    let image = color_value_to_image(value, mask_display)?;
+    let bounds = image.global_region();
+    Ok((Value::Image(image), bounds))
+}
+
+fn select_preview_value(
+    value: Value,
+    requested_region: Region,
+    mip: u8,
+    mask_display: MaskDisplayRequest,
+) -> Result<Image, String> {
+    if let Value::DisplayRGB(display) = value {
+        let dimensions = display.dimensions();
+        select_preview_pixels(
+            Region::new(0, 0, dimensions.width, dimensions.height),
+            requested_region,
+            mip,
+            Default::default(),
+            Default::default(),
+            |x, y| {
+                display
+                    .pixel(x, y)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
+            },
+        )
+    } else {
+        select_preview_image(
+            &color_value_to_image(value, mask_display)?,
+            requested_region,
+            mip,
+        )
+    }
+}
+
 pub fn render_preview(
     manager: &PreviewManager,
     editor: &EditorCore,
@@ -771,17 +834,17 @@ pub fn render_preview(
             .evaluate(&request.node_id, &request.output_port, probe_context)
             .map_err(|error| format!("preview full-frame evaluation failed: {error}"))?;
         trace_stage("probe evaluation");
-        let full_frame =
-            color_value_to_image(full_frame, request.mask_display).map_err(|error| {
+        let (full_frame, full_bounds) = prepare_preview_value(full_frame, request.mask_display)
+            .map_err(|error| {
                 format!(
                     "preview output '{}:{}' is not displayable: {error}",
                     request.node_id, request.output_port
                 )
             })?;
         trace_stage("display conversion");
-        let full_width = full_frame.width();
-        let full_height = full_frame.height();
-        let full_origin = full_frame.origin();
+        let full_width = full_bounds.width;
+        let full_height = full_bounds.height;
+        let full_origin = (full_bounds.x, full_bounds.y);
         let requested_region = Region::new(
             full_origin
                 .0
@@ -817,24 +880,18 @@ pub fn render_preview(
             });
         // The probe already used the requested mip/quality. With identical
         // bounds and the default tile, a regional pass would repeat the work.
-        let whole_image_request = requested_region == full_frame.global_region()
-            && request.tile.x == 0
-            && request.tile.y == 0;
+        let whole_image_request =
+            requested_region == full_bounds && request.tile.x == 0 && request.tile.y == 0;
         let image = if full_frame_target || whole_image_request {
             full_frame
         } else {
-            let value = editor
+            editor
                 .evaluate(&request.node_id, &request.output_port, context)
-                .map_err(|error| format!("preview evaluation failed: {error}"))?;
-            color_value_to_image(value, request.mask_display).map_err(|error| {
-                format!(
-                    "preview output '{}:{}' is not displayable: {error}",
-                    request.node_id, request.output_port
-                )
-            })?
+                .map_err(|error| format!("preview evaluation failed: {error}"))?
         };
         trace_stage("regional evaluation");
-        let image = select_preview_image(&image, requested_region, request.mip)?;
+        let image =
+            select_preview_value(image, requested_region, request.mip, request.mask_display)?;
         trace_stage("preview selection");
         let latest_revision = current_editor
             .lock()
@@ -890,6 +947,55 @@ mod tests {
     use rawweave_image::{
         ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
     };
+
+    #[test]
+    fn display_preview_selects_before_allocating_rgba_and_preserves_png_pixels() {
+        let display = rawweave_color::DisplayRGB::new(
+            Dimensions::new(9, 7),
+            (0..63)
+                .map(|index| [index as f32 / 63.0, -0.25, 1.5])
+                .collect(),
+            WorkingSpace::Srgb,
+        )
+        .unwrap();
+        let value = Value::DisplayRGB(display);
+        let (prepared, bounds) =
+            prepare_preview_value(value.clone(), MaskDisplayRequest::Grayscale).unwrap();
+        assert!(
+            matches!(prepared, Value::DisplayRGB(_)),
+            "RGB must remain unexpanded until selection"
+        );
+        assert_eq!(bounds, Region::new(0, 0, 9, 7));
+        for region in [bounds, Region::new(2, 1, 5, 4), Region::new(7, 5, 9, 7)] {
+            for mip in [0, 1, 2, 6] {
+                let reference = select_preview_image(
+                    &color_value_to_image(value.clone(), MaskDisplayRequest::Grayscale).unwrap(),
+                    region,
+                    mip,
+                )
+                .unwrap();
+                let selected = select_preview_value(
+                    prepared.clone(),
+                    region,
+                    mip,
+                    MaskDisplayRequest::Grayscale,
+                )
+                .unwrap();
+                assert_eq!(selected, reference);
+                assert_eq!(
+                    encode_png(&selected).unwrap(),
+                    encode_png(&reference).unwrap()
+                );
+            }
+        }
+        assert!(select_preview_value(
+            prepared,
+            Region::new(10, 0, 1, 1),
+            2,
+            MaskDisplayRequest::Grayscale
+        )
+        .is_err());
+    }
 
     #[test]
     fn whole_image_preview_reuses_probe_but_partial_regions_still_evaluate_regionally() {

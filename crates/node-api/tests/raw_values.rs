@@ -1,5 +1,15 @@
 use rawweave_color::SceneLinearRGB;
-use rawweave_node_api::Value;
+use rawweave_node_api::{EvaluationContext, Value};
+
+#[test]
+fn cloned_contexts_share_source_bytes_instead_of_copying_raw_files() {
+    let context = EvaluationContext::default().with_source_bytes(vec![1, 2, 3]);
+    let cloned = context.clone();
+    let original_bytes = context.source_bytes.as_ref().unwrap();
+    let cloned_bytes = cloned.source_bytes.as_ref().unwrap();
+    assert_eq!(original_bytes.as_ptr(), cloned_bytes.as_ptr());
+    assert_eq!(original_bytes.as_slice(), cloned_bytes.as_slice());
+}
 use rawweave_raw::{CameraProfile, DeterministicCorpus, EmbeddedPreview, LensProfile};
 
 #[test]

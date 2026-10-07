@@ -409,9 +409,15 @@ impl NodeInstance for Demosaic {
                 .pixel_count()
                 .map_err(|_| NodeError::Message("demosaic dimensions overflow".to_owned()))?,
         );
+        let bayer = bayer_channels(&mosaic);
         for y in 0..dimensions.height {
             for x in 0..dimensions.width {
-                pixels.push(demosaic_pixel(&mosaic, x, y)?);
+                let pixel =
+                    bayer.and_then(|channels| bayer_demosaic_pixel(&mosaic, channels, x, y));
+                pixels.push(match pixel {
+                    Some(pixel) => pixel,
+                    None => demosaic_pixel(&mosaic, x, y)?,
+                });
             }
         }
         let scene = SceneLinearRGB::new(dimensions, pixels, WorkingSpace::CameraNative)
@@ -672,6 +678,57 @@ fn cfa_channel(color: CfaColor) -> Option<usize> {
         CfaColor::Blue => Some(2),
         CfaColor::Extra | CfaColor::Unknown => None,
     }
+}
+
+// Only recognize the four ordinary Bayer layouts; other CFAs retain the general search.
+fn bayer_channels(mosaic: &Mosaic) -> Option<[usize; 4]> {
+    if mosaic.cfa().width() != 2 || mosaic.cfa().height() != 2 {
+        return None;
+    }
+    let colors = mosaic.cfa().colors();
+    let channels = [
+        cfa_channel(*colors.first()?)?,
+        cfa_channel(*colors.get(1)?)?,
+        cfa_channel(*colors.get(2)?)?,
+        cfa_channel(*colors.get(3)?)?,
+    ];
+    match channels {
+        [0, 1, 1, 2] | [2, 1, 1, 0] | [1, 0, 2, 1] | [1, 2, 0, 1] => Some(channels),
+        _ => None,
+    }
+}
+
+// Interior Bayer interpolation has fixed neighbors. Keep the reference's
+// row-major summation order (including its initial +0) for bitwise equality.
+fn bayer_demosaic_pixel(mosaic: &Mosaic, channels: [usize; 4], x: u32, y: u32) -> Option<[f32; 3]> {
+    let dimensions = mosaic.dimensions();
+    if x == 0
+        || y == 0
+        || x >= dimensions.width.saturating_sub(1)
+        || y >= dimensions.height.saturating_sub(1)
+    {
+        return None;
+    }
+    let width = usize::try_from(dimensions.width).ok()?;
+    let index = usize::try_from(y)
+        .ok()?
+        .checked_mul(width)?
+        .checked_add(usize::try_from(x).ok()?)?;
+    let top = mosaic.samples().get(index - width - 1..index - width + 2)?;
+    let middle = mosaic.samples().get(index - 1..index + 2)?;
+    let bottom = mosaic.samples().get(index + width - 1..index + width + 2)?;
+    let phase = usize::try_from((y % 2) * 2 + x % 2).ok()?;
+    let own = channels[phase];
+    let mut pixel = [0.0; 3];
+    pixel[own] = middle[1];
+    if own == 1 {
+        pixel[channels[phase ^ 1]] = (0.0 + middle[0] + middle[2]) / 2.0;
+        pixel[channels[phase ^ 2]] = (0.0 + top[1] + bottom[1]) / 2.0;
+    } else {
+        pixel[1] = (0.0 + top[1] + middle[0] + middle[2] + bottom[1]) / 4.0;
+        pixel[channels[phase ^ 3]] = (0.0 + top[0] + top[2] + bottom[0] + bottom[2]) / 4.0;
+    }
+    Some(pixel)
 }
 
 /// Search each ring once for all missing channels, retaining the reference
@@ -942,6 +999,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn bayer_fast_path_matches_reference_for_all_phases_and_borders() {
+        use rawweave_raw::CfaPattern;
+        let frame = DeterministicCorpus::bayer_12_bit();
+        for colors in [
+            vec![
+                CfaColor::Red,
+                CfaColor::Green,
+                CfaColor::Green,
+                CfaColor::Blue,
+            ],
+            vec![
+                CfaColor::Blue,
+                CfaColor::Green,
+                CfaColor::Green,
+                CfaColor::Red,
+            ],
+            vec![
+                CfaColor::Green,
+                CfaColor::Red,
+                CfaColor::Blue,
+                CfaColor::Green,
+            ],
+            vec![
+                CfaColor::Green,
+                CfaColor::Blue,
+                CfaColor::Red,
+                CfaColor::Green,
+            ],
+        ] {
+            let cfa = CfaPattern::new(2, 2, colors).unwrap();
+            for (width, height) in [(2, 2), (2, 7), (7, 2), (3, 3), (9, 8)] {
+                let mosaic = Mosaic::new(
+                    rawweave_image::Dimensions::new(width, height),
+                    (0..width * height)
+                        .map(|index| {
+                            [-0.0, -0.5, 0.75, 10_000.0, f32::MAX / 8.0][index as usize % 5]
+                        })
+                        .collect(),
+                    12,
+                    cfa.clone(),
+                    frame.mosaic().orientation(),
+                )
+                .unwrap();
+                let channels = bayer_channels(&mosaic).unwrap();
+                for y in 0..height {
+                    for x in 0..width {
+                        let fast = bayer_demosaic_pixel(&mosaic, channels, x, y);
+                        assert_eq!(
+                            fast.is_some(),
+                            x > 0 && y > 0 && x + 1 < width && y + 1 < height
+                        );
+                        if let Some(fast) = fast {
+                            assert_eq!(
+                                fast.map(f32::to_bits),
+                                demosaic_pixel(&mosaic, x, y).unwrap().map(f32::to_bits)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bayer_channels(DeterministicCorpus::xtrans_14_bit().mosaic()).is_none());
+        let unusual = Mosaic::new(
+            rawweave_image::Dimensions::new(2, 2),
+            vec![0.5; 4],
+            12,
+            CfaPattern::new(
+                2,
+                2,
+                vec![
+                    CfaColor::Red,
+                    CfaColor::Red,
+                    CfaColor::Green,
+                    CfaColor::Blue,
+                ],
+            )
+            .unwrap(),
+            frame.mosaic().orientation(),
+        )
+        .unwrap();
+        assert!(bayer_channels(&unusual).is_none());
     }
 
     #[test]
