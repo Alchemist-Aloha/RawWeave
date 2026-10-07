@@ -27,14 +27,15 @@ function node(id: string, outputs: Array<{ id: string; name: string; dataType: s
 afterEach(() => vi.useRealTimers());
 
 describe('Viewer', () => {
-  it('passes DPR and displays a mip bitmap at full-coordinate size without multiplying zoom', async () => {
+  it('passes DPR and displays coarse/refined bitmaps at full-coordinate size without multiplying zoom', async () => {
+    vi.useFakeTimers();
     const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(750);
     const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
     const dpr = vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(2);
     const requestPreview = vi.fn<PreviewTransport['requestPreview']>(async (request) => ({
       requestId: request.requestId, revision: request.revision,
       url: `rawweave-preview://localhost/preview/${request.requestId}.png`,
-      width: 1500, height: 1000, fullWidth: 6000, fullHeight: 4000, mimeType: 'image/png',
+      width: Math.ceil(6000 / 2 ** request.mip), height: Math.ceil(4000 / 2 ** request.mip), fullWidth: 6000, fullHeight: 4000, mimeType: 'image/png',
     }));
     const controller = new ViewerController({ requestPreview, cancelPreview: async () => undefined, releasePreview: async () => undefined });
     controller.setSourceDimensions({ width: 6000, height: 4000 });
@@ -51,7 +52,7 @@ describe('Viewer', () => {
     await act(async () => root.render(<Viewer controller={controller} nodes={[output]} revision={1}
       source={{ kind: 'ordinary', width: 6000, height: 4000, revision: 1, metadata: null }}
       geometryEditing={{ node: crop, target: editingTarget, onChange, onCancel: () => undefined }} />));
-    expect(requestPreview.mock.calls.at(-1)?.[0]).toMatchObject({ mip: 2, region: { x: 0, y: 0, width: 6000, height: 4000 } });
+    expect(requestPreview.mock.calls.at(-1)?.[0]).toMatchObject({ mip: 3, region: { x: 0, y: 0, width: 6000, height: 4000 } });
     const image = host.querySelector<HTMLImageElement>('.viewer-pane__image')!;
     expect(image.width).toBe(6000);
     expect(image.height).toBe(4000);
@@ -61,9 +62,13 @@ describe('Viewer', () => {
     const overlay = host.querySelector('.geometry-overlay')!;
     const pointer = (type: string, x: number, y: number) => new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
     await act(async () => overlay.dispatchEvent(pointer('pointerdown', 75, 50)));
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(host.querySelector('.geometry-overlay')).toBe(overlay);
     await act(async () => overlay.dispatchEvent(pointer('pointerup', 375, 250)));
     expect(onChange).toHaveBeenCalledWith({ x: 600, y: 400, width: 2400, height: 1600 });
     await act(async () => controller.viewAt100('A'));
+    expect(requestPreview.mock.calls.at(-1)?.[0].mip).toBe(1);
+    await act(async () => vi.advanceTimersByTimeAsync(100));
     expect(requestPreview.mock.calls.at(-1)?.[0].mip).toBe(0);
     expect(image.style.transform).toContain('scale(1)');
     await act(async () => root.unmount());

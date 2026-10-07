@@ -43,7 +43,7 @@ export interface NodeDescriptor {
   lazyInputs?: LazyInputGate[];
 }
 
-export type ExecutionCapability = 'CPU' | 'GPU' | 'TileLocal' | 'RegionAware' | 'FullFrame';
+export type ExecutionCapability = 'CPU' | 'GPU' | 'TileLocal' | 'RegionAware' | 'FullFrame' | 'MipInvariant' | 'PointwisePreview';
 
 export interface PlatformNode {
   id: string;

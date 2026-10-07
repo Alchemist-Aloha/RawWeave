@@ -484,9 +484,18 @@ fn evaluation_context(source: &crate::SourceAsset) -> EvaluationContext {
 fn preview_probe_context(
     source: &crate::SourceAsset,
     request: &PreviewRequest,
+    editor: &EditorCore,
 ) -> EvaluationContext {
+    let proxy = matches!(source, crate::SourceAsset::Ordinary(image)
+        if request.region.x == 0 && request.region.y == 0
+        && request.region.width == image.width() && request.region.height == image.height())
+        && request.tile.x == 0
+        && request.tile.y == 0
+        && !matches!(request.quality, PreviewQualityRequest::Final)
+        && editor.graph().supports_source_mip(&request.node_id);
     evaluation_context(source)
         .with_mip_level(request.mip)
+        .with_source_image_mip(if proxy { request.mip } else { 0 })
         .with_quality(request.quality.into())
 }
 
@@ -750,8 +759,19 @@ fn prepare_preview_value(
     value: Value,
     mask_display: MaskDisplayRequest,
 ) -> Result<(Value, Region), String> {
+    if let Value::SceneLinearRGB(scene) = &value {
+        let display = SrgbDisplayTransform
+            .transform(scene)
+            .or_else(|_| {
+                SrgbDisplayTransform.transform(&scene.with_working_space(WorkingSpace::Srgb))
+            })
+            .map_err(|error| format!("could not convert scene preview: {error}"))?;
+        return prepare_preview_value(Value::DisplayRGB(display), mask_display);
+    }
     if let Value::DisplayRGB(display) = &value {
-        let dimensions = display.dimensions();
+        let dimensions = display
+            .sampling()
+            .map_or(display.dimensions(), |sampling| sampling.full_dimensions);
         return Ok((
             value,
             Region::new(0, 0, dimensions.width, dimensions.height),
@@ -768,8 +788,17 @@ fn select_preview_value(
     mip: u8,
     mask_display: MaskDisplayRequest,
 ) -> Result<Image, String> {
+    if let Value::SceneLinearRGB(_) = &value {
+        let (prepared, _) = prepare_preview_value(value, mask_display)?;
+        return select_preview_value(prepared, requested_region, mip, mask_display);
+    }
     if let Value::DisplayRGB(display) = value {
-        let dimensions = display.dimensions();
+        let sampling = display.sampling();
+        if sampling.is_some_and(|sampling| mip < sampling.mip) {
+            return Err("evaluated preview is coarser than the requested mip".to_owned());
+        }
+        let dimensions = sampling.map_or(display.dimensions(), |sampling| sampling.full_dimensions);
+        let scale = sampling.map_or(1, |sampling| 1_u32 << sampling.mip);
         select_preview_pixels(
             Region::new(0, 0, dimensions.width, dimensions.height),
             requested_region,
@@ -778,7 +807,7 @@ fn select_preview_value(
             Default::default(),
             |x, y| {
                 display
-                    .pixel(x, y)
+                    .pixel(x / scale, y / scale)
                     .map(|pixel| [pixel[0], pixel[1], pixel[2], 1.0])
             },
         )
@@ -828,7 +857,12 @@ pub fn render_preview(
         let source = source.ok_or_else(|| {
             "preview source image unavailable; open an image before rendering".to_owned()
         })?;
-        let probe_context = preview_probe_context(&source, &request);
+        let probe_context = preview_probe_context(&source, &request, editor);
+        let proxy_mip = probe_context.source_image_mip();
+        let proxy_bounds = match &source {
+            crate::SourceAsset::Ordinary(image) if proxy_mip > 0 => Some(image.global_region()),
+            _ => None,
+        };
         trace_stage("source context");
         let full_frame = editor
             .evaluate(&request.node_id, &request.output_port, probe_context)
@@ -842,6 +876,7 @@ pub fn render_preview(
                 )
             })?;
         trace_stage("display conversion");
+        let full_bounds = proxy_bounds.unwrap_or(full_bounds);
         let full_width = full_bounds.width;
         let full_height = full_bounds.height;
         let full_origin = (full_bounds.x, full_bounds.y);
@@ -890,8 +925,11 @@ pub fn render_preview(
                 .map_err(|error| format!("preview evaluation failed: {error}"))?
         };
         trace_stage("regional evaluation");
-        let image =
-            select_preview_value(image, requested_region, request.mip, request.mask_display)?;
+        let image = if proxy_mip > 0 {
+            color_value_to_image(image, request.mask_display)?
+        } else {
+            select_preview_value(image, requested_region, request.mip, request.mask_display)?
+        };
         trace_stage("preview selection");
         let latest_revision = current_editor
             .lock()
@@ -947,6 +985,147 @@ mod tests {
     use rawweave_image::{
         ConfidenceMap, DepthMap, Dimensions, Image, LabelMap, Mask, MaskSet, Region, RegionSet,
     };
+
+    #[test]
+    fn pointwise_source_proxy_reduces_graph_work_but_geometry_chains_stay_full_size() {
+        let mut editor = EditorCore::default();
+        crate::build_ordinary_workflow(&mut editor).unwrap();
+        editor.add_node("exposure", "core.exposure").unwrap();
+        editor
+            .disconnect("input", "image", "output", "image")
+            .unwrap();
+        editor
+            .connect("input", "image", "exposure", "image")
+            .unwrap();
+        editor
+            .connect("exposure", "image", "output", "image")
+            .unwrap();
+        let image = Image::from_pixels_with_origin(
+            Dimensions::new(9, 7),
+            (11, 13),
+            (0..63)
+                .map(|index| [index as f32 / 63.0, 0.5, 0.25, 1.0])
+                .collect(),
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let source = crate::SourceAsset::Ordinary(image.clone());
+        let request = PreviewRequest {
+            request_id: "proxy".to_owned(),
+            revision: editor.graph().revision(),
+            node_id: "output".to_owned(),
+            output_port: "image".to_owned(),
+            quality: PreviewQualityRequest::Preview,
+            region: PreviewRegionRequest {
+                x: 0,
+                y: 0,
+                width: 9,
+                height: 7,
+            },
+            tile: PreviewTileRequest { x: 0, y: 0 },
+            mip: 2,
+            mask_display: MaskDisplayRequest::Grayscale,
+        };
+        let context = preview_probe_context(&source, &request, &editor);
+        assert_eq!(context.source_image_mip(), 2);
+        let value = editor.evaluate("output", "image", context).unwrap();
+        let Value::Image(proxy) = value else { panic!() };
+        assert_eq!(proxy.dimensions(), Dimensions::new(3, 2));
+        let full = editor
+            .evaluate(
+                "output",
+                "image",
+                EvaluationContext::with_source_image(image.clone()).with_mip_level(2),
+            )
+            .unwrap();
+        let Value::Image(full) = full else { panic!() };
+        assert_eq!(
+            full.dimensions(),
+            image.dimensions(),
+            "proxy and full evaluations must not alias cache entries"
+        );
+        let manager = PreviewManager::default();
+        let current = Arc::new(Mutex::new(editor.clone()));
+        let metadata = render_preview(
+            &manager,
+            &editor,
+            &current,
+            Some(source.clone()),
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                metadata.full_width,
+                metadata.full_height,
+                metadata.width,
+                metadata.height
+            ),
+            (9, 7, 3, 2)
+        );
+        assert_eq!((metadata.origin_x, metadata.origin_y), (11, 13));
+        let bytes = manager.store.get(&preview_path("proxy")).unwrap();
+        assert_eq!(
+            bytes,
+            encode_png(&select_preview_image(&image, image.global_region(), 2).unwrap()).unwrap()
+        );
+        editor.add_node("crop", "core.crop").unwrap();
+        editor
+            .disconnect("exposure", "image", "output", "image")
+            .unwrap();
+        editor
+            .connect("exposure", "image", "crop", "image")
+            .unwrap();
+        editor.connect("crop", "image", "output", "image").unwrap();
+        assert_eq!(
+            preview_probe_context(&source, &request, &editor).source_image_mip(),
+            0
+        );
+        let mut partial = request.clone();
+        partial.region.width = 4;
+        assert_eq!(
+            preview_probe_context(&source, &partial, &editor).source_image_mip(),
+            0
+        );
+    }
+
+    #[test]
+    fn reduced_rgb_preview_retains_full_bounds_without_double_downsampling() {
+        let sampling = rawweave_color::PreviewSampling {
+            full_dimensions: Dimensions::new(9, 7),
+            mip: 2,
+        };
+        let display = rawweave_color::DisplayRGB::new(
+            Dimensions::new(3, 2),
+            (0..6).map(|index| [index as f32 / 6.0; 3]).collect(),
+            WorkingSpace::Srgb,
+        )
+        .unwrap()
+        .with_sampling(Some(sampling))
+        .unwrap();
+        let (value, bounds) =
+            prepare_preview_value(Value::DisplayRGB(display), MaskDisplayRequest::Grayscale)
+                .unwrap();
+        assert_eq!(bounds, Region::new(0, 0, 9, 7));
+        let selected =
+            select_preview_value(value.clone(), bounds, 2, MaskDisplayRequest::Grayscale).unwrap();
+        assert_eq!(selected.dimensions(), Dimensions::new(3, 2));
+        assert_eq!(
+            selected.pixel(2, 1),
+            Some([5.0 / 6.0, 5.0 / 6.0, 5.0 / 6.0, 1.0])
+        );
+        let selected = select_preview_value(
+            value.clone(),
+            Region::new(4, 4, 5, 3),
+            2,
+            MaskDisplayRequest::Grayscale,
+        )
+        .unwrap();
+        assert_eq!(selected.dimensions(), Dimensions::new(2, 1));
+        assert_eq!(selected.origin(), (4, 4));
+        assert!(select_preview_value(value, bounds, 1, MaskDisplayRequest::Grayscale).is_err());
+    }
 
     #[test]
     fn display_preview_selects_before_allocating_rgba_and_preserves_png_pixels() {
@@ -1067,8 +1246,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             editor.graph().render_cache().lock().unwrap().len(),
-            4,
-            "nondefault tiles must keep their regional evaluation identity"
+            6,
+            "proxy, full probe and nondefault regional tiles must keep distinct cache identities"
         );
         request.tile.x = 0;
         request.request_id = "part".to_owned();
@@ -1262,7 +1441,7 @@ mod tests {
             mask_display: MaskDisplayRequest::Grayscale,
         };
 
-        let context = preview_probe_context(&source, &request);
+        let context = preview_probe_context(&source, &request, &EditorCore::default());
 
         assert_eq!(context.mip_level(), 2);
         assert_eq!(context.quality(), PreviewQuality::Draft);
@@ -1754,7 +1933,8 @@ mod tests {
             })
             .unwrap_or(2);
         assert!(mip <= 6, "benchmark mip must be 0..=6");
-        eprintln!("BENCH full-frame requests at mip {mip}");
+        let progressive = std::env::var("RAWWEAVE_BENCHMARK_PROGRESSIVE").as_deref() == Ok("1");
+        eprintln!("BENCH full-frame requests at mip {mip}, progressive={progressive}");
         let directory = tempfile::tempdir().unwrap();
         let jpeg = directory.path().join("synthetic-24mp.jpg");
         image::RgbImage::from_fn(6000, 4000, |x, y| {
@@ -1822,7 +2002,11 @@ mod tests {
                         height: metadata.height,
                     },
                     tile: PreviewTileRequest { x: 0, y: 0 },
-                    mip,
+                    mip: if progressive && matches!(iteration, 0 | 3) {
+                        mip.saturating_add(1).min(6)
+                    } else {
+                        mip
+                    },
                     mask_display: MaskDisplayRequest::Grayscale,
                 };
                 let start = Instant::now();
@@ -1938,8 +2122,9 @@ mod tests {
             mask_display: MaskDisplayRequest::Grayscale,
         };
 
-        for iteration in 0..2 {
+        for (iteration, mip) in [0, 2, 3, 0].into_iter().enumerate() {
             let mut repeated = request.clone();
+            repeated.mip = mip;
             repeated.request_id = format!("count-raw-decodes-{iteration}");
             render_preview(
                 &PreviewManager::default(),

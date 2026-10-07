@@ -39,6 +39,47 @@ describe('real Tauri preview', () => {
     await expect($('section[aria-label="Image scopes"]')).toBeDisplayed();
   });
 
+  it('progressively replaces a coarse image without changing full-size coordinates', async () => {
+    await $('.viewer-pane__image').waitForDisplayed({ timeout: 20_000 });
+    await browser.pause(500);
+    await browser.execute(() => {
+      window.__progressiveInitial = document.querySelector('.viewer-pane__image').src;
+      window.__progressiveFrames = [];
+      window.__progressiveStart = performance.now();
+      const record = () => {
+        const image = document.querySelector('.viewer-pane__image');
+        if (!image || !image.complete || !image.naturalWidth || image.src === window.__progressiveInitial) return;
+        if (window.__progressiveFrames.at(-1)?.url === image.src) return;
+        window.__progressiveFrames.push({ url: image.src, width: image.naturalWidth, height: image.naturalHeight,
+          fullWidth: image.width, fullHeight: image.height, elapsed: performance.now() - window.__progressiveStart });
+      };
+      window.__progressiveObserver = new MutationObserver(() => {
+        record();
+        document.querySelector('.viewer-pane__image')?.addEventListener('load', record, { once: true });
+      });
+      window.__progressiveObserver.observe(document.querySelector('section[aria-label="Image viewers"]'),
+        { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
+    });
+    try {
+      // A fixed 100% zoom prevents asynchronous viewport layout from changing
+      // the desired detail level during the two-stage regression.
+      await $('.viewer-pane').$('button*=100%').click();
+      await browser.waitUntil(() => browser.execute(() => window.__progressiveFrames.length >= 2), { timeout: 20_000 });
+      const frames = await browser.execute(() => window.__progressiveFrames);
+      const coarse = frames[0];
+      const fine = frames[1];
+      expect(fine.width).toBeGreaterThan(coarse.width);
+      expect(fine.width).toBeGreaterThanOrEqual(coarse.width * 2 - 1);
+      expect(fine.height).toBeGreaterThanOrEqual(coarse.height * 2 - 1);
+      expect([fine.fullWidth, fine.fullHeight]).toEqual([coarse.fullWidth, coarse.fullHeight]);
+      await expect($('.viewer-pane__image')).toHaveAttribute('src', fine.url);
+      console.log('NATIVE progressive warm debug fixture', frames);
+    } finally {
+      await browser.execute(() => window.__progressiveObserver.disconnect());
+      await $('.viewer-pane').$('button*=Fit').click();
+    }
+  });
+
   it('keeps a rendered preview on screen while the graph and layout change', async () => {
     const image = await $('.viewer-pane__image');
     await image.waitForDisplayed({ timeout: 20_000 });

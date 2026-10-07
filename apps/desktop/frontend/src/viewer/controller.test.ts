@@ -60,13 +60,74 @@ function result(
 }
 
 describe('viewer controller', () => {
+  it('shows a coarse large-image frame then refines after quiet time and cancels obsolete refinement', async () => {
+    vi.useFakeTimers();
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 6000, height: 4000 });
+    viewer.setViewport('A', { width: 1500, height: 1000 });
+    viewer.setTarget('A', target('output'));
+    const coarse = transport.requests[0];
+    expect(coarse.mip).toBe(3);
+    transport.pending.get(coarse.requestId)!.resolve(result(coarse, { width: 750, height: 500, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    expect(viewer.state.panes.A.imageUrl).toBe(result(coarse).url);
+    await vi.advanceTimersByTimeAsync(100);
+    const refined = transport.requests[1];
+    expect(refined.mip).toBe(2);
+    expect(viewer.state.panes.A.imageUrl).toBe(result(coarse).url);
+    transport.pending.get(refined.requestId)!.resolve(result(refined, { width: 1500, height: 1000, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    expect(transport.releases).toContain(result(coarse).url);
+    viewer.setRevision(1);
+    const edited = transport.requests.at(-1)!;
+    expect(edited.mip).toBe(3);
+    transport.pending.get(edited.requestId)!.resolve(result(edited, { width: 750, height: 500, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    viewer.setRevision(2);
+    const count = transport.requests.length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport.requests).toHaveLength(count);
+    const current = transport.requests.at(-1)!;
+    transport.pending.get(current.requestId)!.resolve(result(current, { width: 750, height: 500, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    await viewer.cancel('A');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport.requests).toHaveLength(count);
+    expect(viewer.state.panes.A.imageUrl).toBe(result(current).url);
+    viewer.clearTargets();
+    vi.useRealTimers();
+  });
+  it('reuses the coarse frame when a resized viewport no longer needs the in-flight refinement', async () => {
+    vi.useFakeTimers();
+    const transport = new FakeTransport();
+    const viewer = new ViewerController(transport);
+    viewer.setSourceDimensions({ width: 6000, height: 4000 });
+    viewer.setViewport('A', { width: 1500, height: 1000 });
+    viewer.setTarget('A', target('output'));
+    const coarse = transport.requests[0];
+    transport.pending.get(coarse.requestId)!.resolve(result(coarse, { width: 750, height: 500, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(100);
+    const fine = transport.requests[1];
+    viewer.setViewport('A', { width: 750, height: 500 });
+    expect(transport.requests).toHaveLength(2);
+    expect(transport.cancellations).toContain(fine.requestId);
+    expect(viewer.state.panes.A.imageUrl).toBe(result(coarse).url);
+    expect(viewer.state.panes.A.status).toBe('ready');
+    transport.pending.get(fine.requestId)!.resolve(result(fine, { width: 1500, height: 1000, fullWidth: 6000, fullHeight: 4000 }));
+    await Promise.resolve();
+    expect(transport.releases).toContain(result(fine).url);
+    viewer.clearTargets();
+  });
+
   it.each([[1, 3], [2, 2]])('fits 6000x4000 at DPR %i using mip %i and full coordinates', (dpr, mip) => {
     const transport = new FakeTransport();
     const viewer = new ViewerController(transport);
     viewer.setSourceDimensions({ width: 6000, height: 4000 });
     viewer.setViewport('A', { width: 750, height: 500 }, dpr);
     viewer.setTarget('A', target('output'));
-    expect(transport.requests[0]).toMatchObject({ mip, region: { x: 0, y: 0, width: 6000, height: 4000 } });
+    expect(transport.requests[0]).toMatchObject({ mip: mip + 1, region: { x: 0, y: 0, width: 6000, height: 4000 } });
     expect(viewer.state.panes.A.displayScale).toBe(0.125);
   });
 
@@ -82,9 +143,9 @@ describe('viewer controller', () => {
     }
     expect(transport.requests).toHaveLength(1);
     viewer.setViewport('A', { width: 750, height: 500 });
-    expect(transport.requests.at(-1)?.mip).toBe(3);
+    expect(transport.requests.at(-1)?.mip).toBe(4);
     viewer.setViewport('A', { width: 750, height: 500 }, 2);
-    expect(transport.requests.at(-1)?.mip).toBe(2);
+    expect(transport.requests.at(-1)?.mip).toBe(3);
   });
 
   it('coalesces rapid same-mip zooms and upgrades to 100% without blanking the old frame', async () => {
@@ -105,7 +166,7 @@ describe('viewer controller', () => {
     expect(transport.requests).toHaveLength(1);
     viewer.viewAt100('A');
     const upgrade = transport.requests[1];
-    expect(upgrade.mip).toBe(0);
+    expect(upgrade.mip).toBe(1);
     expect(viewer.state.panes.A.imageUrl).toBe(result(first).url);
     viewer.setZoom('A', 1.1);
     viewer.setZoom('A', 1.3);
@@ -130,7 +191,7 @@ describe('viewer controller', () => {
     viewer.setViewport('A', { width: 375, height: 250 });
     viewer.viewAt100('A');
     viewer.fitToWindow('A');
-    expect(transport.requests.map((request) => request.mip)).toEqual([3, 2, 4, 0, 4]);
+    expect(transport.requests.map((request) => request.mip)).toEqual([4, 3, 5, 1, 5]);
   });
 
   it.each(['100%', 'custom'] as const)('corrects resized output coordinates in %s mode and releases the incomplete frame', async (mode) => {

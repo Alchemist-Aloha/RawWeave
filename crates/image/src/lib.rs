@@ -118,6 +118,8 @@ pub enum ImageError {
     },
     #[error("image dimensions are too large")]
     DimensionsOverflow,
+    #[error("image preview mip must be in 0..=6")]
+    InvalidPreviewMip,
     #[error("image origin {origin:?} overflows dimensions {dimensions:?}")]
     OriginOverflow {
         origin: (u32, u32),
@@ -1534,6 +1536,35 @@ impl Image {
 
     pub fn pixels(&self) -> &[Pixel] {
         self.pixels.as_slice()
+    }
+
+    /// Sample an origin-anchored source proxy for a verified pointwise preview.
+    /// Coordinates/parameters for geometry nodes must not use this proxy.
+    pub fn sample_mip(&self, mip: u8) -> Result<Self, ImageError> {
+        if mip > 6 {
+            return Err(ImageError::InvalidPreviewMip);
+        }
+        if mip == 0 {
+            return Ok(self.clone());
+        }
+        let stride = 1_u32 << mip;
+        let dimensions = Dimensions::new(self.width.div_ceil(stride), self.height.div_ceil(stride));
+        let mut pixels = Vec::with_capacity(dimensions.pixel_count()?);
+        for y in 0..dimensions.height {
+            for x in 0..dimensions.width {
+                pixels.push(
+                    self.pixel(x * stride, y * stride)
+                        .ok_or(ImageError::DimensionsOverflow)?,
+                );
+            }
+        }
+        Self::from_pixels_with_origin(
+            dimensions,
+            self.origin(),
+            pixels,
+            self.pixel_format,
+            self.color_metadata,
+        )
     }
 
     /// Hash immutable pixel bits once per shared backing buffer. Runtime cache

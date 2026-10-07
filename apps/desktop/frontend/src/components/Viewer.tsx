@@ -426,7 +426,7 @@ function Pane({ geometryEditing, viewer, pane, options, controller, paintedNode,
         {geometryEditing && pane.status === 'ready' && pane.imageUrl && geometrySize
           && pane.target?.nodeId === geometryEditing.target.nodeId && pane.target.outputPort === geometryEditing.target.outputPort && (
           <GeometryOverlay
-            key={`${geometryEditing.node.id}:${imageUrl}`}
+            key={`${geometryEditing.node.id}:${geometryEditing.target.nodeId}:${geometryEditing.target.outputPort}:${geometrySize.width}:${geometrySize.height}:${pane.imageOrigin.x}:${pane.imageOrigin.y}`}
             typeId={geometryEditing.node.typeId}
             parameters={geometryEditing.node.parameters}
             imageRef={imageRef}

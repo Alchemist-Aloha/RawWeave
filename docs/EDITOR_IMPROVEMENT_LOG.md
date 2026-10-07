@@ -266,3 +266,10 @@ Files: new `editor/curve-axes.ts` and tests; `App.tsx`/`GraphNode.tsx` graph-con
 - Vitest baseline: 189 passed, four GraphNode tests failed (stale labels and fractional whole-pixel step).
 - Standard browser E2E initially timed out; explicit Chrome binary fails downloading matching chromedriver 154.0.8037.92. No E2E pass claimed.
 - Application runs in Chrome via Vite and direct DevTools protocol on an isolated browser profile. Screenshots are temporary, not committed. Browser adapters do not measure Rust processing or native WebView behavior.
+
+## CPU coarse-preview iteration
+
+Problem/evidence: large-image parameter edits wait for full-resolution graph processing; backend timings and implementation changes are recorded in `LARGE_IMAGE_PERFORMANCE.md`.
+Focused change: request one coarser mip first for large viewport-backed images, refine after 100 ms, retain the usable image, and cancel obsolete work. Full-size coordinates remain independent of bitmap resolution. Regression tests demonstrated unnecessary coarse rerendering after a viewport resize and crop gestures lost when refinement remounted the overlay; both are fixed.
+Running-app verification: rebuilt CPU-only native binary; five focused preview tests pass, including observed coarse/fine natural image dimensions with stable full-size coordinates, workflow source reattachment, image/scopes fit and crop/undo. Frontend suite: 293 tests pass. This proves native behavior, not native large-image display latency; full native/browser gates remain uncleared.
+GPU acceleration work was stopped and removed at user request. Existing GPU infrastructure is untouched; desktop previews use CPU processing.

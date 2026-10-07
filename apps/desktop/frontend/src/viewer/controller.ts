@@ -12,6 +12,8 @@ import type { PreviewTransport } from './transport';
 
 interface ActiveRequest {
   request: PreviewRequest;
+  desiredMip: number;
+  refining: boolean;
 }
 
 const MIN_ZOOM = 0.1;
@@ -88,6 +90,7 @@ export class ViewerController {
   private readonly active = new Map<ViewerId, ActiveRequest>();
   private readonly viewports = new Map<ViewerId, ImageDimensions & { pixelRatio: number }>();
   private readonly loadedMips = new Map<ViewerId, number>();
+  private readonly refinements = new Map<ViewerId, ReturnType<typeof setTimeout>>();
   private readonly imageDimensions = new Map<ViewerId, ImageDimensions>();
   private sourceDimensions: ImageDimensions = DEFAULT_DIMENSIONS;
   private sequence = 0;
@@ -152,8 +155,15 @@ export class ViewerController {
     void this.transport.releasePreview(url).catch(() => undefined);
   }
 
+  private stopRefinement(viewer: ViewerId): void {
+    const timer = this.refinements.get(viewer);
+    if (timer !== undefined) clearTimeout(timer);
+    this.refinements.delete(viewer);
+  }
+
   public reportImageLoadFailure(viewer: ViewerId, url: string): void {
     if (this.state.panes[viewer].imageUrl !== url) return;
+    this.stopRefinement(viewer);
     this.releasePreview(url);
     this.loadedMips.delete(viewer);
     this.setPane(viewer, {
@@ -168,6 +178,7 @@ export class ViewerController {
   }
 
   private restartRequest(viewer: ViewerId): void {
+    this.stopRefinement(viewer);
     const target = this.state.panes[viewer].target;
     if (!target) return;
     const current = this.active.get(viewer);
@@ -185,8 +196,18 @@ export class ViewerController {
   private updateDetail(viewer: ViewerId): void {
     if (!this.state.panes[viewer].target) return;
     const plan = this.requestPlan(viewer);
-    const active = this.active.get(viewer)?.request;
-    if (active ? active.mip === plan.mip && sameRegion(active.region, plan.region) : this.loadedMips.get(viewer) === plan.mip) return;
+    const active = this.active.get(viewer);
+    if ((active?.refining || this.refinements.has(viewer)) && this.loadedMips.get(viewer) === plan.mip) {
+      this.stopRefinement(viewer);
+      if (active) {
+        this.active.delete(viewer);
+        void this.transport.cancelPreview(active.request.requestId);
+      }
+      this.setPane(viewer, { status: 'ready', requestId: null, progress: 1 });
+      return;
+    }
+    if (active ? active.desiredMip === plan.mip && sameRegion(active.request.region, plan.region) : this.loadedMips.get(viewer) === plan.mip) return;
+    if (this.refinements.has(viewer) && this.loadedMips.get(viewer) === plan.mip + 1) return;
     this.restartRequest(viewer);
   }
 
@@ -239,6 +260,7 @@ export class ViewerController {
   public setRevision(revision: number): void {
     if (revision === this.state.currentRevision) return;
     this.state = { ...this.state, currentRevision: revision };
+    for (const viewer of ['A', 'B'] as ViewerId[]) this.stopRefinement(viewer);
     for (const [viewer, active] of this.active) {
       this.active.delete(viewer);
       void this.transport.cancelPreview(active.request.requestId);
@@ -297,6 +319,7 @@ export class ViewerController {
   }
 
   public setTarget(viewer: ViewerId, target: PreviewTarget | null): void {
+    this.stopRefinement(viewer);
     const current = this.active.get(viewer);
     if (current) {
       this.active.delete(viewer);
@@ -328,8 +351,9 @@ export class ViewerController {
     for (const viewer of ['A', 'B'] as ViewerId[]) this.setTarget(viewer, null);
   }
 
-  private startRequest(viewer: ViewerId, target: PreviewTarget, corrected = false): void {
+  private startRequest(viewer: ViewerId, target: PreviewTarget, corrected = false, refining = false): void {
     const plan = this.requestPlan(viewer);
+    const coarse = !refining && this.viewports.has(viewer) && plan.mip < 6 && plan.region.width * plan.region.height >= 1_000_000;
     const request: PreviewRequest = {
       requestId: this.requestId(viewer),
       revision: this.state.currentRevision,
@@ -338,15 +362,15 @@ export class ViewerController {
       quality: 'preview',
       region: plan.region,
       tile: { x: Math.floor(plan.region.x / TILE_SIZE), y: Math.floor(plan.region.y / TILE_SIZE) },
-      mip: plan.mip,
+      mip: plan.mip + (coarse ? 1 : 0),
       maskDisplay: this.state.panes[viewer].maskDisplay,
     };
-    this.active.set(viewer, { request });
+    this.active.set(viewer, { request, desiredMip: plan.mip, refining });
     this.setPane(viewer, {
       zoom: plan.zoom,
       displayScale: plan.zoom,
       imageRegion: request.region,
-      status: 'loading',
+      status: refining && this.state.panes[viewer].imageUrl ? 'ready' : 'loading',
       requestId: request.requestId,
       progress: 0,
       error: null,
@@ -375,12 +399,12 @@ export class ViewerController {
         }
         this.imageDimensions.set(viewer, { width: result.fullWidth, height: result.fullHeight });
         const nextPlan = this.requestPlan(viewer);
-        if (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip) {
+        if (!sameRegion(request.region, nextPlan.region) || request.mip !== nextPlan.mip + (coarse ? 1 : 0)) {
           this.releasePreview(result.url);
           // One metadata correction is enough for a stable evaluated output.
           if (corrected) throw new Error('preview output dimensions changed during rendering');
           this.active.delete(viewer);
-          this.startRequest(viewer, target, true);
+          this.startRequest(viewer, target, true, refining);
           return;
         }
         this.active.delete(viewer);
@@ -399,6 +423,14 @@ export class ViewerController {
           requestId: null,
           imageOrigin: { x: result.originX ?? 0, y: result.originY ?? 0 },
         });
+        if (coarse && request.revision === this.state.currentRevision && this.state.panes[viewer].target === target && !this.active.has(viewer)) {
+          this.stopRefinement(viewer);
+          this.refinements.set(viewer, setTimeout(() => {
+            this.refinements.delete(viewer);
+            if (request.revision !== this.state.currentRevision || this.state.panes[viewer].target !== target) return;
+            this.startRequest(viewer, target, false, true);
+          }, 100));
+        }
       })
       .catch((error: unknown) => {
         if (this.active.get(viewer)?.request.requestId !== request.requestId) return;
@@ -413,10 +445,19 @@ export class ViewerController {
 
   public async cancel(viewer: ViewerId): Promise<void> {
     const active = this.active.get(viewer);
-    if (!active) return;
+    const refining = this.refinements.has(viewer);
+    this.stopRefinement(viewer);
+    if (!active) {
+      if (refining) this.setPane(viewer, { status: 'cancelled' });
+      return;
+    }
     this.active.delete(viewer);
     await this.transport.cancelPreview(active.request.requestId);
     if (this.state.panes[viewer].requestId !== active.request.requestId) return;
+    if (active.refining) {
+      this.setPane(viewer, { status: 'ready', requestId: null, progress: 1 });
+      return;
+    }
     this.releasePanePreview(viewer);
     this.loadedMips.delete(viewer);
     this.setPane(viewer, {

@@ -172,4 +172,26 @@ Cached RAW backend previews are near frame-time at the measured mip, but full RA
 
 RAW open still decodes for metadata and first preview decodes again. Source contexts still hash compressed RAW bytes, and SceneLinearRGB target conversion still expands full-resolution buffers (DisplayRGB targets now select first). Parameter edits still recompute affected processing stages. The 2 GiB conservative payload budget is not a measured peak-memory bound; allocator overhead, source state, temporary buffers and GPU allocations are separate. Broader cameras, high-resolution noisy photos, native end-to-end latency and peak RSS remain unmeasured.
 
-GPU/codec rewrites and progressive demosaic were deliberately skipped: current desktop previews attach no GPU render context, and no native transfer/decode bottleneck was established. The unrestricted native suite still has workflow/batch/restore failures (initial broad run: 13 pass/10 fail); it is not cleared by six focused preview passes. Standard browser E2E remains blocked by the missing matching chromedriver. Changes are recorded, not committed.
+This earlier stopping boundary is superseded by the CPU reduced-resolution iteration below. The unrestricted native suite still has workflow/batch/restore failures (initial broad run: 13 pass/10 fail); focused preview passes do not clear it. Standard browser E2E remains blocked by the missing matching chromedriver. Changes are recorded, not committed.
+
+## CPU reduced-resolution and coarse previews
+
+Implemented origin-anchored sampled RAW demosaic without downsampling the CFA. Camera/display transforms preserve full-size sampling metadata, lens correction uses full-resolution coordinates, and Final quality stays full resolution. Mip-invariant RAW stages reuse cached results between coarse/refined requests. Ordinary-image source proxies are limited to verified pointwise whole-frame chains; geometry, unknown operations, partial regions and nondefault tiles retain full-resolution inputs. Proxy sampling participates in context and memo cache identity.
+
+Large-image viewer requests now render one extra mip (one-quarter of the requested pixels), then refine after 100 ms. Cancellation/revision/target changes stop obsolete refinements. Coarse images remain usable during refinement; resizing can reuse an already-sufficient coarse frame, and crop gestures survive bitmap refinement without changing full-size coordinates.
+
+Three fresh-editor release runs, whole frame, mip 2, Preview quality, CPU, same deterministic JPEG/licensed RAW fixtures. Filesystem caches were not flushed. Columns are medians of one sample per run; timing ends at encoded PNG storage, excluding transport/WebView display. Open/decode and preview timing are separate.
+
+| Source | Open (ms) | First preview (ms) | Warm repeat (ms) | Parameter edit (ms) |
+|---|---:|---:|---:|---:|
+| JPEG 6000×4000 → 1500×1000 | 329 | 187 | 32 | 48 |
+| Nikon 3040×2014 → 760×504 | 79 | 218 | 17 | 117 |
+| Sony 2816×1872 → 704×468 | 31 | 355 | 17 | 123 |
+
+Edits are exposure for JPEG and red gain for RAW. Separate three-run progressive medians (initial mip 3, refinement mip 2): JPEG first coarse/refinement 108/117 ms; Nikon 203/39 ms; Sony 344/63 ms. These are individual backend durations, not cumulative UI latency; the benchmark does not include the controller's 100 ms delay. Reproduce with the benchmark command above, adding `RAWWEAVE_BENCHMARK_PROGRESSIVE=1` for coarse/refined requests and optionally `RAWWEAVE_BENCHMARK_MIP=2`.
+
+Changed areas: color sampling metadata, image mip sampling, graph/source cache identity, pointwise node descriptors, RAW CPU stages, desktop preview selection/benchmark and viewer controller/overlay regressions. Tests caught proxy/full-input cache aliasing, redundant coarse rerenders after viewport resizing, and crop-overlay remounts mid-gesture.
+
+The GPU experiment was stopped and removed at user request: no added demosaic shader/pipeline, GPU RAW capability, desktop GPU initialization/environment flags, or GPU-specific tests remain. Pre-existing rendering/GPU infrastructure is unchanged; desktop previews remain CPU-based. The RAW-node rendering dependency is used only for CPU preview-quality selection.
+
+Verification after removal: RAW-node tests (4 unit + 12 integration), desktop tests (81 library + 1 binary, two benchmarks ignored), desktop all-target/all-feature check, workspace Clippy with `-D warnings`, formatting and diff checks pass. Frontend tests: 293 pass. Rebuilt native binary: five focused preview regressions pass, including actual coarse-to-fine images, source restoration, image/scopes fit and crop/undo. No full native/browser suite clearance or native large-image latency claim. Full CFA preprocessing, visible-region scheduling, peak memory and camera-wide coverage remain unresolved.

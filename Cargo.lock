@@ -1195,6 +1195,7 @@ dependencies = [
  "rawweave-node-api",
  "rawweave-project",
  "rawweave-raw",
+ "rawweave-rendering",
  "serde_json",
 ]
 

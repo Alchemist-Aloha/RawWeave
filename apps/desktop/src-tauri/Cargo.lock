@@ -4011,6 +4011,7 @@ dependencies = [
  "rawweave-image",
  "rawweave-node-api",
  "rawweave-raw",
+ "rawweave-rendering",
 ]
 
 [[package]]

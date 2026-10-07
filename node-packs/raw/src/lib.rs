@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use rawweave_color::{
-    DisplayTransform as DisplayTransformTrait, MatrixWorkingSpaceTransform, SceneLinearRGB,
-    SrgbDisplayTransform, WorkingSpace,
+    DisplayTransform as DisplayTransformTrait, MatrixWorkingSpaceTransform, PreviewSampling,
+    SceneLinearRGB, SrgbDisplayTransform, WorkingSpace,
 };
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
@@ -26,6 +26,14 @@ const DISPLAY_TRANSFORM: &str = "raw.display-transform";
 
 fn full_frame_capabilities(descriptor: &mut NodeDescriptor) {
     descriptor.capabilities = vec![ExecutionCapability::Cpu, ExecutionCapability::FullFrame];
+    if matches!(
+        descriptor.type_id.as_str(),
+        DECODE | BLACK_LEVEL | WHITE_BALANCE | HIGHLIGHT_RECONSTRUCTION
+    ) {
+        descriptor
+            .capabilities
+            .push(ExecutionCapability::MipInvariant);
+    }
 }
 
 /// Descriptor for the RAW Decode node.
@@ -399,19 +407,37 @@ impl NodeInstance for Demosaic {
         &self,
         inputs: &Inputs,
         _parameters: &Parameters,
-        _context: &EvaluationContext,
+        context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let mosaic = mosaic_input(inputs, "mosaic")?;
         validate_rgb_cfa(&mosaic)?;
-        let dimensions = mosaic.dimensions();
+        let full_dimensions = mosaic.dimensions();
+        let mip = if context.quality() == rawweave_rendering::PreviewQuality::Final {
+            0
+        } else {
+            context.mip_level()
+        };
+        let sampling = (mip > 0).then_some(PreviewSampling {
+            full_dimensions,
+            mip,
+        });
+        let dimensions = match sampling {
+            Some(sampling) => sampling
+                .dimensions()
+                .map_err(|error| NodeError::Message(error.to_string()))?,
+            None => full_dimensions,
+        };
+        let scale = 1_u32 << mip;
         let mut pixels = Vec::with_capacity(
             dimensions
                 .pixel_count()
                 .map_err(|_| NodeError::Message("demosaic dimensions overflow".to_owned()))?,
         );
         let bayer = bayer_channels(&mosaic);
-        for y in 0..dimensions.height {
-            for x in 0..dimensions.width {
+        for row in 0..dimensions.height {
+            for column in 0..dimensions.width {
+                let x = column * scale;
+                let y = row * scale;
                 let pixel =
                     bayer.and_then(|channels| bayer_demosaic_pixel(&mosaic, channels, x, y));
                 pixels.push(match pixel {
@@ -421,6 +447,7 @@ impl NodeInstance for Demosaic {
             }
         }
         let scene = SceneLinearRGB::new(dimensions, pixels, WorkingSpace::CameraNative)
+            .and_then(|scene| scene.with_sampling(sampling))
             .map_err(|error| NodeError::Message(error.to_string()))?;
         Ok(NodeResult::single("scene", Value::SceneLinearRGB(scene)))
     }
@@ -465,6 +492,7 @@ impl NodeInstance for CameraTransform {
                         .collect();
                     MatrixWorkingSpaceTransform::new(working_space)
                         .transform_xyz(scene.dimensions(), xyz_pixels)
+                        .and_then(|converted| converted.with_sampling(scene.sampling()))
                         .map_err(|error| NodeError::Message(error.to_string()))?
                 }
             }
@@ -500,11 +528,16 @@ impl NodeInstance for LensCorrection {
         let width = dimensions.width;
         let height = dimensions.height;
         let source = &scene;
+        let reference = scene
+            .sampling()
+            .map_or(dimensions, |sampling| sampling.full_dimensions);
+        let stride = scene.sampling().map_or(1, |sampling| 1_u32 << sampling.mip);
+        let scale = stride as f32;
         let pixels = (0..height)
             .flat_map(|y| {
                 (0..width).map(move |x| {
-                    let nx = normalized_coordinate(x, width);
-                    let ny = normalized_coordinate(y, height);
+                    let nx = normalized_coordinate(x * stride, reference.width);
+                    let ny = normalized_coordinate(y * stride, reference.height);
                     let radius_squared = nx * nx + ny * ny;
                     let radial = 1.0
                         + profile.radial_distortion[0] * radius_squared
@@ -517,12 +550,12 @@ impl NodeInstance for LensCorrection {
                         + 2.0 * profile.tangential_distortion[1] * nx * ny;
                     let source_x = denormalize_coordinate(
                         (nx * radial + tangential_x).clamp(-1.0, 1.0),
-                        width,
-                    );
+                        reference.width,
+                    ) / scale;
                     let source_y = denormalize_coordinate(
                         (ny * radial + tangential_y).clamp(-1.0, 1.0),
-                        height,
-                    );
+                        reference.height,
+                    ) / scale;
                     let mut pixel = bilinear_sample(source, source_x, source_y);
                     let vignette = 1.0
                         + profile.vignette[0] * radius_squared
@@ -534,6 +567,7 @@ impl NodeInstance for LensCorrection {
             })
             .collect();
         let corrected = SceneLinearRGB::new(dimensions, pixels, scene.working_space())
+            .and_then(|corrected| corrected.with_sampling(scene.sampling()))
             .map_err(|error| NodeError::Message(error.to_string()))?;
         Ok(NodeResult::single(
             "scene",
@@ -1083,6 +1117,59 @@ mod tests {
         )
         .unwrap();
         assert!(bayer_channels(&unusual).is_none());
+    }
+
+    #[test]
+    fn preview_demosaic_computes_only_requested_rgb_samples_and_final_stays_full_size() {
+        use rawweave_rendering::PreviewQuality;
+        for frame in [
+            DeterministicCorpus::bayer_12_bit(),
+            DeterministicCorpus::xtrans_14_bit(),
+        ] {
+            let inputs = [("mosaic".to_owned(), Value::Mosaic(frame.mosaic().clone()))]
+                .into_iter()
+                .collect();
+            let full = Demosaic
+                .evaluate(&inputs, &Parameters::new(), &EvaluationContext::default())
+                .unwrap();
+            let Value::SceneLinearRGB(full) = &full.outputs["scene"] else {
+                panic!()
+            };
+            for mip in [1, 2, 6] {
+                let context = EvaluationContext::default().with_mip_level(mip);
+                let reduced = Demosaic
+                    .evaluate(&inputs, &Parameters::new(), &context)
+                    .unwrap();
+                let Value::SceneLinearRGB(reduced) = &reduced.outputs["scene"] else {
+                    panic!()
+                };
+                let expected = rawweave_image::Dimensions::new(
+                    full.dimensions().width.div_ceil(1 << mip),
+                    full.dimensions().height.div_ceil(1 << mip),
+                );
+                assert_eq!(reduced.dimensions(), expected);
+                assert_eq!(reduced.pixels().len(), expected.pixel_count().unwrap());
+                for y in 0..expected.height {
+                    for x in 0..expected.width {
+                        assert_eq!(
+                            reduced.pixel(x, y).unwrap().map(f32::to_bits),
+                            full.pixel(x << mip, y << mip).unwrap().map(f32::to_bits)
+                        );
+                    }
+                }
+                let final_result = Demosaic
+                    .evaluate(
+                        &inputs,
+                        &Parameters::new(),
+                        &context.with_quality(PreviewQuality::Final),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    final_result.outputs["scene"],
+                    Value::SceneLinearRGB(full.clone())
+                );
+            }
+        }
     }
 
     #[test]

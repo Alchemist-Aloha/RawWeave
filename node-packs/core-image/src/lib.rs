@@ -19,6 +19,14 @@ const MAX_MASK_RADIUS: u32 = 64;
 
 fn set_cpu_region_capabilities(descriptor: &mut NodeDescriptor) {
     descriptor.capabilities = vec![ExecutionCapability::Cpu, ExecutionCapability::RegionAware];
+    if matches!(
+        descriptor.type_id.as_str(),
+        "core.image-input" | "core.output" | "core.levels" | "core.curves"
+    ) {
+        descriptor
+            .capabilities
+            .push(ExecutionCapability::PointwisePreview);
+    }
 }
 
 fn set_cpu_tile_capabilities(descriptor: &mut NodeDescriptor) {
@@ -27,6 +35,11 @@ fn set_cpu_tile_capabilities(descriptor: &mut NodeDescriptor) {
         ExecutionCapability::TileLocal,
         ExecutionCapability::RegionAware,
     ];
+    if matches!(descriptor.type_id.as_str(), "core.exposure" | "core.invert") {
+        descriptor
+            .capabilities
+            .push(ExecutionCapability::PointwisePreview);
+    }
 }
 
 fn set_cpu_full_frame_capabilities(descriptor: &mut NodeDescriptor) {
@@ -205,6 +218,7 @@ fn color_matrix_descriptor() -> NodeDescriptor {
         ExecutionCapability::Gpu,
         ExecutionCapability::TileLocal,
         ExecutionCapability::RegionAware,
+        ExecutionCapability::PointwisePreview,
     ];
     for row in 0..4 {
         for column in 0..4 {
@@ -451,11 +465,14 @@ impl NodeInstance for ImageInput {
         _parameters: &Parameters,
         context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
-        context
+        let source = context
             .source_image
-            .clone()
-            .map(|image| NodeResult::single("image", Value::Image(image)))
-            .ok_or(NodeError::MissingSourceImage)
+            .as_ref()
+            .ok_or(NodeError::MissingSourceImage)?;
+        let image = source
+            .sample_mip(context.source_image_mip())
+            .map_err(|error| NodeError::Message(error.to_string()))?;
+        Ok(NodeResult::single("image", Value::Image(image)))
     }
 }
 

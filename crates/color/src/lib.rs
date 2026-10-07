@@ -46,6 +46,9 @@ pub enum ColorError {
     /// The requested dimensions overflow the platform pixel-count type.
     #[error("color dimensions overflow")]
     DimensionsOverflow,
+    /// Reduced RGB buffers must retain a valid full-size coordinate grid.
+    #[error("invalid preview sampling geometry")]
+    InvalidPreviewSampling,
     /// A color sample must be finite.
     #[error("color sample at pixel {pixel}, channel {channel} is not finite")]
     NonFiniteSample { pixel: usize, channel: usize },
@@ -89,12 +92,51 @@ fn validate_pixels(dimensions: Dimensions, pixels: &[[f32; 3]]) -> Result<(), Co
     Ok(())
 }
 
+/// A display-preview raster sampled on the full image's origin-anchored grid.
+/// Mip zero/full-quality buffers retain their legacy wire representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewSampling {
+    pub full_dimensions: Dimensions,
+    pub mip: u8,
+}
+
+impl PreviewSampling {
+    pub fn dimensions(self) -> Result<Dimensions, ColorError> {
+        if self.mip == 0
+            || self.mip > 6
+            || self.full_dimensions.width == 0
+            || self.full_dimensions.height == 0
+        {
+            return Err(ColorError::InvalidPreviewSampling);
+        }
+        let scale = 1_u32 << self.mip;
+        Ok(Dimensions::new(
+            self.full_dimensions.width.div_ceil(scale),
+            self.full_dimensions.height.div_ceil(scale),
+        ))
+    }
+}
+
+fn validate_sampling(
+    dimensions: Dimensions,
+    sampling: Option<PreviewSampling>,
+) -> Result<(), ColorError> {
+    if let Some(sampling) = sampling
+        && sampling.dimensions()? != dimensions
+    {
+        return Err(ColorError::InvalidPreviewSampling);
+    }
+    Ok(())
+}
+
 /// Scene-referred linear RGB pixels. Values are intentionally not clipped to 0..1.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SceneLinearRGB {
     dimensions: Dimensions,
     pixels: Arc<Vec<[f32; 3]>>,
     working_space: WorkingSpace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sampling: Option<PreviewSampling>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +144,8 @@ struct SceneLinearRGBWire {
     dimensions: Dimensions,
     pixels: Vec<[f32; 3]>,
     working_space: WorkingSpace,
+    #[serde(default)]
+    sampling: Option<PreviewSampling>,
 }
 
 impl<'de> Deserialize<'de> for SceneLinearRGB {
@@ -111,6 +155,7 @@ impl<'de> Deserialize<'de> for SceneLinearRGB {
     {
         let wire = SceneLinearRGBWire::deserialize(deserializer)?;
         Self::new(wire.dimensions, wire.pixels, wire.working_space)
+            .and_then(|scene| scene.with_sampling(wire.sampling))
             .map_err(serde::de::Error::custom)
     }
 }
@@ -127,7 +172,18 @@ impl SceneLinearRGB {
             dimensions,
             pixels: Arc::new(pixels),
             working_space,
+            sampling: None,
         })
+    }
+
+    pub const fn sampling(&self) -> Option<PreviewSampling> {
+        self.sampling
+    }
+
+    pub fn with_sampling(mut self, sampling: Option<PreviewSampling>) -> Result<Self, ColorError> {
+        validate_sampling(self.dimensions, sampling)?;
+        self.sampling = sampling;
+        Ok(self)
     }
 
     /// Construct an sRGB scene-linear buffer.
@@ -170,6 +226,7 @@ impl SceneLinearRGB {
             self.pixels.iter().copied().map(&mut map).collect(),
             self.working_space.clone(),
         )
+        .and_then(|scene| scene.with_sampling(self.sampling))
     }
 
     /// Share the immutable buffer in another declared working space without changing samples.
@@ -178,6 +235,7 @@ impl SceneLinearRGB {
             dimensions: self.dimensions,
             pixels: self.pixels.clone(),
             working_space,
+            sampling: self.sampling,
         }
     }
 }
@@ -188,6 +246,8 @@ pub struct DisplayRGB {
     dimensions: Dimensions,
     pixels: Arc<Vec<[f32; 3]>>,
     working_space: WorkingSpace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sampling: Option<PreviewSampling>,
 }
 
 #[derive(Deserialize)]
@@ -195,6 +255,8 @@ struct DisplayRGBWire {
     dimensions: Dimensions,
     pixels: Vec<[f32; 3]>,
     working_space: WorkingSpace,
+    #[serde(default)]
+    sampling: Option<PreviewSampling>,
 }
 
 impl<'de> Deserialize<'de> for DisplayRGB {
@@ -204,6 +266,7 @@ impl<'de> Deserialize<'de> for DisplayRGB {
     {
         let wire = DisplayRGBWire::deserialize(deserializer)?;
         Self::new(wire.dimensions, wire.pixels, wire.working_space)
+            .and_then(|display| display.with_sampling(wire.sampling))
             .map_err(serde::de::Error::custom)
     }
 }
@@ -220,12 +283,23 @@ impl DisplayRGB {
             dimensions,
             pixels: Arc::new(pixels),
             working_space,
+            sampling: None,
         })
     }
 
     /// Buffer dimensions.
     pub const fn dimensions(&self) -> Dimensions {
         self.dimensions
+    }
+
+    pub const fn sampling(&self) -> Option<PreviewSampling> {
+        self.sampling
+    }
+
+    pub fn with_sampling(mut self, sampling: Option<PreviewSampling>) -> Result<Self, ColorError> {
+        validate_sampling(self.dimensions, sampling)?;
+        self.sampling = sampling;
+        Ok(self)
     }
 
     /// Display working space.
@@ -268,6 +342,7 @@ impl DisplayTransform for SrgbDisplayTransform {
         let workers = std::thread::available_parallelism().map_or(1, usize::from);
         let pixels = encode_display_pixels(srgb_scene.pixels(), workers);
         DisplayRGB::new(srgb_scene.dimensions(), pixels, WorkingSpace::Srgb)
+            .and_then(|display| display.with_sampling(scene.sampling()))
     }
 
     fn name(&self) -> &'static str {
@@ -476,6 +551,7 @@ impl SceneTransform for MatrixWorkingSpaceTransform {
             .map(|pixel| multiply_vector(source_to_xyz, *pixel))
             .collect();
         self.transform_xyz(scene.dimensions(), xyz_pixels)
+            .and_then(|converted| converted.with_sampling(scene.sampling()))
     }
 
     fn name(&self) -> &'static str {

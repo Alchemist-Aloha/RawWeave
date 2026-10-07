@@ -381,6 +381,10 @@ pub enum ExecutionCapability {
     TileLocal,
     RegionAware,
     FullFrame,
+    /// Output is independent of requested preview mip; reuse it across refinements.
+    MipInvariant,
+    /// A pointwise ordinary-image chain can operate on an explicitly sampled source.
+    PointwisePreview,
 }
 
 impl NodeDescriptor {
@@ -542,6 +546,8 @@ impl NodeResult {
 #[derive(Clone, Debug, Default)]
 pub struct EvaluationContext {
     pub source_image: Option<Image>,
+    /// Opt-in proxy input for a verified pointwise, whole-frame preview chain.
+    pub source_image_mip: u8,
     pub source_image_set: Option<ImageSet>,
     pub source_bytes: Option<Arc<Vec<u8>>>,
     pub source_path: Option<PathBuf>,
@@ -563,6 +569,15 @@ impl EvaluationContext {
             source_image: Some(source_image),
             ..Self::default()
         }
+    }
+
+    pub const fn source_image_mip(&self) -> u8 {
+        self.source_image_mip
+    }
+
+    pub fn with_source_image_mip(mut self, mip: u8) -> Self {
+        self.source_image_mip = mip;
+        self
     }
 
     pub fn with_source_image_set(mut self, source_image_set: ImageSet) -> Self {

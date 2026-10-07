@@ -1,9 +1,60 @@
 use rawweave_color::{
     ColorError, ColorProfileRef, ColorTransformBackend, DisplayRGB, DisplayTransform,
-    IccLittleCmsBackend, MatrixWorkingSpaceTransform, OcioBackend, SceneLinearRGB, SceneTransform,
-    SrgbDisplayTransform, WorkingSpace,
+    IccLittleCmsBackend, MatrixWorkingSpaceTransform, OcioBackend, PreviewSampling, SceneLinearRGB,
+    SceneTransform, SrgbDisplayTransform, WorkingSpace,
 };
 use rawweave_image::Dimensions;
+
+#[test]
+fn reduced_rgb_sampling_survives_transforms_and_validated_wire_roundtrips() {
+    let sampling = PreviewSampling {
+        full_dimensions: Dimensions::new(9, 7),
+        mip: 2,
+    };
+    let scene = SceneLinearRGB::new(
+        Dimensions::new(3, 2),
+        vec![[2.0, -0.25, 0.5]; 6],
+        WorkingSpace::Srgb,
+    )
+    .unwrap()
+    .with_sampling(Some(sampling))
+    .unwrap();
+    assert_eq!(
+        scene.map_pixels(|pixel| pixel).unwrap().sampling(),
+        Some(sampling)
+    );
+    let display = SrgbDisplayTransform.transform(&scene).unwrap();
+    assert_eq!(display.sampling(), Some(sampling));
+    assert_eq!(
+        serde_json::from_str::<SceneLinearRGB>(&serde_json::to_string(&scene).unwrap()).unwrap(),
+        scene
+    );
+    assert_eq!(
+        serde_json::from_str::<DisplayRGB>(&serde_json::to_string(&display).unwrap()).unwrap(),
+        display
+    );
+    let transformed = MatrixWorkingSpaceTransform::new(WorkingSpace::DisplayP3)
+        .transform(&scene)
+        .unwrap();
+    assert_eq!(transformed.sampling(), Some(sampling));
+    for invalid in [
+        PreviewSampling {
+            full_dimensions: Dimensions::new(1, 1),
+            mip: 2,
+        },
+        PreviewSampling {
+            full_dimensions: Dimensions::new(9, 7),
+            mip: 7,
+        },
+    ] {
+        assert!(scene.clone().with_sampling(Some(invalid)).is_err());
+    }
+    let mut wire = serde_json::to_value(&scene).unwrap();
+    wire["sampling"]["mip"] = serde_json::json!(7);
+    assert!(serde_json::from_value::<SceneLinearRGB>(wire).is_err());
+    let full = SceneLinearRGB::from_pixels(1, 1, vec![[0.5; 3]]).unwrap();
+    assert!(!serde_json::to_string(&full).unwrap().contains("sampling"));
+}
 
 #[test]
 fn color_buffer_clones_share_pixels_without_changing_wire_format_or_hdr() {

@@ -172,6 +172,7 @@ struct MemoKey {
     requested_region: Option<rawweave_image::Region>,
     tile: TileCoord,
     mip_level: u8,
+    source_image_mip: u8,
     quality: rawweave_rendering::PreviewQuality,
     backend: BackendIdentity,
 }
@@ -328,6 +329,34 @@ impl Graph {
 
     pub fn node(&self, id: &NodeId) -> Option<&GraphNode> {
         self.nodes.get(id)
+    }
+
+    /// Conservative opt-in: geometry, masks, collections and unknown/custom
+    /// operations must keep the full-size source and their original coordinates.
+    pub fn supports_source_mip(&self, target: &str) -> bool {
+        let mut pending = vec![NodeId::from(target)];
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&id) else {
+                return false;
+            };
+            if !node
+                .descriptor
+                .supports(ExecutionCapability::PointwisePreview)
+            {
+                return false;
+            }
+            pending.extend(
+                self.edges
+                    .iter()
+                    .filter(|edge| edge.to_node == id)
+                    .map(|edge| edge.from_node.clone()),
+            );
+        }
+        true
     }
 
     pub fn edges(&self) -> &[GraphEdge] {
@@ -989,7 +1018,7 @@ impl Graph {
             .get(node_id)
             .ok_or_else(|| GraphError::MissingNode(node_id.clone()))?;
         let capability = node.descriptor.select_execution_capability(context);
-        let execution_context = match capability {
+        let mut execution_context = match capability {
             Some(ExecutionCapability::FullFrame) => EvaluationContext {
                 requested_region: None,
                 tile: TileCoord::default(),
@@ -997,6 +1026,9 @@ impl Graph {
             },
             _ => context.clone(),
         };
+        if node.descriptor.supports(ExecutionCapability::MipInvariant) {
+            execution_context.mip_level = 0;
+        }
         let memo_key = MemoKey {
             node_id: node_id.clone(),
             requested_output: (node.descriptor.evaluation_policy
@@ -1006,6 +1038,7 @@ impl Graph {
             requested_region: execution_context.requested_region(),
             tile: execution_context.tile(),
             mip_level: execution_context.mip_level(),
+            source_image_mip: execution_context.source_image_mip(),
             quality: execution_context.quality(),
             backend: backend_identity(&execution_context),
         };
@@ -1592,6 +1625,9 @@ fn hash_stable_context(context: &EvaluationContext, hasher: &mut impl Hasher) {
     context.requested_region().hash(hasher);
     context.tile().hash(hasher);
     context.mip_level().hash(hasher);
+    if context.source_image_mip() > 0 {
+        context.source_image_mip().hash(hasher);
+    }
     context.quality().hash(hasher);
     context
         .render_context()
@@ -1629,6 +1665,10 @@ fn hash_stable_value(value: &Value, hasher: &mut impl Hasher) {
 }
 
 fn hash_evaluation_context(context: &EvaluationContext, hasher: &mut impl Hasher) {
+    if context.source_image_mip() > 0 {
+        8_u8.hash(hasher);
+        context.source_image_mip().hash(hasher);
+    }
     match context.source_image.as_ref() {
         Some(source_image) => {
             0_u8.hash(hasher);
@@ -2144,12 +2184,18 @@ fn hash_scene_linear(scene: &rawweave_color::SceneLinearRGB, hasher: &mut impl H
     scene.dimensions().hash(hasher);
     hash_working_space(&scene.working_space(), hasher);
     hasher.write(bytemuck::cast_slice(scene.pixels()));
+    if let Some(sampling) = scene.sampling() {
+        sampling.hash(hasher);
+    }
 }
 
 fn hash_display(display: &rawweave_color::DisplayRGB, hasher: &mut impl Hasher) {
     display.dimensions().hash(hasher);
     hash_working_space(&display.working_space(), hasher);
     hasher.write(bytemuck::cast_slice(display.pixels()));
+    if let Some(sampling) = display.sampling() {
+        sampling.hash(hasher);
+    }
 }
 
 fn hash_working_space(space: &rawweave_color::WorkingSpace, hasher: &mut impl Hasher) {
