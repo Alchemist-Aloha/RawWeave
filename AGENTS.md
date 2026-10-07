@@ -29,6 +29,7 @@ node-packs/core-image/   ordinary image-processing nodes
 node-packs/raw/          RAW development nodes
 apps/desktop/src-tauri/  Tauri commands, source state, previews, URI protocol
 apps/desktop/frontend/   React editor, viewer, controllers, platform adapters
+apps/desktop-gpui/       in-progress native GPUI Kit/gpui-flow frontend (separate workspace)
 scripts/build-all-in-one.sh  release desktop binary with embedded frontend
 docs/                    staged development plans
 test-data/images/        licensed image integration-test corpus
@@ -148,6 +149,16 @@ pnpm run test:e2e:native
 - Rebuild the native E2E binary after changing Rust, Tauri configuration, or frontend code that the binary embeds. Keep the `wdio-e2e` plugins and permissions gated to E2E builds.
 - Browser mode does not prove native integration, and component tests do not prove the actual display path. Add a native regression when fixing a native-only bug.
 - See `apps/desktop/frontend/e2e/README.md` for setup, coverage, and runner notes.
+
+### Native GPUI migration
+
+The native frontend is not yet feature-equivalent to Tauri. See `apps/desktop-gpui/README.md` for implemented surfaces and remaining parity gates. GPUI uses native GPU composition with direct BGRA image uploads; RAW processing remains CPU-based. Preserve the Tauri application until migration coverage is complete.
+
+```sh
+cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml --workspace
+cargo clippy --locked --manifest-path apps/desktop-gpui/Cargo.toml -p rawweave-gpui --all-targets --no-deps -- -D warnings
+cargo fmt --manifest-path apps/desktop-gpui/Cargo.toml --all -- --check
+```
 
 ### Image dataset
 

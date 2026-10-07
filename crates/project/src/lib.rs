@@ -122,6 +122,74 @@ impl EditorCore {
         }
     }
 
+    /// Construct the ordinary-image default graph, shared by desktop frontends.
+    pub fn reset_ordinary_image_graph(&mut self) -> Result<(), ProjectError> {
+        self.reset_image_graph(
+            &[("input", "core.image-input"), ("output", "core.output")],
+            &[("input", "image", "output", "image")],
+        )
+    }
+
+    /// Construct the RAW default graph without changing persisted node IDs.
+    pub fn reset_raw_image_graph(&mut self) -> Result<(), ProjectError> {
+        self.reset_image_graph(
+            &[
+                ("raw-decode", "raw.decode"),
+                ("black-level", "raw.black-level"),
+                ("white-balance", "raw.white-balance"),
+                ("highlight-reconstruction", "raw.highlight-reconstruction"),
+                ("demosaic", "raw.demosaic"),
+                ("camera-transform", "raw.camera-transform"),
+                ("lens-correction", "raw.lens-correction"),
+                ("display-transform", "raw.display-transform"),
+            ],
+            &[
+                ("raw-decode", "frame", "black-level", "frame"),
+                ("black-level", "mosaic", "white-balance", "mosaic"),
+                (
+                    "white-balance",
+                    "mosaic",
+                    "highlight-reconstruction",
+                    "mosaic",
+                ),
+                ("highlight-reconstruction", "mosaic", "demosaic", "mosaic"),
+                ("demosaic", "scene", "camera-transform", "scene"),
+                (
+                    "raw-decode",
+                    "camera_profile",
+                    "camera-transform",
+                    "camera_profile",
+                ),
+                ("camera-transform", "scene", "lens-correction", "scene"),
+                (
+                    "raw-decode",
+                    "lens_profile",
+                    "lens-correction",
+                    "lens_profile",
+                ),
+                ("lens-correction", "scene", "display-transform", "scene"),
+            ],
+        )
+    }
+
+    fn reset_image_graph(
+        &mut self,
+        nodes: &[(&str, &str)],
+        edges: &[(&str, &str, &str, &str)],
+    ) -> Result<(), ProjectError> {
+        let existing: Vec<_> = self.graph.nodes().keys().cloned().collect();
+        for id in existing {
+            self.remove_node(id.as_str())?;
+        }
+        for (id, kind) in nodes {
+            self.add_node(id, kind)?;
+        }
+        for (from, output, to, input) in edges {
+            self.connect(from, output, to, input)?;
+        }
+        Ok(())
+    }
+
     pub fn graph(&self) -> &Graph {
         &self.graph
     }

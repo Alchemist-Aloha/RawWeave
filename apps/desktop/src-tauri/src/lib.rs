@@ -2544,27 +2544,7 @@ fn open_image_set_state(
 }
 
 pub(crate) fn build_ordinary_workflow(editor: &mut EditorCore) -> Result<(), String> {
-    let existing = editor
-        .graph()
-        .nodes()
-        .keys()
-        .map(|node_id| node_id.as_str().to_owned())
-        .collect::<Vec<_>>();
-    for node_id in existing {
-        editor
-            .remove_node(&node_id)
-            .map_err(|error| error.to_string())?;
-    }
-    editor
-        .add_node("input", "core.image-input")
-        .map_err(|error| error.to_string())?;
-    editor
-        .add_node("output", "core.output")
-        .map_err(|error| error.to_string())?;
-    editor
-        .connect("input", "image", "output", "image")
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    editor.reset_ordinary_image_graph().map_err(|error| error.to_string())
 }
 
 pub(crate) fn build_image_set_workflow(editor: &mut EditorCore) -> Result<(), String> {
@@ -2598,63 +2578,7 @@ pub(crate) fn build_image_set_workflow(editor: &mut EditorCore) -> Result<(), St
 }
 
 pub(crate) fn build_raw_workflow(editor: &mut EditorCore) -> Result<(), String> {
-    let existing = editor
-        .graph()
-        .nodes()
-        .keys()
-        .map(|node_id| node_id.as_str().to_owned())
-        .collect::<Vec<_>>();
-    for node_id in existing {
-        editor
-            .remove_node(&node_id)
-            .map_err(|error| error.to_string())?;
-    }
-
-    for (node_id, type_id) in [
-        ("raw-decode", "raw.decode"),
-        ("black-level", "raw.black-level"),
-        ("white-balance", "raw.white-balance"),
-        ("highlight-reconstruction", "raw.highlight-reconstruction"),
-        ("demosaic", "raw.demosaic"),
-        ("camera-transform", "raw.camera-transform"),
-        ("lens-correction", "raw.lens-correction"),
-        ("display-transform", "raw.display-transform"),
-    ] {
-        editor
-            .add_node(node_id, type_id)
-            .map_err(|error| error.to_string())?;
-    }
-    for (from_node, from_port, to_node, to_port) in [
-        ("raw-decode", "frame", "black-level", "frame"),
-        ("black-level", "mosaic", "white-balance", "mosaic"),
-        (
-            "white-balance",
-            "mosaic",
-            "highlight-reconstruction",
-            "mosaic",
-        ),
-        ("highlight-reconstruction", "mosaic", "demosaic", "mosaic"),
-        ("demosaic", "scene", "camera-transform", "scene"),
-        (
-            "raw-decode",
-            "camera_profile",
-            "camera-transform",
-            "camera_profile",
-        ),
-        ("camera-transform", "scene", "lens-correction", "scene"),
-        (
-            "raw-decode",
-            "lens_profile",
-            "lens-correction",
-            "lens_profile",
-        ),
-        ("lens-correction", "scene", "display-transform", "scene"),
-    ] {
-        editor
-            .connect(from_node, from_port, to_node, to_port)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    editor.reset_raw_image_graph().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
