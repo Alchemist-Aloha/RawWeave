@@ -302,7 +302,7 @@ impl ParameterDraft {
             }
             ParameterType::String => {
                 if self.ux.point_curve {
-                    curve_points(&self.text,self.ux.scalar_curve)?;
+                    curve_points(&self.text, self.ux.scalar_curve)?;
                 }
                 ParameterValue::String(self.text.clone())
             }

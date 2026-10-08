@@ -15,7 +15,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use native_viewer::Viewers;
+use rawweave_batch::{Compression, OutputSharpening};
 use rawweave_core::NodeId as CoreNodeId;
+use rawweave_gpui::export::ExportSettings;
 use rawweave_gpui::library::{drop_position, library_groups};
 use rawweave_gpui::parameters::{
     ParameterDraft, add_curve_point, curve_points, parameter_ux, remove_curve_point,
@@ -43,6 +45,13 @@ impl Render for LibraryDrag {
             .border_color(rgb(0x434951))
             .child(self.label.clone())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileKind {
+    Image,
+    Workflow,
+    Blueprint,
 }
 
 struct Field {
@@ -77,6 +86,10 @@ struct Editor {
     selected: Option<String>,
     export_busy: bool,
     export_status: String,
+    export_settings: ExportSettings,
+    export_quality: Entity<InputState>,
+    export_long_edge: Entity<InputState>,
+    show_export_settings: bool,
     show_shortcuts: bool,
     show_advanced: bool,
     compatible_only: bool,
@@ -167,6 +180,10 @@ impl Editor {
             selected: None,
             export_busy: false,
             export_status: String::new(),
+            export_settings: ExportSettings::default(),
+            export_quality: cx.new(|cx| InputState::new(window, cx).default_value("92")),
+            export_long_edge: cx.new(|cx| InputState::new(window, cx).placeholder("Original")),
+            show_export_settings: false,
             show_shortcuts: false,
             show_advanced: false,
             compatible_only: true,
@@ -585,7 +602,11 @@ impl Editor {
         if matches!(event, InputEvent::Change) {
             field.draft.set_text(text);
             field.error = field.draft.parsed().err();
-            if field.draft.ux.point_curve && let Ok(points)=curve_points(field.draft.text(),field.draft.ux.scalar_curve) {field.curve_index=field.curve_index.min(points.len().saturating_sub(1));}
+            if field.draft.ux.point_curve
+                && let Ok(points) = curve_points(field.draft.text(), field.draft.ux.scalar_curve)
+            {
+                field.curve_index = field.curve_index.min(points.len().saturating_sub(1));
+            }
         }
         if matches!(
             event,
@@ -715,7 +736,11 @@ impl Editor {
             field.draft.cancel();
             field.error = None;
             field.stepping = false;
-            if field.draft.ux.point_curve && let Ok(points)=curve_points(field.draft.text(),field.draft.ux.scalar_curve) {field.curve_index=field.curve_index.min(points.len().saturating_sub(1));}
+            if field.draft.ux.point_curve
+                && let Ok(points) = curve_points(field.draft.text(), field.draft.ux.scalar_curve)
+            {
+                field.curve_index = field.curve_index.min(points.len().saturating_sub(1));
+            }
             let text = field.draft.text().to_owned();
             field.set_widget_value(text, window, cx);
         }
@@ -830,16 +855,16 @@ impl Editor {
         .detach();
         cx.notify();
     }
-    fn choose_file(&mut self, workflow: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn choose_file(&mut self, kind: FileKind, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some(
-                if workflow {
-                    "Load workflow"
-                } else {
-                    "Open image"
+                match kind {
+                    FileKind::Image => "Open image",
+                    FileKind::Workflow => "Load workflow",
+                    FileKind::Blueprint => "Instantiate blueprint (replace workflow)",
                 }
                 .into(),
             ),
@@ -848,7 +873,7 @@ impl Editor {
             if let Ok(Ok(Some(paths))) = prompt.await
                 && let Some(path) = paths.into_iter().next()
             {
-                if !workflow {
+                if kind == FileKind::Image {
                     let _ = this.update_in(cx, |this, window, cx| this.open_path(path, window, cx));
                     return;
                 }
@@ -858,7 +883,15 @@ impl Editor {
                 });
                 let result = task.await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    match result.and_then(|text| this.read_document(&text, true)) {
+                    match result.and_then(|text| {
+                        if kind == FileKind::Blueprint {
+                            this.session.import_blueprint(&text)?;
+                            this.layout.clear();
+                            Ok(())
+                        } else {
+                            this.read_document(&text, true)
+                        }
+                    }) {
                         Ok(()) => {
                             this.viewers.update(cx, |viewers, _| viewers.cancel_all());
                             this.source_generation += 1;
@@ -869,7 +902,12 @@ impl Editor {
                             this.field_subscriptions.clear();
                             this.reset_viewers(window, cx);
                             this.rebuild_flow(cx);
-                            this.status = "Workflow loaded · select a compatible source".into();
+                            this.status = if kind == FileKind::Blueprint {
+                                "Blueprint instantiated · select a compatible source"
+                            } else {
+                                "Workflow loaded · select a compatible source"
+                            }
+                            .into();
                         }
                         Err(e) => this.status = e,
                     };
@@ -906,10 +944,142 @@ impl Editor {
         })
         .detach();
     }
+    fn export_selection_blueprint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_canvas_move(window, cx);
+        let selection: Vec<String> = self
+            .flow_state
+            .read(cx)
+            .nodes
+            .iter()
+            .filter(|node| node.selected)
+            .map(|node| node.id.to_string())
+            .collect();
+        if selection.is_empty() {
+            return;
+        }
+        let snapshot = self.session.clone();
+        let prompt =
+            cx.prompt_for_new_path(std::path::Path::new("."), Some("selection-blueprint.json"));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = match prompt.await {
+                Ok(Ok(Some(path))) => {
+                    let task = cx.background_executor().spawn(async move {
+                        let name = path
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Selection");
+                        let ids: Vec<&str> = selection.iter().map(String::as_str).collect();
+                        let text = snapshot.export_blueprint(&ids, name, name)?;
+                        save_workflow_atomic(&path, &text)
+                    });
+                    task.await.map(|()| "Selection blueprint saved".to_owned())
+                }
+                Ok(Ok(None)) => Ok("Blueprint export cancelled".into()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update_in(cx, |this, _, cx| {
+                this.status =
+                    result.unwrap_or_else(|error| format!("Blueprint export failed: {error}"));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn export_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let compression = self.export_settings.compression;
+        let weak = cx.entity().downgrade();
+        let compression_menu = Button::new("export-compression")
+            .label(match compression {
+                Compression::Fast => "PNG: Fast",
+                Compression::Best => "PNG: Best",
+                _ => "PNG: Default",
+            })
+            .dropdown_menu(move |mut menu, _, _| {
+                for (value, label) in [
+                    (Compression::Default, "Default"),
+                    (Compression::Fast, "Fast"),
+                    (Compression::Best, "Best"),
+                ] {
+                    let weak = weak.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(value == compression)
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.export_settings.compression = value;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        let sharpening = self.export_settings.sharpening;
+        let weak = cx.entity().downgrade();
+        let sharpening_menu = Button::new("export-sharpening")
+            .label(if sharpening == OutputSharpening::None {
+                "Sharpening: Off"
+            } else {
+                "Sharpening: Low"
+            })
+            .dropdown_menu(move |mut menu, _, _| {
+                for (value, label) in [
+                    (OutputSharpening::None, "Off"),
+                    (
+                        OutputSharpening::UnsharpMask {
+                            radius: 1,
+                            amount: 0.3,
+                            threshold: 0.01,
+                        },
+                        "Low — radius 1, amount 0.3, threshold 0.01",
+                    ),
+                ] {
+                    let weak = weak.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(value == sharpening)
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.export_settings.sharpening = value;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        div().v_flex().gap_2().p_2().border_b_1().border_color(rgb(0x343b45))
+            .child(div().h_flex().flex_wrap().gap_2()
+                .child(div().v_flex().gap_1().child("JPEG quality (1–100)").child(Input::new(&self.export_quality).w(px(120.0))))
+                .child(div().v_flex().gap_1().child("Long edge (1–8192 px)").child(Input::new(&self.export_long_edge).w(px(180.0))))
+                .child(Checkbox::new("export-png-depth").label("16-bit PNG").checked(self.export_settings.png_sixteen)
+                    .on_click(cx.listener(|this, checked, _, cx| { this.export_settings.png_sixteen = *checked; cx.notify(); })))
+                .child(compression_menu).child(sharpening_menu))
+            .child(div().text_sm().child("Filename selects PNG / JPEG / TIFF / EXR. Blank long edge keeps original dimensions. TIFF: 16-bit sRGB; EXR: float32 linear sRGB; PNG/JPEG: sRGB. Metadata is stripped. Settings are captured when Export Image is clicked."))
+            .into_any_element()
+    }
     fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.export_busy || self.session.source.is_none() {
             return;
         }
+        let fields = match ExportSettings::from_fields(
+            self.export_quality.read(cx).value().as_ref(),
+            self.export_long_edge.read(cx).value().as_ref(),
+        ) {
+            Ok(fields) => fields,
+            Err(error) => {
+                self.export_status = error;
+                self.show_export_settings = true;
+                cx.notify();
+                return;
+            }
+        };
+        let settings = ExportSettings {
+            quality: fields.quality,
+            long_edge: fields.long_edge,
+            ..self.export_settings.clone()
+        };
         let snapshot = self.viewers.read(cx).export_session();
         let prompt = cx.prompt_for_new_path(std::path::Path::new("."), Some("image.png"));
         self.export_busy = true;
@@ -920,11 +1090,12 @@ impl Editor {
                 Ok(Ok(Some(path))) => {
                     let label = path.display().to_string();
                     let _ = this.update_in(cx, |this, _, cx| {
-                        this.export_status = "Exporting full-resolution graph output…".into();
+                        this.export_status =
+                            "Evaluating full-resolution output and applying export recipe…".into();
                         cx.notify();
                     });
                     cx.background_executor()
-                        .spawn(async move { snapshot.export(&path) })
+                        .spawn(async move { snapshot.export_with_settings(&path, &settings) })
                         .await
                         .map(|()| format!("Exported {label}"))
                 }
@@ -1107,6 +1278,7 @@ impl Editor {
 }
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let export_controls = self.export_controls(cx);
         let searching = !self.search.read(cx).value().trim().is_empty();
         let groups = self.library_nodes(cx);
         let library_count = groups.iter().map(|(_, nodes)| nodes.len()).sum::<usize>();
@@ -1164,7 +1336,9 @@ impl Render for Editor {
             .text_color(rgb(0xe1e5eb))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
-                    || this.search.read(cx).focus_handle(cx).is_focused(window);
+                    || this.search.read(cx).focus_handle(cx).is_focused(window)
+                    || this.export_quality.read(cx).focus_handle(cx).is_focused(window)
+                    || this.export_long_edge.read(cx).focus_handle(cx).is_focused(window);
                 let modifiers = event.keystroke.modifiers;
                 if !editing && event.keystroke.key == "?" {
                     this.show_shortcuts = !this.show_shortcuts;
@@ -1174,8 +1348,8 @@ impl Render for Editor {
                 }
                 if let Some(action) = shortcut(&event.keystroke.key, modifiers.control || modifiers.platform, modifiers.shift, modifiers.alt, editing) {
                     match action {
-                        Shortcut::OpenImage => this.choose_file(false, window, cx),
-                        Shortcut::OpenWorkflow => this.choose_file(true, window, cx),
+                        Shortcut::OpenImage => this.choose_file(FileKind::Image, window, cx),
+                        Shortcut::OpenWorkflow => this.choose_file(FileKind::Workflow, window, cx),
                         Shortcut::SaveWorkflow => this.save(window, cx),
                         Shortcut::Search => this.search.read(cx).focus_handle(cx).focus(window, cx),
                         Shortcut::Undo => this.history(false, window, cx),
@@ -1195,19 +1369,28 @@ impl Render for Editor {
                     .border_color(rgb(0x343b45))
                     .child(div().font_weight(FontWeight::BOLD).mr_4().child("RawWeave"))
                     .child(Button::new("open").label("Open Image").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_file(false, window, cx)),
+                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Image, window, cx)),
                     ))
                     .child(Button::new("load").label("Load Workflow").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_file(true, window, cx)),
+                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Workflow, window, cx)),
                     ))
                     .child(
                         Button::new("save")
                             .label("Save Workflow")
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     )
+                    .child(Button::new("selection-blueprint").label("Export selection blueprint")
+                        .disabled(!self.flow_state.read(cx).nodes.iter().any(|node| node.selected))
+                        .tooltip("Save selected nodes as a reusable version-1.0.0 blueprint; filename supplies its ID and name")
+                        .on_click(cx.listener(|this, _, window, cx| this.export_selection_blueprint(window, cx))))
+                    .child(Button::new("instantiate-blueprint").label("Instantiate blueprint")
+                        .tooltip("Replace the workflow with a validated blueprint graph and clear the runtime source")
+                        .on_click(cx.listener(|this, _, window, cx| this.choose_file(FileKind::Blueprint, window, cx))))
                     .child(Button::new("export").label(if self.export_busy { "Exporting…" } else { "Export Image" })
                         .disabled(self.export_busy || self.session.source.is_none())
                         .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))))
+                    .child(Button::new("export-settings").label("Export settings").toggled(self.show_export_settings)
+                        .on_click(cx.listener(|this, _, _, cx| { this.show_export_settings = !this.show_export_settings; cx.notify(); })))
                     .child(Button::new("shortcuts").label("Shortcuts").on_click(cx.listener(|this, _, _, cx| {
                         this.show_shortcuts = !this.show_shortcuts; cx.notify();
                     })))
@@ -1228,6 +1411,7 @@ impl Render for Editor {
                         },
                     ))),
             )
+            .when(self.show_export_settings, |view| view.child(export_controls))
             .when(self.show_shortcuts, |view| view.child(div().p_2().text_sm()
                 .child("Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo.")))
             .child(

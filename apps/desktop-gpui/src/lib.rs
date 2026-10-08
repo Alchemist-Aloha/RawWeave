@@ -1,6 +1,8 @@
 //! Native desktop session. Graph execution stays in the existing Rust engine.
+pub mod export;
 pub mod library;
 pub mod parameters;
+pub mod spatial;
 pub mod viewer;
 use rawweave_color::{DisplayTransform, SrgbDisplayTransform};
 use rawweave_image::{ColorDomain, Dimensions, Image, PixelFormat};
@@ -136,6 +138,7 @@ pub struct Session {
     pub source: Option<Source>,
     pub target: (String, String),
     pub awaiting_source: bool,
+    pub mask_display: spatial::MaskDisplay,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -144,6 +147,7 @@ impl Default for Session {
             source: None,
             target: ("output".into(), "image".into()),
             awaiting_source: false,
+            mask_display: spatial::MaskDisplay::default(),
         }
     }
 }
@@ -167,21 +171,15 @@ impl Session {
     }
     /// Export the selected graph output at mip 0, never the viewer's proxy texture.
     pub fn export(&self, path: &Path) -> Result<(), String> {
-        use rawweave_batch::{
-            BatchItem, BitDepth, ColorSpace, MetadataPolicy, OutputFormat, OutputRecipe,
-        };
-        let extension = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let format = match extension.as_str() {
-            "jpg" | "jpeg" => OutputFormat::Jpeg,
-            "png" => OutputFormat::Png,
-            "tif" | "tiff" => OutputFormat::Tiff,
-            "exr" => OutputFormat::OpenExr,
-            _ => return Err("Use a .png, .jpg, .tif or .exr filename".into()),
-        };
+        self.export_with_settings(path, &export::ExportSettings::default())
+    }
+    pub fn export_with_settings(
+        &self,
+        path: &Path,
+        settings: &export::ExportSettings,
+    ) -> Result<(), String> {
+        use rawweave_batch::BatchItem;
+        let mut recipe = settings.recipe(path)?;
         let image = match self.evaluate(0)? {
             Value::Image(image) => image,
             Value::SceneLinearRGB(scene) => {
@@ -199,14 +197,7 @@ impl Session {
         // Stage encoding separately: the batch writer's overwrite policy removes the old file.
         // Installing a NamedTempFile instead preserves the destination if encoding/install fails.
         let staging = tempfile::tempdir_in(parent).map_err(|e| e.to_string())?;
-        let mut recipe = OutputRecipe::new(format, staging.path()).with_filename_template("export");
-        recipe.metadata_policy = MetadataPolicy::Strip;
-        if format == OutputFormat::OpenExr {
-            recipe.bit_depth = BitDepth::Float32;
-            recipe.color_space = ColorSpace::LinearSrgb;
-        } else if format == OutputFormat::Tiff {
-            recipe.bit_depth = BitDepth::Sixteen;
-        }
+        recipe.destination = staging.path().to_owned();
         let encoded = rawweave_batch::write_output(
             &image,
             &recipe,
@@ -270,6 +261,40 @@ impl Session {
     }
     pub fn load_workflow(&mut self, json: &str) -> Result<(), String> {
         self.editor.load_workflow(json).map_err(|e| e.to_string())?;
+        self.source = None;
+        self.awaiting_source = true;
+        self.target = (String::new(), String::new());
+        self.reconcile_target();
+        Ok(())
+    }
+    pub fn export_blueprint(
+        &self,
+        selection: &[&str],
+        id: &str,
+        name: &str,
+    ) -> Result<String, String> {
+        let mut definition = self
+            .editor
+            .create_subgraph_from_selection(selection, id, "1.0.0", Default::default())
+            .map_err(|e| e.to_string())?;
+        definition.metadata.name = name.to_owned();
+        let bytes = self
+            .editor
+            .save_blueprint(&definition)
+            .map_err(|e| e.to_string())?;
+        String::from_utf8(bytes).map_err(|e| e.to_string())
+    }
+    pub fn import_blueprint(&mut self, text: &str) -> Result<(), String> {
+        if text.len() > 16 * 1024 * 1024 {
+            return Err("Blueprint exceeds resource limit".into());
+        }
+        let definition = self
+            .editor
+            .load_blueprint(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+        self.editor
+            .instantiate_blueprint(&definition)
+            .map_err(|e| e.to_string())?;
         self.source = None;
         self.awaiting_source = true;
         self.target = (String::new(), String::new());
@@ -348,7 +373,7 @@ impl Session {
                 display_frame(display, mip)
             }
             Value::DisplayRGB(display) => display_frame(display, mip),
-            _ => Err("selected output is not a displayable image".into()),
+            value => spatial::spatial_frame(&value, mip, self.mask_display),
         }
     }
 }
@@ -408,7 +433,15 @@ pub fn shortcut(
 pub fn preview_type(kind: &str) -> bool {
     matches!(
         kind,
-        "core.Image" | "color.SceneLinearRGB" | "color.DisplayRGB"
+        "core.Image"
+            | "color.SceneLinearRGB"
+            | "color.DisplayRGB"
+            | "core.Mask"
+            | "core.MaskSet"
+            | "core.LabelMap"
+            | "core.ConfidenceMap"
+            | "core.DepthMap"
+            | "core.RegionSet"
     )
 }
 
@@ -496,6 +529,109 @@ mod tests {
         assert_eq!(session.target, ("input".into(), "image".into()));
     }
     #[test]
+    fn blueprint_selection_roundtrips_boundaries_and_parameters_without_runtime_sources() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(Image::new(3, 2).unwrap()))
+            .unwrap();
+        session
+            .editor
+            .add_node("exposure", "core.exposure")
+            .unwrap();
+        session
+            .editor
+            .connect("input", "image", "exposure", "image")
+            .unwrap();
+        session
+            .editor
+            .disconnect("input", "image", "output", "image")
+            .unwrap();
+        session
+            .editor
+            .connect("exposure", "image", "output", "image")
+            .unwrap();
+        session
+            .editor
+            .expose_parameter("exposure", "exposure")
+            .unwrap();
+        session
+            .editor
+            .set_node_parameter(
+                "exposure",
+                "exposure",
+                rawweave_node_api::ParameterValue::Float(1.5),
+            )
+            .unwrap();
+        let before = session.editor.save_workflow().unwrap();
+        let text = session
+            .export_blueprint(&["exposure"], "my-exposure", "My Exposure")
+            .unwrap();
+        let definition = session.editor.load_blueprint(text.as_bytes()).unwrap();
+        assert_eq!(definition.metadata.name, "My Exposure");
+        assert_eq!(definition.identity.id, "my-exposure");
+        assert_eq!(definition.inputs.len(), 1);
+        assert_eq!(definition.outputs.len(), 1);
+        assert_eq!(definition.parameters.len(), 1);
+        assert_eq!(session.editor.save_workflow().unwrap(), before);
+        assert!(session.export_blueprint(&[], "empty", "Empty").is_err());
+        assert!(
+            session
+                .export_blueprint(&["missing"], "bad", "Bad")
+                .is_err()
+        );
+        assert!(session.import_blueprint("invalid").is_err());
+        assert!(session.source.is_some());
+        assert_eq!(session.editor.save_workflow().unwrap(), before);
+        session.import_blueprint(&text).unwrap();
+        assert!(session.source.is_none());
+        assert!(session.awaiting_source);
+        assert_eq!(session.editor.graph().nodes().len(), 1);
+        assert_eq!(session.target, ("exposure".into(), "image".into()));
+        session
+            .attach(Source::Ordinary(Image::new(3, 2).unwrap()))
+            .unwrap();
+        assert_eq!(session.editor.graph().nodes().len(), 1);
+    }
+    #[test]
+    fn graph_mask_outputs_are_selectable_and_previewable() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(Image::new(3, 2).unwrap()))
+            .unwrap();
+        session
+            .editor
+            .add_node("mask", "core.mask-linear-gradient")
+            .unwrap();
+        session
+            .editor
+            .connect("input", "image", "mask", "image")
+            .unwrap();
+        session.select_target("mask", "mask").unwrap();
+        let before = session.editor.save_workflow().unwrap();
+        let gray = session.preview(0, &CancellationToken::new()).unwrap();
+        session.mask_display = spatial::MaskDisplay::Overlay;
+        let overlay = session.preview(0, &CancellationToken::new()).unwrap();
+        assert_eq!(gray.full_dimensions, Dimensions::new(3, 2));
+        assert_ne!(gray.bgra, overlay.bgra);
+        assert_eq!(session.editor.save_workflow().unwrap(), before);
+        assert!(
+            session
+                .export(&tempfile::tempdir().unwrap().path().join("mask.png"))
+                .is_err()
+        );
+        for kind in [
+            "core.Mask",
+            "core.MaskSet",
+            "core.LabelMap",
+            "core.ConfidenceMap",
+            "core.DepthMap",
+            "core.RegionSet",
+        ] {
+            assert!(preview_type(kind));
+        }
+        assert!(!preview_type("core.Float"));
+    }
+    #[test]
     fn removed_viewer_output_falls_back_to_an_available_target() {
         let mut session = Session::default();
         session
@@ -558,6 +694,35 @@ mod tests {
             .pixels()[0][0],
             2.0
         );
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn recipe_export_resizes_encodes_sixteen_bits_and_is_atomic_on_invalid_settings() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(
+                Image::from_pixels(8, 4, vec![[0.5, 0.25, 0.75, 1.0]; 32]).unwrap(),
+            ))
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resized.png");
+        let settings = export::ExportSettings {
+            long_edge: Some(4),
+            png_sixteen: true,
+            compression: rawweave_batch::Compression::Best,
+            ..Default::default()
+        };
+        session.export_with_settings(&path, &settings).unwrap();
+        let image = image::open(&path).unwrap();
+        assert_eq!((image.width(), image.height()), (4, 2));
+        assert_eq!(image.color(), image::ColorType::Rgba16);
+        let bytes = std::fs::read(&path).unwrap();
+        let invalid = export::ExportSettings {
+            long_edge: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert!(session.export_with_settings(&path, &invalid).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
     #[cfg(feature = "native")]
     #[test]

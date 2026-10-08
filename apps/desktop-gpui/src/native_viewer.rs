@@ -13,7 +13,7 @@ use gpui_kit::*;
 use rawweave_gpui::viewer::{
     Comparison, SurfaceTransform, Target, ViewerModel, display_difference,
 };
-use rawweave_gpui::{PreviewFrame, Session, Source, preview_type};
+use rawweave_gpui::{PreviewFrame, Session, Source, preview_type, spatial::MaskDisplay};
 use rawweave_image::Dimensions;
 use rawweave_rendering::{CancellationToken, scopes::ScopeAnalysis};
 use std::{sync::Arc, time::Duration};
@@ -36,6 +36,7 @@ struct Pane {
     requested_mip: Option<u8>,
     status: String,
     loading: bool,
+    mask_display: MaskDisplay,
 }
 impl Default for Pane {
     fn default() -> Self {
@@ -57,6 +58,7 @@ impl Default for Pane {
             requested_mip: None,
             status: "Select a source image".into(),
             loading: false,
+            mask_display: MaskDisplay::default(),
         }
     }
 }
@@ -272,6 +274,7 @@ impl Viewers {
         let token = pane.token.clone();
         let mut snapshot = self.session.clone();
         snapshot.target = target.clone();
+        snapshot.mask_display = pane.mask_display;
         let first = snapshot.clone();
         let first_token = token.clone();
         let clipping = self.clipping;
@@ -567,6 +570,34 @@ impl Viewers {
                 }
                 menu
             });
+        let mask_target = selected.is_some_and(|(id, port)| {
+            self.session
+                .editor
+                .graph()
+                .node(&rawweave_core::NodeId::from(id.as_str()))
+                .is_some_and(|node| {
+                    node.descriptor.outputs.iter().any(|output| {
+                        output.id == *port
+                            && matches!(output.data_type.as_str(), "core.Mask" | "core.MaskSet")
+                    })
+                })
+        });
+        let spatial_note = selected.and_then(|(id, port)| {
+            self.session.editor.graph().node(&rawweave_core::NodeId::from(id.as_str()))
+                .and_then(|node| node.descriptor.outputs.iter().find(|output| output.id == *port))
+                .and_then(|output| match output.data_type.as_str() {
+                    "core.Mask" | "core.MaskSet" => Some("Mask coverage; colored mode uses coverage as alpha over the viewer ground."),
+                    "core.LabelMap" => Some("Categorical label colors, not measured image RGB."),
+                    "core.ConfidenceMap" => Some("Confidence: 0–1 grayscale, not image brightness."),
+                    "core.DepthMap" => Some("Depth normalized to this output's minimum/maximum; constant depth is midgray."),
+                    "core.RegionSet" => Some("Regions: opaque borders and translucent interiors."),
+                    _ => None,
+                })
+        });
+        let mask_display = self
+            .panes
+            .get(index)
+            .map_or(MaskDisplay::default(), |pane| pane.mask_display);
         let loading = self.panes.get(index).is_some_and(|p| p.loading);
         div()
             .v_flex()
@@ -590,6 +621,28 @@ impl Viewers {
                     })),
             )
             .child(menu)
+            .when_some(spatial_note, |view, note| {
+                view.child(div().text_sm().child(note))
+            })
+            .when(mask_target, |view| {
+                view.child(
+                    Checkbox::new(SharedString::from(format!("mask-overlay-{label}")))
+                        .label("Colored mask overlay")
+                        .checked(mask_display == MaskDisplay::Overlay)
+                        .on_click(cx.listener(move |this, checked, window, cx| {
+                            if let Some(pane) = this.panes.get_mut(index) {
+                                pane.mask_display = if *checked {
+                                    MaskDisplay::Overlay
+                                } else {
+                                    MaskDisplay::Grayscale
+                                };
+                                // A mode change must not display an old, differently colored texture.
+                                pane.clear(window);
+                            }
+                            this.request(index, window, cx);
+                        })),
+                )
+            })
             .child(
                 div()
                     .h_flex()
