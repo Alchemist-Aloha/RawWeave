@@ -149,10 +149,10 @@ impl FlowGraph {
             if let Some(renderer) = self.node_renderers.get(node_type) {
                 renderer(node, window, cx)
             } else {
-                self.render_default_node(node, window, cx)
+                self.render_default_node(node, viewport.zoom, window, cx)
             }
         } else {
-            self.render_default_node(node, window, cx)
+            self.render_default_node(node, viewport.zoom, window, cx)
         };
 
         let node_id = node.id.clone();
@@ -185,11 +185,13 @@ impl FlowGraph {
         let measure_node_id = node.id.clone();
         let prev_w = node.measured_width;
         let prev_h = node.measured_height;
+        let zoom = viewport.zoom;
         let measure_canvas = canvas(
             |_bounds, _window, _cx| {},
             move |bounds, _: (), _window, cx| {
-                let w = bounds.size.width;
-                let h = bounds.size.height;
+                // Edges, hit testing and Fit use world dimensions, not scaled pixels.
+                let w = bounds.size.width / zoom;
+                let h = bounds.size.height / zoom;
                 if prev_w != Some(w) || prev_h != Some(h) {
                     measure_state.update(cx, |state, _| {
                         if let Some(node) = state.get_node_mut(&measure_node_id) {
@@ -211,12 +213,12 @@ impl FlowGraph {
             // Node box styling on the wrapper so handles align to visual edges
             .when(show_chrome, |el: Stateful<Div>| {
                 el.bg(gpui::rgb(node_bg))
-                    .border_1()
+                    .border(px(zoom))
                     .border_color(gpui::rgb(node_border))
-                    .rounded_lg()
+                    .rounded(px(8.0 * zoom))
                     .shadow_sm()
-                    .px_4()
-                    .py_2()
+                    .px(px(16.0 * zoom))
+                    .py(px(8.0 * zoom))
             })
             .cursor(if dragging {
                 CursorStyle::ClosedHand
@@ -224,7 +226,7 @@ impl FlowGraph {
                 CursorStyle::OpenHand
             })
             .when(selected, |el: Stateful<Div>| {
-                el.border_2().border_color(gpui::rgb(0x3b82f6))
+                el.border(px(2.0 * zoom)).border_color(gpui::rgb(0x3b82f6))
             })
             .on_mouse_down(MouseButton::Left, {
                 let node_id = node_id.clone();
@@ -452,6 +454,7 @@ impl FlowGraph {
     fn render_default_node(
         &self,
         node: &FlowNode,
+        zoom: f32,
         _window: &mut Window,
         _cx: &mut App,
     ) -> AnyElement {
@@ -459,8 +462,8 @@ impl FlowGraph {
             return renderer(node, _window, _cx);
         }
         div()
-            .min_w(px(80.0))
-            .text_sm()
+            .min_w(px(80.0 * zoom))
+            .text_size(px(14.0 * zoom))
             .text_color(gpui::rgb(0x1a1a1a))
             .child(if node.label.is_empty() {
                 node.id.to_string()

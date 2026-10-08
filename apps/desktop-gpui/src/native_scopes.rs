@@ -333,6 +333,8 @@ impl Render for Scopes {
             _ => "8-bit display preview values; statistics use at most 100,000 samples.",
         };
         div()
+            .id("scopes-panel")
+            .test_support()
             .v_flex()
             .w_full()
             .flex_shrink_0()

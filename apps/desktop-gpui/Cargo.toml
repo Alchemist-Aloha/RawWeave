@@ -11,6 +11,7 @@ resolver = "2"
 [features]
 default = ["native"]
 native = ["dep:gpui-kit", "dep:gpui-flow", "dep:image", "dep:smallvec"]
+ui-tests = ["native", "gpui-kit/test-support"]
 
 [dependencies]
 gpui-kit = { version = "=0.7.1", optional = true }

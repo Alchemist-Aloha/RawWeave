@@ -4,6 +4,7 @@ pub mod library;
 pub mod parameters;
 pub mod spatial;
 pub mod viewer;
+pub mod workspace;
 use rawweave_color::{DisplayTransform, SrgbDisplayTransform};
 use rawweave_image::{ColorDomain, Dimensions, Image, PixelFormat};
 use rawweave_node_api::{EvaluationContext, Value};
@@ -401,6 +402,7 @@ pub enum Shortcut {
     Undo,
     Redo,
     Delete,
+    SelectAll,
 }
 
 pub fn shortcut(
@@ -417,6 +419,7 @@ pub fn shortcut(
     if modifier {
         match key {
             "k" if !shift => Some(Search),
+            "a" if !editing && !shift => Some(SelectAll),
             "o" => Some(if shift { OpenImage } else { OpenWorkflow }),
             "s" if !shift => Some(SaveWorkflow),
             "z" if !editing => Some(if shift { Redo } else { Undo }),
@@ -787,6 +790,9 @@ mod tests {
         assert_eq!(shortcut("z", true, true, false, false), Some(Redo));
         assert_eq!(shortcut("y", true, false, false, false), Some(Redo));
         assert_eq!(shortcut("k", true, false, false, true), Some(Search));
+        assert_eq!(shortcut("a", true, false, false, false), Some(SelectAll));
+        assert_eq!(shortcut("a", true, false, false, true), None);
+        assert_eq!(shortcut("a", true, true, false, false), None);
         assert_eq!(
             shortcut("backspace", false, false, false, false),
             Some(Delete)

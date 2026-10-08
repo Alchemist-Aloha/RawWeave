@@ -1,10 +1,13 @@
 extern crate gpui_kit as gpui;
 mod native_scopes;
 mod native_viewer;
+#[cfg(all(test, feature = "ui-tests"))]
+mod ui_tests;
 use gpui_flow::{FlowEdge, FlowGraph, FlowNode, FlowState, HandleDef, HandlePosition};
+use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{
-    button::Button,
+    button::{Button, ButtonVariants},
     input::{AnyInputState, Input, InputEvent, InputState, Textarea, TextareaState},
     *,
 };
@@ -22,6 +25,7 @@ use rawweave_gpui::library::{drop_position, library_groups};
 use rawweave_gpui::parameters::{
     ParameterDraft, add_curve_point, curve_points, parameter_ux, remove_curve_point,
 };
+use rawweave_gpui::workspace::{Workspace, preferences_path};
 use rawweave_gpui::{
     MoveHistory, Session, Shortcut, Source, bounded_read, save_workflow_atomic, shortcut,
 };
@@ -98,6 +102,7 @@ struct Editor {
     _search_subscription: Subscription,
     viewers: Entity<Viewers>,
     source_generation: u64,
+    source_path: Option<PathBuf>,
     status: String,
     gpu_label: String,
     undo: Vec<String>,
@@ -105,27 +110,42 @@ struct Editor {
     move_history: MoveHistory,
     layout: BTreeMap<String, (f32, f32)>,
     focus: FocusHandle,
+    workspace: Workspace,
+    preferences_file: Option<PathBuf>,
+    workspace_epoch: u64,
+    canvas_size: (f32, f32),
+    pending_canvas_fit: bool,
+    pending_canvas_focus: Option<String>,
 }
 impl Editor {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut session = Session::default();
-        let status = match session.editor.reset_ordinary_image_graph() {
-            Ok(()) => "Open an image to begin".into(),
-            Err(e) => e.to_string(),
-        };
+        let session = Session::default();
+        let status = "Open an image or add nodes to start weaving".into();
+        let workspace = preferences_path()
+            .and_then(|path| {
+                Workspace::load(&path)
+                    .map_err(|error| eprintln!("Workspace preferences: {error}"))
+                    .ok()
+            })
+            .unwrap_or_default();
         let flow_state = cx.new(|_| FlowState::new(vec![], vec![]));
+        let renderer_state = flow_state.clone();
         let flow = cx.new(|cx| {
             FlowGraph::new(flow_state.clone(), cx)
-                .default_renderer(|node, _, _| {
+                .default_renderer(move |node, _, cx| {
+                    let zoom = renderer_state.read(cx).viewport.zoom;
                     div()
-                        .w(px(160.0))
+                        .id(SharedString::from(format!("node-content-{}", node.id)))
+                        .test_support()
+                        .w(px(160.0 * zoom))
                         .v_flex()
-                        .gap_1()
+                        .gap(px(4.0 * zoom))
+                        .text_size(px(14.0 * zoom))
                         .text_color(rgb(0xe1e5eb))
                         .child(node.label.to_string())
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(px(10.5 * zoom))
                                 .text_color(rgb(0xa6adb8))
                                 .child(node.id.to_string()),
                         )
@@ -192,6 +212,7 @@ impl Editor {
             _search_subscription: search_subscription,
             viewers: cx.new(Viewers::new),
             source_generation: 0,
+            source_path: None,
             status,
             gpu_label,
             undo: vec![],
@@ -199,12 +220,231 @@ impl Editor {
             move_history: MoveHistory::default(),
             layout: BTreeMap::new(),
             focus: cx.focus_handle(),
+            workspace,
+            preferences_file: preferences_path(),
+            workspace_epoch: 0,
+            canvas_size: (600.0, 500.0),
+            pending_canvas_fit: true,
+            pending_canvas_focus: None,
         };
         this.rebuild_flow(cx);
+        let enabled = this.workspace.viewer_open;
+        this.viewers
+            .update(cx, |viewers, cx| viewers.set_enabled(enabled, window, cx));
         this.focus.focus(window, cx);
         this
     }
+    fn persist_workspace(&mut self) {
+        if let Some(path) = &self.preferences_file {
+            // ponytail: tiny atomic write on completed gestures; serialize background saves if profiling shows UI delay.
+            if let Err(error) = self.workspace.save(path) {
+                self.status = format!("Could not save layout: {error}");
+            }
+        }
+    }
+    fn toggle_panel(&mut self, panel: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_canvas_move(window, cx);
+        // Never leave keyboard focus in a dock that is about to leave the tree.
+        window.focus(&self.focus, cx);
+        match panel {
+            0 => self.workspace.library_open = !self.workspace.library_open,
+            1 => {
+                self.workspace.viewer_open = !self.workspace.viewer_open;
+                let enabled = self.workspace.viewer_open;
+                self.viewers
+                    .update(cx, |viewers, cx| viewers.set_enabled(enabled, window, cx));
+            }
+            _ => {
+                window.focus(&self.focus, cx);
+                self.workspace.inspector_open = !self.workspace.inspector_open;
+            }
+        }
+        self.persist_workspace();
+        cx.notify();
+    }
+    fn resize_workspace(
+        &mut self,
+        panel: usize,
+        delta: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_canvas_move(window, cx);
+        match panel {
+            0 => {
+                self.workspace.library_width =
+                    (self.workspace.library_width + delta).clamp(180.0, 400.0)
+            }
+            1 => {
+                self.workspace.viewer_width =
+                    (self.workspace.viewer_width + delta).clamp(280.0, 720.0)
+            }
+            _ => {
+                self.workspace.inspector_height =
+                    (self.workspace.inspector_height + delta).clamp(100.0, 600.0)
+            }
+        }
+        self.workspace_epoch = self.workspace_epoch.wrapping_add(1);
+        self.persist_workspace();
+        cx.notify();
+    }
+    fn canvas_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let measure = canvas(
+            move |bounds, window, cx| {
+                let pending = weak
+                    .update(cx, |this, _| {
+                        this.canvas_size =
+                            (bounds.size.width.as_f32(), bounds.size.height.as_f32());
+                        (
+                            std::mem::take(&mut this.pending_canvas_fit),
+                            this.pending_canvas_focus.take(),
+                        )
+                    })
+                    .unwrap_or_default();
+                if pending.0 || pending.1.is_some() {
+                    let weak = weak.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            if let Some(id) = pending.1.as_ref() {
+                                this.reveal_canvas_node(id, cx);
+                            } else {
+                                this.canvas_navigation(0, cx);
+                            }
+                        });
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let state = self.flow_state.read(cx);
+        div()
+            .v_flex()
+            .size_full()
+            .min_h_0()
+            .child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .p_2()
+                    .flex_shrink_0()
+                    .border_b_1()
+                    .border_color(rgb(0x343b45))
+                    .child(div().font_weight(FontWeight::BOLD).child("Workflow"))
+                    .child(div().text_xs().child(format!(
+                        "{} {} · {} {}",
+                        state.nodes.len(),
+                        if state.nodes.len() == 1 {
+                            "node"
+                        } else {
+                            "nodes"
+                        },
+                        state.edges.len(),
+                        if state.edges.len() == 1 {
+                            "link"
+                        } else {
+                            "links"
+                        }
+                    )))
+                    .child(
+                        Button::new("fit-workflow")
+                            .small()
+                            .label("Fit workflow")
+                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(0, cx))),
+                    )
+                    .child(
+                        Button::new("workflow-zoom-out")
+                            .small()
+                            .label("Zoom out")
+                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(-1, cx))),
+                    )
+                    .child(
+                        Button::new("workflow-zoom-in")
+                            .small()
+                            .label("Zoom in")
+                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(1, cx))),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .child(format!("{:.0}%", state.viewport.zoom * 100.0)),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.finish_canvas_move(window, cx)),
+                    )
+                    .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
+                        this.drop_library_node(drag, window, cx)
+                    }))
+                    .child(self.flow.clone())
+                    .child(measure)
+                    .when(state.nodes.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .absolute()
+                                .top(px(32.0))
+                                .left(px(24.0))
+                                .text_sm()
+                                .child("Start weaving: drag a node here, or add one from Nodes."),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(rgb(0x343b45))
+                    .child("Connect output to input · Middle-drag to pan · Wheel to zoom"),
+            )
+            .into_any_element()
+    }
+    fn reveal_canvas_node(&mut self, id: &str, cx: &mut Context<Self>) {
+        let (width, height) = self.canvas_size;
+        self.flow_state.update(cx, |state, _| {
+            let bounds = state
+                .get_node(&SharedString::from(id.to_owned()))
+                .map(|node| {
+                    (
+                        node.position.x,
+                        node.position.y,
+                        node.measured_width.unwrap_or(px(190.0)).as_f32(),
+                        node.measured_height.unwrap_or(px(70.0)).as_f32(),
+                    )
+                });
+            if let Some((x, y, w, h)) = bounds {
+                state.viewport.zoom = state.viewport.zoom.min(
+                    ((width - 16.0) / w)
+                        .min((height - 16.0) / h)
+                        .max(state.min_zoom),
+                );
+                state.set_center(x + w / 2.0, y + h / 2.0, width, height);
+            }
+        });
+        self.flow.update(cx, |_, cx| cx.notify());
+    }
+    fn canvas_navigation(&mut self, action: i8, cx: &mut Context<Self>) {
+        let (width, height) = self.canvas_size;
+        self.flow_state.update(cx, |state, _| match action {
+            -1 => state.zoom_out(width, height),
+            1 => state.zoom_in(width, height),
+            _ => state.fit_view(32.0, width, height),
+        });
+        self.flow.update(cx, |_, cx| cx.notify());
+    }
     fn rebuild_flow(&mut self, cx: &mut Context<Self>) {
+        self.pending_canvas_focus = None;
         self.move_history.reset();
         let nodes = self
             .session
@@ -824,6 +1064,7 @@ impl Editor {
         self.source_generation += 1;
         let generation = self.source_generation;
         self.status = format!("Opening {}…", path.display());
+        let source_path = path.clone();
         let task = cx
             .background_executor()
             .spawn(async move { Source::open(&path) });
@@ -835,11 +1076,13 @@ impl Editor {
                 }
                 match result.and_then(|source| this.session.attach(source)) {
                     Ok(()) => {
+                        this.source_path = Some(source_path);
                         this.undo.clear();
                         this.redo.clear();
                         this.selected = None;
                         this.fields.clear();
                         this.field_subscriptions.clear();
+                        this.pending_canvas_fit = true;
                         this.rebuild_flow(cx);
                         this.reset_viewers(window, cx);
                         this.status = "Source image loaded".into();
@@ -895,11 +1138,13 @@ impl Editor {
                         Ok(()) => {
                             this.viewers.update(cx, |viewers, _| viewers.cancel_all());
                             this.source_generation += 1;
+                            this.source_path = None;
                             this.undo.clear();
                             this.redo.clear();
                             this.selected = None;
                             this.fields.clear();
                             this.field_subscriptions.clear();
+                            this.pending_canvas_fit = true;
                             this.reset_viewers(window, cx);
                             this.rebuild_flow(cx);
                             this.status = if kind == FileKind::Blueprint {
@@ -985,6 +1230,135 @@ impl Editor {
             });
         })
         .detach();
+    }
+    fn workflow_menus(&self, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        let load = cx.entity().downgrade();
+        let save = load.clone();
+        let selection = load.clone();
+        let instantiate = load.clone();
+        let selected = self
+            .flow_state
+            .read(cx)
+            .nodes
+            .iter()
+            .any(|node| node.selected);
+        let file = Button::new("workflow-file-menu")
+            .label("Workflow files")
+            .dropdown_menu(move |menu, _, _| {
+                let load = load.clone();
+                let save = save.clone();
+                let selection = selection.clone();
+                let instantiate = instantiate.clone();
+                menu.item(PopupMenuItem::new("Open Workflow · Ctrl/Cmd+O").on_click(
+                    move |_, window, cx| {
+                        let _ = load.update(cx, |this, cx| {
+                            this.choose_file(FileKind::Workflow, window, cx)
+                        });
+                    },
+                ))
+                .item(PopupMenuItem::new("Save Workflow · Ctrl/Cmd+S").on_click(
+                    move |_, window, cx| {
+                        let _ = save.update(cx, |this, cx| this.save(window, cx));
+                    },
+                ))
+                .separator()
+                .item(
+                    PopupMenuItem::new("Export selection blueprint")
+                        .disabled(!selected)
+                        .on_click(move |_, window, cx| {
+                            let _ = selection
+                                .update(cx, |this, cx| this.export_selection_blueprint(window, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Instantiate blueprint (replace workflow)").on_click(
+                        move |_, window, cx| {
+                            let _ = instantiate.update(cx, |this, cx| {
+                                this.choose_file(FileKind::Blueprint, window, cx)
+                            });
+                        },
+                    ),
+                )
+            })
+            .into_any_element();
+        let weak = cx.entity().downgrade();
+        let prefs = self.workspace.clone();
+        let export_settings = self.show_export_settings;
+        let shortcuts = self.show_shortcuts;
+        let view = Button::new("workflow-view-menu")
+            .label("View")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (panel, name, open) in [
+                    (0, "Nodes", prefs.library_open),
+                    (1, "Viewer and scopes", prefs.viewer_open),
+                    (2, "Parameters", prefs.inspector_open),
+                ] {
+                    let weak = weak.clone();
+                    menu = menu.item(PopupMenuItem::new(name).checked(open).on_click(
+                        move |_, window, cx| {
+                            let _ =
+                                weak.update(cx, |this, cx| this.toggle_panel(panel, window, cx));
+                        },
+                    ));
+                }
+                menu = menu.separator();
+                for (panel, delta, label) in [
+                    (0, -24.0, "Nodes: narrower"),
+                    (0, 24.0, "Nodes: wider"),
+                    (1, -24.0, "Viewer: narrower"),
+                    (1, 24.0, "Viewer: wider"),
+                    (2, -24.0, "Parameters: shorter"),
+                    (2, 24.0, "Parameters: taller"),
+                ] {
+                    let weak = weak.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.resize_workspace(panel, delta, window, cx)
+                        });
+                    }));
+                }
+                let settings = weak.clone();
+                let help = weak.clone();
+                let reset = weak.clone();
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("Export settings")
+                            .checked(export_settings)
+                            .on_click(move |_, _, cx| {
+                                let _ = settings.update(cx, |this, cx| {
+                                    this.show_export_settings = !this.show_export_settings;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Keyboard shortcuts · ?")
+                            .checked(shortcuts)
+                            .on_click(move |_, _, cx| {
+                                let _ = help.update(cx, |this, cx| {
+                                    this.show_shortcuts = !this.show_shortcuts;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("Reset workspace layout").on_click(
+                        move |_, window, cx| {
+                            let _ = reset.update(cx, |this, cx| {
+                                this.finish_canvas_move(window, cx);
+                                this.workspace = Workspace::default();
+                                this.workspace_epoch = this.workspace_epoch.wrapping_add(1);
+                                this.viewers.update(cx, |viewers, cx| {
+                                    viewers.set_enabled(true, window, cx)
+                                });
+                                this.persist_workspace();
+                                cx.notify();
+                            });
+                        },
+                    ))
+            })
+            .into_any_element();
+        (file, view)
     }
     fn export_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let compression = self.export_settings.compression;
@@ -1180,6 +1554,8 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.finish_canvas_move(window, cx);
+        self.pending_canvas_fit = false;
+        let manually_placed = position.is_some();
         let old = self.document();
         let mut i = self.session.editor.graph().nodes().len();
         while self
@@ -1211,9 +1587,12 @@ impl Editor {
                     )
                 });
                 self.layout.insert(id.clone(), position);
-                self.selected = Some(id);
+                self.selected = Some(id.clone());
                 self.rebuild_fields(window, cx);
                 self.rebuild_flow(cx);
+                if !manually_placed {
+                    self.pending_canvas_focus = Some(id);
+                }
                 self.request_preview(window, cx);
             }
             Err(error) => self.status = error.to_string(),
@@ -1277,182 +1656,41 @@ impl Editor {
     }
 }
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let export_controls = self.export_controls(cx);
-        let searching = !self.search.read(cx).value().trim().is_empty();
-        let groups = self.library_nodes(cx);
-        let library_count = groups.iter().map(|(_, nodes)| nodes.len()).sum::<usize>();
-        let library = groups.into_iter().map(|(category, nodes)| {
-            let open = searching || !self.collapsed_categories.contains(&category);
-            let toggle = category.clone();
-            div()
-                .v_flex()
-                .gap_1()
-                .child(
-                    Button::new(SharedString::from(format!("category-{category}")))
-                        .small()
-                        .label(category.clone())
-                        .toggled(open)
-                        .tooltip(format!(
-                            "{} {category}",
-                            if open { "Collapse" } else { "Expand" }
-                        ))
-                        .child(div().text_xs().child(nodes.len().to_string()))
-                        .disabled(searching)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.collapsed_categories.remove(&toggle) {
-                                this.collapsed_categories.insert(toggle.clone());
-                            }
-                            cx.notify();
-                        })),
-                )
-                .when(open, |view| {
-                    view.children(nodes.into_iter().map(|descriptor| {
-                        let kind = descriptor.type_id.clone();
-                        let drag = LibraryDrag {
-                            kind: kind.clone(),
-                            label: descriptor.name.clone(),
-                        };
-                        div()
-                            .id(SharedString::from(format!("drag-{kind}")))
-                            .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-                            .child(
-                                Button::new(SharedString::from(kind.clone()))
-                                    .label(descriptor.name)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.add_library_node(&kind, None, window, cx)
-                                    })),
-                            )
-                    }))
-                })
-                .into_any_element()
-        });
-        div()
-            .id("rawweave")
-            .track_focus(&self.focus)
-            .size_full()
-            .v_flex()
-            .bg(rgb(0x1c2026))
-            .text_color(rgb(0xe1e5eb))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
-                    || this.search.read(cx).focus_handle(cx).is_focused(window)
-                    || this.export_quality.read(cx).focus_handle(cx).is_focused(window)
-                    || this.export_long_edge.read(cx).focus_handle(cx).is_focused(window);
-                let modifiers = event.keystroke.modifiers;
-                if !editing && event.keystroke.key == "?" {
-                    this.show_shortcuts = !this.show_shortcuts;
-                    cx.notify();
-                    cx.stop_propagation();
-                    return;
-                }
-                if let Some(action) = shortcut(&event.keystroke.key, modifiers.control || modifiers.platform, modifiers.shift, modifiers.alt, editing) {
-                    match action {
-                        Shortcut::OpenImage => this.choose_file(FileKind::Image, window, cx),
-                        Shortcut::OpenWorkflow => this.choose_file(FileKind::Workflow, window, cx),
-                        Shortcut::SaveWorkflow => this.save(window, cx),
-                        Shortcut::Search => this.search.read(cx).focus_handle(cx).focus(window, cx),
-                        Shortcut::Undo => this.history(false, window, cx),
-                        Shortcut::Redo => this.history(true, window, cx),
-                        Shortcut::Delete => this.delete_selection(window, cx),
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .child(
-                div()
-                    .h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(rgb(0x343b45))
-                    .child(div().font_weight(FontWeight::BOLD).mr_4().child("RawWeave"))
-                    .child(Button::new("open").label("Open Image").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Image, window, cx)),
-                    ))
-                    .child(Button::new("load").label("Load Workflow").on_click(
-                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Workflow, window, cx)),
-                    ))
-                    .child(
-                        Button::new("save")
-                            .label("Save Workflow")
-                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
-                    )
-                    .child(Button::new("selection-blueprint").label("Export selection blueprint")
-                        .disabled(!self.flow_state.read(cx).nodes.iter().any(|node| node.selected))
-                        .tooltip("Save selected nodes as a reusable version-1.0.0 blueprint; filename supplies its ID and name")
-                        .on_click(cx.listener(|this, _, window, cx| this.export_selection_blueprint(window, cx))))
-                    .child(Button::new("instantiate-blueprint").label("Instantiate blueprint")
-                        .tooltip("Replace the workflow with a validated blueprint graph and clear the runtime source")
-                        .on_click(cx.listener(|this, _, window, cx| this.choose_file(FileKind::Blueprint, window, cx))))
-                    .child(Button::new("export").label(if self.export_busy { "Exporting…" } else { "Export Image" })
-                        .disabled(self.export_busy || self.session.source.is_none())
-                        .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))))
-                    .child(Button::new("export-settings").label("Export settings").toggled(self.show_export_settings)
-                        .on_click(cx.listener(|this, _, _, cx| { this.show_export_settings = !this.show_export_settings; cx.notify(); })))
-                    .child(Button::new("shortcuts").label("Shortcuts").on_click(cx.listener(|this, _, _, cx| {
-                        this.show_shortcuts = !this.show_shortcuts; cx.notify();
-                    })))
-                    .child(Button::new("undo").label("Undo").disabled(self.undo.is_empty()).on_click(
-                        cx.listener(|this, _, window, cx| this.history(false, window, cx)),
-                    ))
-                    .child(Button::new("redo").label("Redo").disabled(self.redo.is_empty()).on_click(
-                        cx.listener(|this, _, window, cx| this.history(true, window, cx)),
-                    ))
-                    .child(Button::new("fit").label("Fit").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.viewers.update(cx, |viewers, cx| viewers.fit_active(window, cx));
-                        },
-                    )))
-                    .child(Button::new("actual").label("100%").on_click(cx.listener(
-                        |this, _, window, cx| {
-                            this.viewers.update(cx, |viewers, cx| viewers.actual_active(window, cx));
-                        },
-                    ))),
-            )
-            .when(self.show_export_settings, |view| view.child(export_controls))
-            .when(self.show_shortcuts, |view| view.child(div().p_2().text_sm()
-                .child("Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo.")))
-            .child(
-                div()
-                    .h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("library")
-                            .w(px(200.0))
-                            .h_full()
-                            .overflow_y_scroll()
-                            .v_flex()
-                            .gap_1()
-                            .p_2()
-                            .child(Input::new(&self.search))
-                            .child(div().text_xs().child("Drag into canvas · Click or Enter to add"))
-                            .when(!self.selected_output_types().is_empty(),|view|view.child(Checkbox::new("compatible-nodes").label("Compatible inputs only").checked(self.compatible_only).on_click(cx.listener(|this,checked,_,cx|{this.compatible_only = *checked;cx.notify();}))))
-                            .child(div().text_xs().child(format!("{library_count} matching nodes")))
-                            .children(library)
-                            .when(library_count==0,|view|view.child(div().text_sm().child("No nodes match this search or input filter."))),
-                    )
-                    .child(
-                        div()
-                            .v_flex()
-                            .w(relative(0.36))
-                            .min_w(px(280.0))
-                            .h_full()
-                            .child(div().flex_1().min_h_0().on_mouse_up_out(MouseButton::Left,cx.listener(|this,_,window,cx|this.finish_canvas_move(window,cx))).on_drop(cx.listener(|this,drag:&LibraryDrag,window,cx|this.drop_library_node(drag,window,cx))).child(self.flow.clone()))
-                            .child(
-                                div()
+        let (file_menu, view_menu) = self.workflow_menus(cx);
+        let has_parameters = !self.fields.is_empty();
+        let inspector_height = if has_parameters {
+            self.workspace.inspector_height
+        } else {
+            48.0
+        };
+        let selected_title = self
+            .selected
+            .as_ref()
+            .and_then(|id| {
+                self.session
+                    .editor
+                    .graph()
+                    .node(&CoreNodeId::from(id.as_str()))
+            })
+            .map(|node| format!("{} · {}", node.descriptor.name, node.id))
+            .unwrap_or_else(|| "Parameters · Select a node".into());
+        let inspector = div()
                                     .id("parameters")
-                                    .max_h(px(240.0))
+                                    .test_support()
+                                    .size_full()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .overflow_x_hidden()
                                     .overflow_y_scroll()
                                     .v_flex()
                                     .p_3()
                                     .gap_2()
-                                    .child(self.selected.clone().unwrap_or_else(|| {
-                                        "Select a node to edit parameters".into()
-                                    }))
+                                    .child(div().h_flex().flex_wrap().gap_2()
+                                        .child(div().font_weight(FontWeight::BOLD).child(selected_title))
+                                        .child(Button::new("hide-inspector").small().label("Hide parameters")
+                                            .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(2, window, cx)))))
                                     .when(self.fields.iter().any(|field|field.draft.ux.advanced),|view|view.child(Button::new("advanced-parameters").label(if self.show_advanced {"Hide Advanced"} else {"Show Advanced"}).on_click(cx.listener(|this,_,window,cx|{window.focus(&this.focus,cx);this.show_advanced = !this.show_advanced;cx.notify();}))))
                                     .children(self.fields.iter().enumerate().filter(|(_,field)| !field.draft.ux.advanced || self.show_advanced).map(|(index,field)| {
                                         let ux=&field.draft.ux;
@@ -1501,28 +1739,209 @@ impl Render for Editor {
                                             .child(div().text_xs().text_color(rgb(0xa6adb8)).child(ux.description.clone()))
                                             .when(field.draft.outside_recommended(),|view|view.child(div().text_xs().child("Outside recommended slider range; exact value is preserved.")))
                                             .when_some(field.error.as_ref(),|view,error|view.child(div().text_xs().text_color(rgb(0xffa480)).child(error.clone())))
-                                    })),
-                            ),
+                                    })).into_any_element();
+        let canvas_panel = self.canvas_panel(cx);
+        let searching = !self.search.read(cx).value().trim().is_empty();
+        let groups = self.library_nodes(cx);
+        let library_count = groups.iter().map(|(_, nodes)| nodes.len()).sum::<usize>();
+        let library = groups
+            .into_iter()
+            .map(|(category, nodes)| {
+                let open = searching || !self.collapsed_categories.contains(&category);
+                let toggle = category.clone();
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        Button::new(SharedString::from(format!("category-{category}")))
+                            .small()
+                            .label(category.clone())
+                            .toggled(open)
+                            .tooltip(format!(
+                                "{} {category}",
+                                if open { "Collapse" } else { "Expand" }
+                            ))
+                            .child(div().text_xs().child(nodes.len().to_string()))
+                            .disabled(searching)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.collapsed_categories.remove(&toggle) {
+                                    this.collapsed_categories.insert(toggle.clone());
+                                }
+                                cx.notify();
+                            })),
                     )
-                    .child(div().flex_1().min_w_0().h_full().child(self.viewers.clone())),
+                    .when(open, |view| {
+                        view.children(nodes.into_iter().map(|descriptor| {
+                            let kind = descriptor.type_id.clone();
+                            let tooltip = format!("{} · {}", descriptor.name, descriptor.type_id);
+                            let drag = LibraryDrag {
+                                kind: kind.clone(),
+                                label: descriptor.name.clone(),
+                            };
+                            div()
+                                .id(SharedString::from(format!("drag-{kind}")))
+                                .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                                .child(
+                                    Button::new(SharedString::from(kind.clone()))
+                                        .label(descriptor.name)
+                                        .tooltip(tooltip)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.add_library_node(&kind, None, window, cx)
+                                        })),
+                                )
+                        }))
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("rawweave")
+            .track_focus(&self.focus)
+            .size_full()
+            .v_flex()
+            .bg(rgb(0x1c2026))
+            .text_color(rgb(0xe1e5eb))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
+                    || this.search.read(cx).focus_handle(cx).is_focused(window)
+                    || this.export_quality.read(cx).focus_handle(cx).is_focused(window)
+                    || this.export_long_edge.read(cx).focus_handle(cx).is_focused(window);
+                let modifiers = event.keystroke.modifiers;
+                if !editing && event.keystroke.key == "?" {
+                    this.show_shortcuts = !this.show_shortcuts;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                if let Some(action) = shortcut(&event.keystroke.key, modifiers.control || modifiers.platform, modifiers.shift, modifiers.alt, editing) {
+                    match action {
+                        Shortcut::OpenImage => this.choose_file(FileKind::Image, window, cx),
+                        Shortcut::OpenWorkflow => this.choose_file(FileKind::Workflow, window, cx),
+                        Shortcut::SaveWorkflow => this.save(window, cx),
+                        Shortcut::Search => {
+                            this.workspace.library_open = true;
+                            this.persist_workspace();
+                            this.search.read(cx).focus_handle(cx).focus(window, cx);
+                            cx.notify();
+                        },
+                        Shortcut::Undo => this.history(false, window, cx),
+                        Shortcut::Redo => this.history(true, window, cx),
+                        Shortcut::Delete => this.delete_selection(window, cx),
+                        Shortcut::SelectAll => {
+                            this.flow_state.update(cx, |state, _| state.select_all());
+                            this.flow.update(cx, |_, cx| cx.notify());
+                        },
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div().h_flex().flex_wrap().gap_2().p_2().flex_shrink_0().border_b_1().border_color(rgb(0x343b45))
+                    .child(div().font_weight(FontWeight::BOLD).mr_2().child("RawWeave"))
+                    .child(Button::new("open").label("Open Image").primary().on_click(
+                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Image, window, cx))))
+                    .child(file_menu)
+                    .child(Button::new("export").label(if self.export_busy { "Exporting…" } else { "Export Image" })
+                        .disabled(self.export_busy || self.session.source.is_none())
+                        .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))))
+                    .child(view_menu)
+                    .child(Button::new("undo").label("Undo").tooltip("Ctrl/Cmd+Z").disabled(self.undo.is_empty())
+                        .on_click(cx.listener(|this, _, window, cx| this.history(false, window, cx))))
+                    .child(Button::new("redo").label("Redo").tooltip("Ctrl/Cmd+Shift+Z").disabled(self.redo.is_empty())
+                        .on_click(cx.listener(|this, _, window, cx| this.history(true, window, cx))))
+            )
+            .when(self.show_export_settings, |view| view.child(export_controls))
+            .when(self.show_shortcuts, |view| view.child(div().p_2().text_sm()
+                .child("Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · A select all (outside text fields) · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo.")))
+            .child(
+                div().id("workbench-scroll").flex_1().min_h_0().overflow_x_scroll()
+                    .child(div().h_full().w_full().min_w(px(
+                        280.0 + if self.workspace.library_open { self.workspace.library_width } else { 0.0 }
+                            + if self.workspace.viewer_open { self.workspace.viewer_width } else { 0.0 }
+                    )).child(
+                        // Base groups scale old sizes proportionally. A new window size
+                        // must instead restore our absolute dock preferences (including WM tiling).
+                        h_resizable(SharedString::from(format!("workbench-{}-{}-{}-{}", self.workspace_epoch, self.workspace.library_open, self.workspace.viewer_open, window.viewport_size().width.as_f32())))
+                            .on_resize({
+                                let weak = cx.entity().downgrade();
+                                let library_open = self.workspace.library_open;
+                                let viewer_open = self.workspace.viewer_open;
+                                move |state, _, cx| {
+                                    let sizes = state.read(cx).sizes().clone();
+                                    let _ = weak.update(cx, |this, _| {
+                                        if library_open && let Some(size) = sizes.first() { this.workspace.library_width = size.as_f32().clamp(180.0, 400.0); }
+                                        if viewer_open && let Some(size) = sizes.last() { this.workspace.viewer_width = size.as_f32().clamp(280.0, 720.0); }
+                                        this.persist_workspace();
+                                    });
+                                }
+                            })
+                            .when(self.workspace.library_open, |group| group.child(
+                                resizable_panel().size(px(self.workspace.library_width)).size_range(px(180.0)..px(400.0)).flex_none().child(
+                                    div().id("library").test_support().size_full().overflow_y_scroll().v_flex().gap_1().p_2()
+                                        .child(div().h_flex().flex_wrap().gap_1().child(div().font_weight(FontWeight::BOLD).child("Nodes"))
+                                            .child(Button::new("hide-library").small().label("Hide").on_click(cx.listener(|this, _, window, cx| this.toggle_panel(0, window, cx)))))
+                                        .child(Input::new(&self.search))
+                                        .child(div().text_xs().child("Drag into workflow · Click or Enter to add"))
+                                        .when(!self.selected_output_types().is_empty(), |view| view.child(Checkbox::new("compatible-nodes").label("Compatible inputs only").checked(self.compatible_only).on_click(cx.listener(|this, checked, _, cx| { this.compatible_only = *checked; cx.notify(); }))))
+                                        .child(div().text_xs().child(format!("{library_count} matching {}", if library_count == 1 { "node" } else { "nodes" })))
+                                        .children(library)
+                                        .when(library_count == 0, |view| view.child(div().text_sm().child("No matching nodes. Clear search or turn off compatible filtering.")))
+                                )
+                            ))
+                            .child(resizable_panel().size_range(px(280.0)..px(10000.0)).child(
+                                v_resizable(SharedString::from(format!("workflow-panels-{}-{}-{}-{:?}-{}-{}", self.workspace_epoch, self.workspace.inspector_open, has_parameters, window.viewport_size(), self.show_export_settings, self.show_shortcuts)))
+                                    .on_resize({
+                                        let weak = cx.entity().downgrade();
+                                        let inspector_open = self.workspace.inspector_open && has_parameters;
+                                        move |state, _, cx| {
+                                            if inspector_open && let Some(size) = state.read(cx).sizes().last().copied() {
+                                                let _ = weak.update(cx, |this, _| { this.workspace.inspector_height = size.as_f32().clamp(100.0, 600.0); this.persist_workspace(); });
+                                            }
+                                        }
+                                    })
+                                    .child(resizable_panel().size_range(px(120.0)..px(10000.0)).child(canvas_panel))
+                                    .when(self.workspace.inspector_open, |group| group.child(resizable_panel().size(px(inspector_height)).size_range(if has_parameters { px(100.0)..px(600.0) } else { px(38.0)..px(64.0) }).flex_none().child(inspector)))
+                            ))
+                            .when(self.workspace.viewer_open, |group| group.child(
+                                resizable_panel().size(px(self.workspace.viewer_width)).size_range(px(280.0)..px(720.0)).flex_none().child(self.viewers.clone())
+                            ))
+                    ))
             )
             .child(
                 div()
                     .px_3()
                     .py_1()
                     .text_xs()
+                    .flex_shrink_0()
                     .border_t_1()
                     .border_color(rgb(0x343b45))
-                    .child(format!("{} · {}", self.status, self.gpu_label))
+                    .child(format!("{}{} · {}", self.source_path.as_ref().map(|path| format!("{} · ", path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())).unwrap_or_default(), self.status, self.gpu_label))
                     .when(!self.export_status.is_empty(), |view| view.child(div().child(self.export_status.clone()))),
             )
     }
+}
+fn configure_theme(cx: &mut App) {
+    Theme::change(ThemeMode::Dark, None, cx);
+    Theme::update(cx, |theme| {
+        theme.font_size = px(14.0);
+        theme.radius = px(3.0);
+        theme.radius_lg = px(3.0);
+        theme.colors.primary = rgb(0xf2efe6).into();
+        theme.colors.primary_foreground = rgb(0x14110d).into();
+        theme.colors.primary_hover = rgb(0xfffdf7).into();
+        theme.colors.primary_active = rgb(0xded6c4).into();
+        theme.colors.button_primary = theme.colors.primary;
+        theme.colors.button_primary_foreground = theme.colors.primary_foreground;
+        theme.colors.button_primary_hover = theme.colors.primary_hover;
+        theme.colors.button_primary_active = theme.colors.primary_active;
+        theme.colors.ring = rgb(0xe8a33d).into();
+    });
 }
 fn main() {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
+        configure_theme(cx);
         let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
         let result = gpui_kit::open_window(
             WindowOptions {

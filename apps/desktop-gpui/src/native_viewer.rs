@@ -124,6 +124,7 @@ pub struct Viewers {
     difference_key: Option<DifferenceKey>,
     difference_running: bool,
     difference_error: Option<String>,
+    enabled: bool,
 }
 impl Viewers {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -156,6 +157,7 @@ impl Viewers {
             difference_key: None,
             difference_running: false,
             difference_error: None,
+            enabled: true,
         }
     }
     pub fn set_session(
@@ -179,6 +181,28 @@ impl Viewers {
         }
         self.model.reconcile(&self.session);
         self.request_all(window, cx);
+    }
+    pub fn set_enabled(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        self.blink_epoch = self.blink_epoch.saturating_add(1);
+        if enabled {
+            self.request_all(window, cx);
+            if self.model.mode == Comparison::Blink {
+                self.start_blink(window, cx);
+            }
+        } else {
+            for pane in &mut self.panes {
+                pane.clear(window);
+            }
+            self.clear_difference(window);
+        }
+        self.scopes.update(cx, |scopes, cx| {
+            scopes.set_enabled(enabled && self.scopes_visible, window, cx)
+        });
+        cx.notify();
     }
     pub fn export_session(&self) -> Session {
         let mut session = self.session.clone();
@@ -205,6 +229,9 @@ impl Viewers {
         pane == 0 || self.model.mode != Comparison::Single
     }
     fn request_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         for pane in 0..2 {
             if self.visible(pane) {
                 self.request(pane, window, cx);
@@ -409,30 +436,36 @@ impl Viewers {
             self.active = 0;
         }
         self.request_all(window, cx);
-        if mode == Comparison::Blink {
-            let epoch = self.blink_epoch;
-            cx.spawn_in(window, async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(450))
-                        .await;
-                    let keep = this
-                        .update_in(cx, |this, _, cx| {
-                            if this.model.mode != Comparison::Blink || this.blink_epoch != epoch {
-                                return false;
-                            }
-                            this.blink_b = !this.blink_b;
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !keep {
-                        break;
-                    }
-                }
-            })
-            .detach();
+        if mode == Comparison::Blink && self.enabled {
+            self.start_blink(window, cx);
         }
+    }
+    fn start_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let epoch = self.blink_epoch;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(450))
+                    .await;
+                let keep = this
+                    .update_in(cx, |this, _, cx| {
+                        if !this.enabled
+                            || this.model.mode != Comparison::Blink
+                            || this.blink_epoch != epoch
+                        {
+                            return false;
+                        }
+                        this.blink_b = !this.blink_b;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
     fn difference_plan(&self) -> Option<(DifferenceKey, [Arc<PreviewFrame>; 2])> {
         if self.model.mode != Comparison::Difference {
@@ -600,10 +633,13 @@ impl Viewers {
             .map_or(MaskDisplay::default(), |pane| pane.mask_display);
         let loading = self.panes.get(index).is_some_and(|p| p.loading);
         div()
+            .id(SharedString::from(format!("viewer-controls-{label}")))
+            .test_support()
             .v_flex()
             .min_w_0()
             .gap_1()
             .p_2()
+            .flex_shrink_0()
             .child(
                 Button::new(SharedString::from(format!("active-{label}")))
                     .label(format!(
@@ -695,12 +731,6 @@ impl Viewers {
                     ),
             )
             .into_any_element()
-    }
-    pub fn fit_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.fit(self.active, window, cx);
-    }
-    pub fn actual_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.zoom(self.active, Some(1.0), window, cx);
     }
     fn fit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.panes.get_mut(index) {
@@ -872,6 +902,7 @@ impl Viewers {
         .absolute()
         .size_full();
         self.interaction(index, cx)
+            .test_support()
             .child(measure)
             .child(self.image(index))
             .into_any_element()
@@ -882,7 +913,6 @@ impl Viewers {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .h_full()
             .child(self.controls(index, cx))
             .child(
                 div()
@@ -892,7 +922,7 @@ impl Viewers {
                     .child(self.stage(index, cx)),
             )
             .child(
-                div().px_2().py_1().text_xs().child(
+                div().px_2().py_1().text_xs().flex_shrink_0().child(
                     self.panes
                         .get(index)
                         .map(|p| p.status.clone())
@@ -917,6 +947,7 @@ impl Viewers {
         .size_full();
         let mut surface = self
             .interaction(self.active, cx)
+            .test_support()
             .child(measure)
             .bg(rgb(0x101215));
         match self.model.mode {
@@ -1059,55 +1090,68 @@ impl Render for Viewers {
                 .child(self.pane(1, cx))
                 .into_any_element()
         };
+        let min_height = match mode {
+            Comparison::Single => 600.0,
+            Comparison::Vertical => 860.0,
+            _ => 700.0,
+        } - if self.scopes_visible { 0.0 } else { 240.0 };
         div()
-            .v_flex()
-            .flex_1()
-            .min_w_0()
+            .id("viewer-dock")
             .size_full()
+            .min_h_0()
+            .overflow_y_scroll()
             .child(
                 div()
-                    .h_flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .p_2()
-                    .child(div().child("Comparison"))
-                    .child(menu)
+                    .v_flex()
+                    .min_w_0()
+                    .h_full()
+                    .min_h(px(min_height))
                     .child(
-                        Button::new("scopes-visible")
-                            .label(if self.scopes_visible {
-                                "Hide Scopes"
-                            } else {
-                                "Show Scopes"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.scopes_visible = !this.scopes_visible;
-                                this.scopes.update(cx, |scopes, cx| {
-                                    scopes.set_enabled(this.scopes_visible, window, cx)
-                                });
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Checkbox::new("clipping")
-                            .label("Clipping")
-                            .checked(self.clipping)
-                            .on_click(cx.listener(|this, enabled, window, cx| {
-                                this.clipping = *enabled;
-                                this.clear_difference(window);
-                                if !this.clipping {
-                                    for pane in &mut this.panes {
-                                        if let Some(image) = pane.clip_image.take() {
-                                            let _ = window.drop_image(image);
+                        div()
+                            .h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .p_2()
+                            .flex_shrink_0()
+                            .child(div().child("Comparison"))
+                            .child(menu)
+                            .child(
+                                Button::new("scopes-visible")
+                                    .label(if self.scopes_visible {
+                                        "Hide Scopes"
+                                    } else {
+                                        "Show Scopes"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.scopes_visible = !this.scopes_visible;
+                                        this.scopes.update(cx, |scopes, cx| {
+                                            scopes.set_enabled(this.scopes_visible, window, cx)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Checkbox::new("clipping")
+                                    .label("Clipping")
+                                    .checked(self.clipping)
+                                    .on_click(cx.listener(|this, enabled, window, cx| {
+                                        this.clipping = *enabled;
+                                        this.clear_difference(window);
+                                        if !this.clipping {
+                                            for pane in &mut this.panes {
+                                                if let Some(image) = pane.clip_image.take() {
+                                                    let _ = window.drop_image(image);
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                                this.request_all(window, cx);
-                                cx.notify();
-                            })),
-                    ),
+                                        this.request_all(window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(body)
+                    .when(self.scopes_visible, |view| view.child(self.scopes.clone())),
             )
-            .child(body)
-            .when(self.scopes_visible, |view| view.child(self.scopes.clone()))
     }
 }
 fn comparison_frame(
@@ -1138,4 +1182,69 @@ fn upload(frame: &PreviewFrame) -> Result<Arc<RenderImage>, String> {
     Ok(Arc::new(RenderImage::new(smallvec::smallvec![
         image::Frame::new(image)
     ])))
+}
+
+#[cfg(all(test, feature = "ui-tests"))]
+mod ui_tests {
+    use super::{Comparison, Viewers};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{
+        AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
+    };
+
+    #[gpui_kit::test]
+    fn compact_comparison_modes_keep_images_controls_and_scopes_separate(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::configure_theme);
+        let (handle, viewers) = cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(380.0), px(340.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(Viewers::new),
+            )
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            for mode in Comparison::ALL {
+                viewers.update(cx, |viewers, cx| viewers.set_mode(mode, window, cx));
+                window.render_frame(cx);
+                window.render_frame(cx);
+                let controls = window.find("viewer-controls-A").bounds();
+                let image = window.find("viewer-0-interaction").bounds();
+                let scopes = window.find("scopes-panel").bounds();
+                assert!(
+                    image.size.height >= px(80.0),
+                    "{mode:?} collapsed: {image:?}"
+                );
+                assert!(
+                    controls.bottom() <= image.top() + px(1.0),
+                    "{mode:?} controls overlap image"
+                );
+                assert!(
+                    image.bottom() <= scopes.top(),
+                    "{mode:?} scopes overlap image"
+                );
+            }
+            viewers.update(cx, |viewers, cx| {
+                viewers.set_enabled(false, window, cx);
+                assert!(viewers.panes.iter().all(|pane| pane.token.is_cancelled()
+                    && pane.image.is_none()
+                    && !pane.loading));
+                let generations = viewers.panes.each_ref().map(|pane| pane.generation);
+                viewers.request_all(window, cx);
+                assert_eq!(
+                    viewers.panes.each_ref().map(|pane| pane.generation),
+                    generations
+                );
+                assert!(viewers.difference.is_none());
+            });
+        })
+        .unwrap();
+    }
 }
