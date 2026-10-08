@@ -1,4 +1,5 @@
 //! Presentation of shared Rust display analysis. No image processing lives in these widgets.
+use crate::native_theme as t;
 use gpui_kit::component::{
     button::Button,
     menu::{DropdownMenu, PopupMenuItem},
@@ -280,7 +281,7 @@ impl Render for Scopes {
             .h(px(160.0))
             .w_full()
             .overflow_hidden()
-            .bg(rgb(0x141414))
+            .bg(rgb(t::JUDGE_SUNK))
             .child(measure);
         if self.kind == ScopeKind::PixelInspector {
             let sample = self.analysis.as_ref().and_then(|a| {
@@ -339,7 +340,7 @@ impl Render for Scopes {
             .w_full()
             .flex_shrink_0()
             .border_t_1()
-            .border_color(rgb(0x343b45))
+            .border_color(rgb(t::JUDGE_LINE))
             .p_2()
             .gap_1()
             .child(
@@ -347,17 +348,43 @@ impl Render for Scopes {
                     .h_flex()
                     .flex_wrap()
                     .gap_2()
-                    .child(div().child("Scopes"))
+                    .child(
+                        div()
+                            .font_family(t::Face::EdgeCode.family())
+                            .font_weight(t::Face::EdgeCode.weight())
+                            .text_size(t::Face::EdgeCode.size())
+                            .text_color(rgb(t::JUDGE_INK_DIM))
+                            .child(t::code("scopes")),
+                    )
                     .child(menu),
             )
-            .child(div().text_xs().child(self.label.clone()))
+            .child(
+                div()
+                    .font_family(t::Face::Readout.family())
+                    .text_size(t::Face::Readout.size())
+                    .text_color(rgb(t::JUDGE_INK))
+                    .child(self.label.clone()),
+            )
             .child(body)
             .when_some(self.analysis.as_ref(), |view, analysis| {
-                view.child(div().text_xs().child(format!(
-                    "{} samples · {} highlights · {} shadows",
-                    analysis.sample_count, analysis.highlight_count, analysis.shadow_count
-                )))
+                view.child(
+                    div()
+                        .font_family(t::Face::Readout.family())
+                        .text_size(t::Face::Readout.size())
+                        .text_color(rgb(t::JUDGE_INK_DIM))
+                        .child(format!(
+                            "{} samples · {} highlights · {} shadows",
+                            analysis.sample_count, analysis.highlight_count, analysis.shadow_count
+                        )),
+                )
             })
-            .child(div().text_xs().child(note))
+            .child(
+                div()
+                    .font_family(t::Face::Label.family())
+                    .font_weight(t::Face::Label.weight())
+                    .text_size(t::Face::Label.size())
+                    .text_color(rgb(t::JUDGE_INK_DIM))
+                    .child(note),
+            )
     }
 }

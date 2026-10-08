@@ -14,14 +14,19 @@ use self::straight::get_straight_path;
 const ARROW_SIZE: f32 = 6.0;
 
 /// Paint all edges for the flow graph.
-pub fn paint_edges(state: &FlowState, window: &mut Window) {
+pub fn paint_edges(
+    state: &FlowState,
+    default_color: u32,
+    selected_color: u32,
+    window: &mut Window,
+) {
     // Viewport culling bounds
     let win_size = window.viewport_size();
     let win_w = win_size.width.as_f32();
     let win_h = win_size.height.as_f32();
     let margin = 100.0;
-    let edge_color: Background = gpui::rgb(0xb1b1b7).into();
-    let selected_color: Background = gpui::rgb(0x3b82f6).into();
+    let edge_color: Background = gpui::rgb(default_color).into();
+    let selected_color: Background = gpui::rgb(selected_color).into();
 
     for edge in &state.edges {
         if edge.hidden {

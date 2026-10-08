@@ -3,7 +3,8 @@ use super::{Editor, Workspace};
 use gpui_kit::InputEvent as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AppContext, Bounds, Focusable, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
+    AppContext, Bounds, Focusable, Point, SharedString, TestAppContext, WindowBounds,
+    WindowOptions, px, size,
 };
 
 fn editor_window(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Editor>) {
@@ -419,6 +420,142 @@ fn port_drags_commit_immediately_in_both_directions_and_replace_input(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn empty_canvas_arrival_block_and_footer_follow_graph_state(cx: &mut TestAppContext) {
+    let (handle, editor) = editor_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let block = window.find("canvas-empty").bounds();
+        let canvas = window.find("workflow-canvas").bounds();
+        let center = canvas.center();
+        assert!(
+            (block.center().x - center.x).abs() < px(2.0)
+                && (block.center().y - center.y).abs() < px(2.0),
+            "arrival block must be centred in the plane: {block:?} in {canvas:?}"
+        );
+        // The controls share the plane's lower-left corner.
+        let controls = window.find("workflow-controls").bounds();
+        assert!(controls.left() > canvas.left() && controls.bottom() < canvas.bottom());
+        assert!(
+            canvas.intersects(&controls) && canvas.intersects(&block),
+            "canvas chrome is drawn over the plane it acts on"
+        );
+        window.click("workflow-zoom-in", cx);
+    })
+    .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("workflow-zoom-out", cx);
+        window.render_frame(cx);
+        window.click("fit-workflow", cx);
+        window.render_frame(cx);
+        // Adding a node retires the arrival block.
+        editor.update(cx, |editor, cx| {
+            editor.add_library_node("core.constant-float", Some((20.0, 20.0)), window, cx)
+        });
+        window.render_frame(cx);
+        assert!(
+            window.try_find("canvas-empty").is_none(),
+            "the arrival block must not overlap a populated workflow"
+        );
+        assert!(editor.read(cx).document().is_ok());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn overview_click_centres_on_the_graph_and_ignores_its_own_window_offset(cx: &mut TestAppContext) {
+    let (handle, editor) = editor_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.pending_canvas_fit = false;
+            editor.add_library_node("core.image-input", Some((0.0, 0.0)), window, cx);
+            editor.add_library_node("core.output", Some((600.0, 320.0)), window, cx);
+            editor.flow_state.update(cx, |state, _| {
+                state.viewport = gpui_flow::Viewport::default();
+                state.viewport.zoom = 1.0;
+            });
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let overview = window.find("workflow-overview").bounds();
+        // A click on the minimap centre targets the centre of the graph.
+        let center = overview.center();
+        window.click_at(
+            "workflow-overview",
+            gpui_kit::point(center.x - overview.origin.x, center.y - overview.origin.y),
+            cx,
+        );
+        window.render_frame(cx);
+        let canvas = window.find("workflow-canvas").bounds();
+        let state = editor.read(cx).flow_state.read(cx);
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for node in &state.nodes {
+            let width = node.measured_width.unwrap_or(px(200.0)).as_f32();
+            let height = node.measured_height.unwrap_or(px(80.0)).as_f32();
+            min_x = min_x.min(node.position.x);
+            max_x = max_x.max(node.position.x + width);
+            min_y = min_y.min(node.position.y);
+            max_y = max_y.max(node.position.y + height);
+        }
+        let (cx_screen, cy_screen) = state.viewport.flow_to_screen(gpui_flow::FlowPoint::new(
+            (min_x + max_x) / 2.0,
+            (min_y + max_y) / 2.0,
+        ));
+        let centred = (
+            cx_screen + state.canvas_origin.x,
+            cy_screen + state.canvas_origin.y,
+        );
+        let center = canvas.center();
+        assert!(
+            (centred.0 - center.x.as_f32()).abs() < 2.0
+                && (centred.1 - center.y.as_f32()).abs() < 2.0,
+            "overview click must centre the graph under the cursor, got {centred:?} for {center:?}"
+        );
+        assert!(editor.read(cx).document().is_ok());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn library_rows_share_one_left_edge_regardless_of_label_length(cx: &mut TestAppContext) {
+    let (handle, editor) = editor_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.compatible_only = false;
+            editor.collapsed_categories.clear();
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let name = |kind: &str| {
+            window
+                .find(SharedString::from(format!("node-name-{kind}")))
+                .bounds()
+        };
+        let library = window.find("library").bounds();
+        // "Crop" and "Image Input" are far apart in width; a centred row would
+        // start each of them at a different x.
+        let crop = name("core.crop");
+        let input = name("core.image-input");
+        let output = name("core.output");
+        assert!(
+            (crop.left() - input.left()).abs() <= px(1.0)
+                && (input.left() - output.left()).abs() <= px(1.0),
+            "node rows must align to one left edge: crop {crop:?}, input {input:?}, output {output:?}"
+        );
+        assert!(
+            crop.left() > library.left() && crop.left() - library.left() < px(40.0),
+            "row text must sit just inside the dock, not float towards its centre: {crop:?} in {library:?}"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 fn outgoing_edges_anchor_to_the_source_output_not_the_nodes_own_input(cx: &mut TestAppContext) {
     let (handle, editor) = editor_window(cx);
     cx.update_window(handle, |_, window, cx| {
@@ -491,11 +628,11 @@ fn outgoing_edges_anchor_to_the_source_output_not_the_nodes_own_input(cx: &mut T
             .filter_map(|handle| handle.label.as_deref())
             .collect();
         assert!(
-            labels.contains(&"Image output · Image"),
+            labels.contains(&"Image out · Image"),
             "socket labels must state direction and data type: {labels:?}"
         );
         assert!(
-            labels.contains(&"Image input · Image"),
+            labels.contains(&"Image in · Image"),
             "an input and an output sharing a port name must still be distinguishable: {labels:?}"
         );
         assert_eq!(

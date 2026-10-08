@@ -32,7 +32,7 @@ impl Editor {
                                                 for (value,label) in &options {let value=value.clone();let weak=weak.clone();menu=menu.item(PopupMenuItem::new(label.clone()).checked(value==current).on_click(move |_,window,cx|{let _=weak.update(cx,|this,cx|this.choose_field(index,ParameterValue::String(value.clone()),window,cx));}));}menu
                                             }).into_any_element()
                                         } else {match &field.state {AnyInputState::Input(state)=>Input::new(state).into_any_element(),AnyInputState::Textarea(state)=>Textarea::new(state).into_any_element(),_=>div().child("Unsupported parameter field").into_any_element()}};
-                                        div().v_flex().gap_1().border_b_1().border_color(rgb(0x343b45)).pb_2()
+                                        div().v_flex().gap_1().border_b_1().border_color(rgb(t::ROOM_LINE)).pb_2()
                                             .capture_key_down(cx.listener(move |this,event:&KeyDownEvent,window,cx| {
                                                 let text_focused=this.fields.get(index).is_some_and(|field|field.state.focus_handle(cx).is_focused(window));
                                                 if !text_focused {return;}
@@ -46,28 +46,46 @@ impl Editor {
                                                 }
                                             }))
                                             .on_key_up(cx.listener(move |this,event:&KeyUpEvent,window,cx|{if matches!(event.keystroke.key.as_str(),"up"|"down") && this.fields.get(index).is_some_and(|field|field.stepping) {this.commit_field(index,window,cx);}}))
-                                            .child(div().h_flex().flex_wrap().gap_2().child(format!("{}{}",ux.name,ux.unit.as_ref().map(|unit|format!(" ({unit})")).unwrap_or_default()))
+                                            .child(div().h_flex().items_center().flex_wrap().gap_2()
+                                                    .child(
+                                                        div()
+                                                            .font_family(t::Face::Control.family())
+                                                            .font_weight(t::Face::Control.weight())
+                                                            .text_size(t::Face::Control.size())
+                                                            .child(ux.name.clone()),
+                                                    )
+                                                    .when_some(ux.unit.as_ref(), |view, unit| view.child(
+                                                        div()
+                                                            .font_family(t::Face::Readout.family())
+                                                            .text_size(t::Face::Readout.size())
+                                                            .text_color(rgb(t::ROOM_INK_DIM))
+                                                            .child(format!("({unit})")),
+                                                    ))
                                                 .child(div().capture_any_mouse_down(cx.listener(move |this,_,window,cx|this.cancel_field(index,window,cx))).child(Button::new(("reset",index)).label("Reset").disabled(!field.draft.modified()).on_click(cx.listener(move |this,_,window,cx|this.reset_field(index,window,cx)))))
                                                 .child(Button::new(("port",index)).label(if field.exposed {"Hide input"} else {"As input"}).on_click(cx.listener(move |this,_,window,cx|this.toggle_parameter_port(index,window,cx)))))
                                             .when_some(points.as_ref(),|view,points| {
                                                 let selected=field.curve_index.min(points.len().saturating_sub(1));
                                                 view.child(div().v_flex().gap_1()
-                                                    .when_some(points.get(selected),|view,(x,y)|view.child(div().text_sm().child(format!("Point {} of {}: input {x}, output {y}",selected+1,points.len()))))
+                                                    .when_some(points.get(selected),|view,(x,y)|view.child(div()
+                                                            .font_family(t::Face::Readout.family())
+                                                            .text_size(t::Face::Readout.size())
+                                                            .text_color(rgb(t::ROOM_INK))
+                                                            .child(format!("point {} of {selected_hint}: input {x}, output {y}", selected + 1, selected_hint = points.len()))))
                                                     .child(div().h_flex().flex_wrap().gap_1()
                                                         .child(Button::new(("curve-previous",index)).label("Previous point").disabled(selected==0).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,false,cx))))
                                                         .child(Button::new(("curve-next",index)).label("Next point").disabled(selected+1>=points.len()).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,true,cx))))
                                                         .child(Button::new(("curve-add",index)).label("Add point").disabled(points.len()>=4096).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,false,window,cx))))
                                                         .child(Button::new(("curve-remove",index)).label("Delete point").disabled(selected==0||selected+1>=points.len()).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,true,window,cx)))))
-                                                    .child(div().text_xs().text_color(rgb(0xa6adb8)).child("Add inserts the midpoint of the widest input interval. Endpoints cannot be deleted with these controls; edit exact x,y pairs below.")))
+                                                    .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child("Add inserts the midpoint of the widest input interval. Endpoints cannot be deleted with these controls; edit exact x,y pairs below.")))
                                             })
                                             .when(ux.point_curve || (self.selected.as_ref().is_some_and(|id| self.session.editor.graph().node(&CoreNodeId::from(id.as_str())).is_some_and(|node| node.type_id == "core.curves")) && field.draft.descriptor.id == "gamma"), |view| view.child(self.curve_plot(index, cx)))
                                             .child(control)
-                                            .when(ux.multiline,|view|view.child(div().text_xs().text_color(rgb(0xa6adb8)).child("Shift+Enter inserts a line; Enter applies; Escape cancels.")))
+                                            .when(ux.multiline,|view|view.child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child("Shift+Enter inserts a line; Enter applies; Escape cancels.")))
                                             .when_some(field.slider.as_ref(),|view,slider|view.child(Slider::new(slider).w_full()))
-                                            .child(div().text_xs().text_color(rgb(0xa6adb8)).child(ux.description.clone()))
+                                            .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child(ux.description.clone()))
                                             .when(field.draft.outside_recommended(),|view|view.child(div().text_xs().child("Outside recommended slider range; exact value is preserved.")))
                                             .when_some(self.selected.as_ref().and_then(|id| self.session.editor.graph().edges().iter().find(|edge| edge.to_node.as_str()==id && edge.to_port==field.draft.descriptor.id)), |view, edge| view.child(div().text_xs().child(format!("Driven by {} · {}",self.session.node_label(edge.from_node.as_str()),edge.from_port))))
-                                            .when_some(field.error.as_ref(),|view,error|view.child(div().text_xs().text_color(rgb(0xffa480)).child(error.clone())))
+                                            .when_some(field.error.as_ref(),|view,error|view.child(div().text_xs().text_color(rgb(t::WAX_RED_INK)).child(error.clone())))
                                     })).into_any_element()
     }
 }
@@ -87,6 +105,8 @@ impl Editor {
             .fold(64.0, f32::max);
         let selected = self.selected.as_deref() == Some(node.id.as_ref());
         let focus_id = node.id.to_string();
+        // Commit, then clarify: selecting one frame recedes the rest of the strip.
+        let selection_focus = self.selected.is_some();
         let source = self
             .session
             .image_input_target(node.id.as_ref())
@@ -104,19 +124,23 @@ impl Editor {
             .w(px(300.0 * zoom))
             .v_flex()
             .gap(px(4.0 * zoom))
-            .text_size(px(12.0 * zoom))
-            .text_color(rgb(0xe1e5eb))
+            .text_color(rgb(t::BENCH_INK))
+            // Commit, then clarify: selecting one frame recedes the strip.
+            .when(selection_focus && !selected, |view| view.opacity(0.72))
             .child(
                 div()
-                    .font_weight(FontWeight::BOLD)
-                    .text_size(px(14.0 * zoom))
+                    .font_family(t::Face::Title.family())
+                    .font_weight(t::Face::Title.weight())
+                    .text_size(px(12.0 * zoom))
                     .child(node.label.clone()),
             )
             .child(
                 div()
-                    .text_size(px(10.5 * zoom))
-                    .text_color(rgb(0xa6adb8))
-                    .child(node.node_type.clone().unwrap_or_default()),
+                    .font_family(t::Face::EdgeCode.family())
+                    .font_weight(t::Face::EdgeCode.weight())
+                    .text_size(px(9.0 * zoom))
+                    .text_color(rgb(t::BENCH_INK_DIM))
+                    .child(t::code(node.node_type.as_deref().unwrap_or_default())),
             )
             .child(div().h(px((ports - 36.0) * zoom)).flex_shrink_0())
             .when(selected, |view| {
@@ -132,13 +156,18 @@ impl Editor {
             })
             .when(image_node, |view| {
                 view.child(
-                    div().text_size(px(10.5 * zoom)).child(
-                        source
-                            .map(|name| format!("Input image from {name}"))
-                            .unwrap_or_else(|| {
-                                "Input image: connect an image output socket".into()
-                            }),
-                    ),
+                    div()
+                        .font_family(t::Face::EdgeCode.family())
+                        .font_weight(t::Face::EdgeCode.weight())
+                        .text_size(px(9.0 * zoom))
+                        .text_color(rgb(t::BENCH_INK_DIM))
+                        .child(
+                            source
+                                .map(|name| format!("Input image from {name}"))
+                                .unwrap_or_else(|| {
+                                    "Input image: connect an image output socket".into()
+                                }),
+                        ),
                 )
             })
             .when(selected && !self.controls_open, |view| {
@@ -153,6 +182,35 @@ impl Editor {
                         })),
                 )
             })
+            // The perforated strip along the bottom edge is where a frame is
+            // marked; with no state reported it stays in the mount tone.
+            .child(
+                div()
+                    .mt(px(4.0 * zoom))
+                    .h(px(5.0 * zoom))
+                    .flex_shrink_0()
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                let tick = 5.0 * zoom;
+                                let gap = 12.0 * zoom;
+                                let mut x = bounds.origin.x;
+                                while x < bounds.origin.x + bounds.size.width {
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(x, bounds.origin.y),
+                                            size(px(tick).min(bounds.size.width), px(5.0 * zoom)),
+                                        ),
+                                        rgb(t::BENCH_MOUNT),
+                                    ));
+                                    x += px(gap);
+                                }
+                            },
+                        )
+                        .size_full(),
+                    ),
+            )
             .when(selected && self.controls_open, |view| {
                 view.child(
                     div()
@@ -160,7 +218,7 @@ impl Editor {
                         .test_support()
                         .w_full()
                         .max_h(px(
-                            (self.canvas_size.1 - (ports + 96.0) * zoom).clamp(90.0, 420.0 * zoom)
+                            (self.canvas_size.1 - (ports + 110.0) * zoom).clamp(90.0, 420.0 * zoom)
                         ))
                         .overflow_y_scroll()
                         // Fields and helper gestures must never start a node drag or canvas zoom.
@@ -503,7 +561,7 @@ impl Render for GeometryHelper {
                         path.line_to(b);
                     }
                     if let Ok(path) = path.build() {
-                        window.paint_path(path, rgb(0xe8a33d));
+                        window.paint_path(path, rgb(t::WAX_AMBER));
                     }
                 }
             },
@@ -513,9 +571,15 @@ impl Render for GeometryHelper {
         .left_0()
         .size_full();
         div().v_flex().gap_1().w_full().text_xs()
-            .child(self.status.clone())
+            .child(
+                div()
+                    .font_family(t::Face::Readout.family())
+                    .text_size(t::Face::Readout.size())
+                    .text_color(rgb(t::BENCH_INK_DIM))
+                    .child(self.status.clone()),
+            )
             .when(self.driven(), |view| view.child("Geometry is driven by parameter ports. Hide those ports to draw or use presets."))
-            .when_some(self.image.clone(), |view,image| view.child(div().id("node-image-helper").test_support().relative().w_full().h(px(180.0*self.zoom)).overflow_hidden().bg(rgb(0x141414))
+            .when_some(self.image.clone(), |view,image| view.child(div().id("node-image-helper").test_support().relative().w_full().h(px(180.0*self.zoom)).overflow_hidden().bg(rgb(t::BENCH_SUNK))
                 .when_some(thumbnail, |view,(width,height)| view.child(div().id("node-input-thumbnail").test_support().absolute()
                     .left(px((300.0*self.zoom-width)/2.0)).top(px((180.0*self.zoom-height)/2.0)).w(px(width)).h(px(height))
                     .child(img(image).absolute().w(px(width)).h(px(height)))))
@@ -608,7 +672,7 @@ impl Editor {
                     grid.line_to(point(bounds.right(), y));
                 }
                 if let Ok(grid) = grid.build() {
-                    window.paint_path(grid, rgb(0x434951));
+                    window.paint_path(grid, rgb(t::BENCH_LINE));
                 }
                 let mut path = PathBuilder::stroke(px(2.0));
                 for (i, &p) in points.iter().enumerate() {
@@ -619,7 +683,7 @@ impl Editor {
                     }
                 }
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, rgb(0xf2efe6));
+                    window.paint_path(path, rgb(t::BENCH_INK));
                 }
                 if editable {
                     for (i, &p) in points.iter().enumerate() {
@@ -643,7 +707,7 @@ impl Editor {
                     .test_support()
                     .w_full()
                     .h(px(120.0))
-                    .bg(rgb(0x141414))
+                    .bg(rgb(t::BENCH_SUNK))
                     .child(plot)
                     .when(editable, |view| {
                         view.cursor(CursorStyle::Crosshair)
@@ -796,7 +860,7 @@ impl Editor {
             view = view.child("Parameter transfer · input to output");
             view = match rawweave_gpui::parameters::transfer_points(&node.type_id, &values) {
                 Ok(points) => view.child(reference_diagram(points)),
-                Err(error) => view.child(div().text_color(rgb(0xffa480)).child(error)),
+                Err(error) => view.child(div().text_color(rgb(t::WAX_RED_INK)).child(error)),
             };
         } else if node.type_id == "core.mask-color-qualifier" {
             let channels = [
@@ -871,7 +935,7 @@ fn reference_diagram(points: Vec<(f32, f32)>) -> AnyElement {
     div()
         .w_full()
         .h(px(100.0))
-        .bg(rgb(0x141414))
+        .bg(rgb(t::BENCH_SUNK))
         .child(
             canvas(
                 |_, _, _| {},
@@ -897,7 +961,7 @@ fn reference_diagram(points: Vec<(f32, f32)>) -> AnyElement {
                         grid.line_to(point(bounds.right(), y));
                     }
                     if let Ok(path) = grid.build() {
-                        window.paint_path(path, rgb(0x434951));
+                        window.paint_path(path, rgb(t::BENCH_LINE));
                     }
                     let mut path = PathBuilder::stroke(px(2.0));
                     for (i, &p) in points.iter().enumerate() {
@@ -908,7 +972,7 @@ fn reference_diagram(points: Vec<(f32, f32)>) -> AnyElement {
                         }
                     }
                     if let Ok(path) = path.build() {
-                        window.paint_path(path, rgb(0xf2efe6));
+                        window.paint_path(path, rgb(t::BENCH_INK));
                     }
                 },
             )
@@ -969,7 +1033,7 @@ fn hue_reference(
                                         point(left, bounds.top() + px(18.0)),
                                         size(right - left, px(4.0)),
                                     ),
-                                    rgb(0xf2efe6),
+                                    rgb(t::BENCH_INK),
                                 ));
                             }
                         }
@@ -979,7 +1043,7 @@ fn hue_reference(
                                 point(marker - px(1.0), bounds.top()),
                                 size(px(2.0), px(16.0)),
                             ),
-                            rgb(0x141414),
+                            rgb(t::BENCH_SUNK),
                         ));
                     },
                 )

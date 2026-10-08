@@ -1,5 +1,6 @@
 //! Native display surfaces. Graph processing remains in Session/Rust nodes.
 use crate::native_scopes::{AnalyzedFrame, Scopes, render_frame, upload_raster};
+use crate::native_theme as t;
 use gpui_kit::Size;
 use gpui_kit::component::{
     button::Button,
@@ -787,7 +788,7 @@ impl Viewers {
             .absolute()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x101215));
+            .bg(rgb(t::JUDGE_SUNK));
         if let (Some(image), Some(frame)) = (&pane.image, &pane.frame) {
             let zoom = pane.zoom(self.session.source.as_ref().map(Source::dimensions));
             let width = frame.full_dimensions.width as f32 * zoom;
@@ -912,6 +913,12 @@ impl Viewers {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .m_1()
+            .rounded(px(8.0))
+            .bg(rgb(t::JUDGE_RAISE))
+            .border_1()
+            .border_color(rgb(t::JUDGE_LINE))
+            .overflow_hidden()
             .child(self.controls(index, cx))
             .child(
                 div()
@@ -921,12 +928,19 @@ impl Viewers {
                     .child(self.stage(index, cx)),
             )
             .child(
-                div().px_2().py_1().text_xs().flex_shrink_0().child(
-                    self.panes
-                        .get(index)
-                        .map(|p| p.status.clone())
-                        .unwrap_or_default(),
-                ),
+                div()
+                    .px_3()
+                    .py_1()
+                    .flex_shrink_0()
+                    .font_family(t::Face::Readout.family())
+                    .text_size(t::Face::Readout.size())
+                    .text_color(rgb(t::JUDGE_INK_DIM))
+                    .child(
+                        self.panes
+                            .get(index)
+                            .map(|p| p.status.clone())
+                            .unwrap_or_default(),
+                    ),
             )
             .into_any_element()
     }
@@ -948,7 +962,7 @@ impl Viewers {
             .interaction(self.active, cx)
             .test_support()
             .child(measure)
-            .bg(rgb(0x101215));
+            .bg(rgb(t::JUDGE_SUNK));
         match self.model.mode {
             Comparison::Wipe => {
                 let viewport = self.panes[0].viewport;
@@ -977,7 +991,7 @@ impl Viewers {
                             .top_0()
                             .h_full()
                             .w(px(1.0))
-                            .bg(rgb(0xe1e5eb)),
+                            .bg(rgb(t::JUDGE_INK)),
                     );
             }
             Comparison::Blink => {
@@ -1017,7 +1031,7 @@ impl Viewers {
                 .px_2()
                 .py_1()
                 .text_xs()
-                .bg(rgb(0x1c2026))
+                .bg(rgb(t::JUDGE_GROUND))
                 .child(source_label),
         );
         div()
@@ -1108,11 +1122,22 @@ impl Render for Viewers {
                     .child(
                         div()
                             .h_flex()
+                            .items_center()
                             .flex_wrap()
                             .gap_2()
-                            .p_2()
+                            .px_3()
+                            .py_2()
                             .flex_shrink_0()
-                            .child(div().child("Comparison"))
+                            .border_b_1()
+                            .border_color(rgb(t::JUDGE_LINE))
+                            .child(
+                                div()
+                                    .font_family(t::Face::EdgeCode.family())
+                                    .font_weight(t::Face::EdgeCode.weight())
+                                    .text_size(t::Face::EdgeCode.size())
+                                    .text_color(rgb(t::JUDGE_INK_DIM))
+                                    .child(t::code("comparison")),
+                            )
                             .child(menu)
                             .child(
                                 Button::new("scopes-visible")

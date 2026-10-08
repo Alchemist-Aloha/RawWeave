@@ -27,12 +27,28 @@ pub struct FlowGraph {
     bg_color: u32,
     /// Dot grid color (default: 0xd4d4d4).
     grid_color: u32,
+    /// Spacing between grid lines in world coordinates.
+    grid_gap: f32,
     /// Background pattern style.
     bg_pattern: BackgroundPattern,
     /// Node wrapper background color.
     node_bg_color: u32,
     /// Node wrapper border color.
     node_border_color: u32,
+    /// Ring drawn on a selected node.
+    selection_color: u32,
+    /// Ink for handle labels.
+    handle_label_color: u32,
+    /// Connection draft line, and the handle a drag would land on.
+    target_color: u32,
+    /// The handle a drag is currently snapped to.
+    target_active_color: u32,
+    /// Box-selection marquee.
+    marquee_color: u32,
+    /// Wire colour when an edge carries no colour of its own.
+    edge_color: u32,
+    /// Wire colour while an edge is selected.
+    edge_selected_color: u32,
     /// Whether we've done the initial measurement pass.
     measured: bool,
 }
@@ -49,9 +65,17 @@ impl FlowGraph {
             show_node_chrome: true,
             bg_color: 0xf8f8f8,
             grid_color: 0xd4d4d4,
+            grid_gap: 20.0,
             bg_pattern: BackgroundPattern::Dots,
             node_bg_color: 0xffffff,
             node_border_color: 0xe2e2e2,
+            selection_color: 0x3b82f6,
+            handle_label_color: 0xe1e5eb,
+            target_color: 0x93c5fd,
+            target_active_color: 0x3b82f6,
+            marquee_color: 0x3b82f6,
+            edge_color: 0xb1b1b7,
+            edge_selected_color: 0x3b82f6,
             measured: false,
         }
     }
@@ -100,6 +124,12 @@ impl FlowGraph {
         self
     }
 
+    /// Set the grid spacing in world coordinates.
+    pub fn grid_gap(mut self, gap: f32) -> Self {
+        self.grid_gap = gap.max(2.0);
+        self
+    }
+
     /// Set the node wrapper background color.
     pub fn node_bg_color(mut self, color: u32) -> Self {
         self.node_bg_color = color;
@@ -109,6 +139,43 @@ impl FlowGraph {
     /// Set the node wrapper border color.
     pub fn node_border_color(mut self, color: u32) -> Self {
         self.node_border_color = color;
+        self
+    }
+
+    /// Set the ring drawn on a selected node.
+    pub fn selection_color(mut self, color: u32) -> Self {
+        self.selection_color = color;
+        self
+    }
+
+    /// Set the ink used for handle labels.
+    pub fn handle_label_color(mut self, color: u32) -> Self {
+        self.handle_label_color = color;
+        self
+    }
+
+    /// Set the drop-target and draft-line colour.
+    pub fn target_color(mut self, color: u32) -> Self {
+        self.target_color = color;
+        self
+    }
+
+    /// Set the colour of the handle a drag is snapped to.
+    pub fn target_active_color(mut self, color: u32) -> Self {
+        self.target_active_color = color;
+        self
+    }
+
+    /// Set the box-selection marquee colour.
+    pub fn marquee_color(mut self, color: u32) -> Self {
+        self.marquee_color = color;
+        self
+    }
+
+    /// Set the default and selected wire colours.
+    pub fn edge_colors(mut self, default: u32, selected: u32) -> Self {
+        self.edge_color = default;
+        self.edge_selected_color = selected;
         self
     }
 
@@ -162,6 +229,7 @@ impl FlowGraph {
         let show_chrome = self.show_node_chrome;
         let node_bg = self.node_bg_color;
         let node_border = self.node_border_color;
+        let selection_color = self.selection_color;
         let element_id: ElementId = ElementId::Name(node.id.clone());
 
         // Build handle dot elements (skip if not connecting to reduce overhead)
@@ -176,6 +244,9 @@ impl FlowGraph {
                 node_border,
                 viewport.zoom,
                 _entity_id,
+                self.handle_label_color,
+                self.target_color,
+                self.target_active_color,
                 &self.focus_handle,
             )
         } else {
@@ -229,7 +300,8 @@ impl FlowGraph {
                 CursorStyle::OpenHand
             })
             .when(selected, |el: Stateful<Div>| {
-                el.border(px(2.0 * zoom)).border_color(gpui::rgb(0x3b82f6))
+                el.border(px(2.0 * zoom))
+                    .border_color(gpui::rgb(selection_color))
             })
             .on_mouse_down(MouseButton::Left, {
                 let node_id = node_id.clone();
@@ -304,6 +376,9 @@ impl FlowGraph {
         default_border: u32,
         zoom: f32,
         entity_id: EntityId,
+        label_color: u32,
+        target_color: u32,
+        target_active_color: u32,
         focus: &FocusHandle,
     ) -> Vec<AnyElement> {
         let handle_size = 24.0;
@@ -327,11 +402,15 @@ impl FlowGraph {
                 let is_potential_target = is_connecting && handle_type == HandleType::Target;
 
                 let (bg_color, border_color, size_mult) = if is_snap_target {
-                    // Actively snapped — large blue pulse
-                    (gpui::rgb(0x3b82f6), gpui::rgb(0x1d4ed8), 1.4)
+                    // Actively snapped — the mark you are about to drop onto.
+                    (
+                        gpui::rgb(target_active_color),
+                        gpui::rgb(target_active_color),
+                        1.4,
+                    )
                 } else if is_potential_target {
-                    // Valid potential target — subtle blue
-                    (gpui::rgb(0x93c5fd), gpui::rgb(0x3b82f6), 1.0)
+                    // A valid destination, held quieter than the live target.
+                    (gpui::rgb(target_color), gpui::rgb(target_color), 1.0)
                 } else {
                     (gpui::rgb(default_bg), gpui::rgb(default_border), 1.0)
                 };
@@ -426,9 +505,11 @@ impl FlowGraph {
                         el.child(
                             div()
                                 .absolute()
-                                .text_size(px(10.5 * zoom))
-                                .text_color(gpui::rgb(0xe1e5eb))
-                                .w(px(130.0 * zoom))
+                                .text_size(px(9.0 * zoom))
+                                .text_color(gpui::rgb(label_color))
+                                .font_family("Martian Mono")
+                                .w(px(170.0 * zoom))
+                                .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .when(handle.position == HandlePosition::Left, |el| {
@@ -473,11 +554,12 @@ impl FlowGraph {
         bounds: &Bounds<Pixels>,
         viewport: &Viewport,
         grid_color: u32,
+        grid_gap: f32,
         pattern: BackgroundPattern,
         window: &mut Window,
     ) {
         let color = gpui::rgb(grid_color);
-        let spacing = 20.0 * viewport.zoom;
+        let spacing = grid_gap * viewport.zoom;
 
         if spacing < 5.0 {
             return;
@@ -558,7 +640,7 @@ impl FlowGraph {
     }
 
     /// Paint a selection box rectangle.
-    fn paint_selection_box(sel: &SelectionBox, window: &mut Window) {
+    fn paint_selection_box(sel: &SelectionBox, color: u32, window: &mut Window) {
         let x = sel.start.0.min(sel.current.0);
         let y = sel.start.1.min(sel.current.1);
         let w = (sel.start.0 - sel.current.0).abs();
@@ -576,11 +658,10 @@ impl FlowGraph {
             },
         );
 
-        // Semi-transparent blue fill
-        window.paint_quad(fill(bounds, gpui::rgba(0x3b82f618)));
+        // A wash of the marquee colour, with a solid hairline edge.
+        window.paint_quad(fill(bounds, gpui::rgba((color << 8) | 0x18)));
 
-        // Blue border
-        let border_color: Background = gpui::rgb(0x3b82f6).into();
+        let border_color: Background = gpui::rgb(color).into();
         // Top
         let top = Bounds::new(
             Point::new(px(x), px(y)),
@@ -767,7 +848,11 @@ impl Render for FlowGraph {
         let viewport_for_canvas = viewport;
         let bg_color = self.bg_color;
         let grid_color = self.grid_color;
+        let marquee_color = self.marquee_color;
+        let edge_color = self.edge_color;
+        let edge_selected_color = self.edge_selected_color;
         let bg_pattern = self.bg_pattern;
+        let grid_gap = self.grid_gap;
         let state_for_scroll = self.state.clone();
         let state_for_mouse_down = self.state.clone();
         let state_for_mouse_move = self.state.clone();
@@ -808,11 +893,12 @@ impl Render for FlowGraph {
                             &bounds,
                             &viewport_for_canvas,
                             grid_color,
+                            grid_gap,
                             bg_pattern,
                             window,
                         );
                         let state = state_for_canvas.read(cx);
-                        edges::paint_edges(state, window);
+                        edges::paint_edges(state, edge_color, edge_selected_color, window);
 
                         // Paint draft connection line
                         if let Some(ref draft) = connecting_draft {
@@ -821,7 +907,7 @@ impl Render for FlowGraph {
 
                         // Paint selection box
                         if let Some(ref sel) = selection_box {
-                            Self::paint_selection_box(sel, window);
+                            Self::paint_selection_box(sel, marquee_color, window);
                         }
                     },
                 )

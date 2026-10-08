@@ -1,6 +1,7 @@
 extern crate gpui_kit as gpui;
 mod native_nodes;
 mod native_scopes;
+mod native_theme;
 mod native_viewer;
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests;
@@ -18,6 +19,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use native_theme as t;
 use native_viewer::Viewers;
 use rawweave_batch::{Compression, OutputSharpening};
 use rawweave_core::NodeId as CoreNodeId;
@@ -44,10 +46,14 @@ impl Render for LibraryDrag {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .p_2()
-            .bg(rgb(0x23272d))
-            .text_color(rgb(0xe1e5eb))
+            .bg(rgb(t::ROOM_RAISE))
+            .text_color(rgb(t::ROOM_INK))
+            .font_family(t::Face::Control.family())
+            .font_weight(t::Face::Control.weight())
+            .text_size(t::Face::Control.size())
             .border_1()
-            .border_color(rgb(0x434951))
+            .border_color(rgb(t::ROOM_LINE_STRONG))
+            .rounded(t::RADIUS)
             .child(self.label.clone())
     }
 }
@@ -118,6 +124,7 @@ struct Editor {
     canvas_size: (f32, f32),
     pending_canvas_fit: bool,
     pending_canvas_focus: Option<String>,
+    minimap: Entity<gpui_flow::Minimap>,
     controls_open: bool,
     curve_gesture: Option<(usize, [f32; 4])>,
     geometry: Entity<native_nodes::GeometryHelper>,
@@ -134,6 +141,7 @@ impl Editor {
             })
             .unwrap_or_default();
         let flow_state = cx.new(|_| FlowState::new(vec![], vec![]));
+        let flow_state_for_minimap = flow_state.clone();
         let renderer_state = flow_state.clone();
         let owner = cx.entity().downgrade();
         let renderer_owner = owner.clone();
@@ -147,10 +155,21 @@ impl Editor {
                         })
                         .unwrap_or_else(|_| div().into_any_element())
                 })
-                .bg_color(0x17191c)
-                .grid_color(0x303439)
-                .node_bg_color(0x23272d)
-                .node_border_color(0x434951)
+                // The plane, in the bench cast: dark by default, ruled every 24px.
+                .bg_color(native_theme::BENCH_GROUND)
+                .grid_color(native_theme::BENCH_GRID)
+                .bg_pattern(gpui_flow::BackgroundPattern::Cross)
+                .grid_gap(24.0)
+                .node_bg_color(native_theme::BENCH_RAISE)
+                .node_border_color(native_theme::BENCH_LINE_STRONG)
+                // Selection is wax white; amber is the mark you are about to
+                // drop onto; a wire is coloured by the data it carries.
+                .selection_color(native_theme::WAX_WHITE)
+                .target_color(native_theme::WAX_AMBER)
+                .target_active_color(native_theme::WAX_AMBER)
+                .edge_colors(native_theme::BENCH_LINE, native_theme::WAX_WHITE)
+                .marquee_color(native_theme::WAX_WHITE)
+                .handle_label_color(native_theme::BENCH_INK_BODY)
         });
         let subscription = cx.observe_in(&flow, window, |this, _, window, cx| {
             this.sync_flow(window, cx)
@@ -222,6 +241,18 @@ impl Editor {
             canvas_size: (600.0, 500.0),
             pending_canvas_fit: true,
             pending_canvas_focus: None,
+            minimap: cx.new(|_| {
+                gpui_flow::Minimap::new(flow_state_for_minimap).palette(
+                    gpui_flow::minimap::MinimapPalette {
+                        ground: native_theme::BENCH_SUNK,
+                        frame: native_theme::BENCH_LINE,
+                        frame_selected: native_theme::WAX_WHITE,
+                        mask_fill: native_theme::BENCH_LINE_STRONG,
+                        mask_line: native_theme::BENCH_LINE_STRONG,
+                        border: native_theme::BENCH_LINE,
+                    },
+                )
+            }),
             controls_open: true,
             curve_gesture: None,
             geometry: cx.new(|_| native_nodes::GeometryHelper::new(owner.clone())),
@@ -289,6 +320,7 @@ impl Editor {
     }
     fn canvas_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
+        let minimap = self.minimap.clone();
         let measure = canvas(
             move |bounds, window, cx| {
                 let pending = weak
@@ -301,6 +333,17 @@ impl Editor {
                         )
                     })
                     .unwrap_or_default();
+                // The overview's viewport mask needs the plane's real size.
+                minimap.update(cx, |minimap, cx| {
+                    let (width, height) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
+                    let resized = minimap.set_container_bounds(width, height);
+                    // The overview follows the plane's aspect ratio, so it is a
+                    // window into this plane rather than a fixed rectangle.
+                    let refitted = minimap.set_plane_size(width, height);
+                    if resized || refitted {
+                        cx.notify();
+                    }
+                });
                 if pending.0 || pending.1.is_some() {
                     let weak = weak.clone();
                     window.defer(cx, move |_, cx| {
@@ -318,12 +361,22 @@ impl Editor {
         )
         .absolute()
         .size_full();
-        let state = self.flow_state.read(cx);
-        let connections = state
-            .edges
-            .iter()
-            .filter(|edge| edge.selected && edge.deletable)
-            .count();
+        // Copy what the chrome needs, then drop the flow-state borrow: building the
+        // controls below needs `cx` mutably.
+        let (nodes, links, zoom, empty, connections) = {
+            let state = self.flow_state.read(cx);
+            (
+                state.nodes.len(),
+                state.edges.len(),
+                state.viewport.zoom,
+                state.nodes.is_empty(),
+                state
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.selected && edge.deletable)
+                    .count(),
+            )
+        };
         div()
             .v_flex()
             .size_full()
@@ -332,49 +385,57 @@ impl Editor {
                 div()
                     .h_flex()
                     .flex_wrap()
-                    .gap_1()
-                    .p_2()
+                    .items_baseline()
+                    .justify_between()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
                     .flex_shrink_0()
+                    .text_color(rgb(t::BENCH_INK))
                     .border_b_1()
-                    .border_color(rgb(0x343b45))
-                    .child(div().font_weight(FontWeight::BOLD).child("Workflow"))
-                    .child(div().text_xs().child(format!(
-                        "{} {} · {} {}",
-                        state.nodes.len(),
-                        if state.nodes.len() == 1 {
-                            "node"
-                        } else {
-                            "nodes"
-                        },
-                        state.edges.len(),
-                        if state.edges.len() == 1 {
-                            "link"
-                        } else {
-                            "links"
-                        }
-                    )))
+                    .border_color(rgb(t::BENCH_LINE))
+                    // The scope header names the document; the status side counts
+                    // what is in it. Two jobs, two ends of one bar. The edge code
+                    // is a caption beside the title, never a kicker above it.
                     .child(
-                        Button::new("fit-workflow")
-                            .small()
-                            .label("Fit workflow")
-                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(0, cx))),
-                    )
-                    .child(
-                        Button::new("workflow-zoom-out")
-                            .small()
-                            .label("Zoom out")
-                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(-1, cx))),
-                    )
-                    .child(
-                        Button::new("workflow-zoom-in")
-                            .small()
-                            .label("Zoom in")
-                            .on_click(cx.listener(|this, _, _, cx| this.canvas_navigation(1, cx))),
+                        div()
+                            .h_flex()
+                            .items_baseline()
+                            .gap_2()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .font_family(t::Face::Display.family())
+                                    .font_weight(t::Face::Display.weight())
+                                    .text_size(t::Face::Display.size())
+                                    .child("Workflow"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(t::Face::EdgeCode.family())
+                                    .font_weight(t::Face::EdgeCode.weight())
+                                    .text_size(t::Face::EdgeCode.size())
+                                    .text_color(rgb(t::BENCH_INK_DIM))
+                                    .child(t::code("workflow scope")),
+                            ),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .child(format!("{:.0}%", state.viewport.zoom * 100.0)),
+                            .h_flex()
+                            .items_center()
+                            .gap_3()
+                            .font_family(t::Face::EdgeCode.family())
+                            .font_weight(t::Face::EdgeCode.weight())
+                            .text_size(t::Face::EdgeCode.size())
+                            .text_color(rgb(t::BENCH_INK_DIM))
+                            .child(format!(
+                                "{} {} · {} {}",
+                                nodes,
+                                if nodes == 1 { "node" } else { "nodes" },
+                                links,
+                                if links == 1 { "link" } else { "links" }
+                            ))
+                            .child(div().child(format!("{:.0}%", zoom * 100.0))),
                     ),
             )
             .when(connections > 0, |view| view.child(div().h_flex().gap_2().px_2().py_1().flex_shrink_0()
@@ -396,27 +457,137 @@ impl Editor {
                     }))
                     .child(self.flow.clone())
                     .child(measure)
-                    .when(state.nodes.is_empty(), |view| {
+                    // Canvas controls live in the corner of the plane they act on,
+                    // as a window cut into it, not in the panel's command bar.
+                    .child(
+                        div()
+                            .id("workflow-controls")
+                            .test_support()
+                            .absolute()
+                            .left(px(12.0))
+                            .bottom(px(12.0))
+                            .v_flex()
+                            .overflow_hidden()
+                            .rounded(t::RADIUS)
+                            .border_1()
+                            .border_color(rgb(t::BENCH_LINE_STRONG))
+                            .child(self.canvas_control("workflow-zoom-in", IconName::Plus, "Zoom in", 1, cx))
+                            .child(self.canvas_control("workflow-zoom-out", IconName::Minus, "Zoom out", -1, cx))
+                            // `Maximize` is the nearest bundled fit-view mark; the
+                            // component icon subset has no four-corner expand.
+                            .child(self.canvas_control("fit-workflow", IconName::Maximize, "Fit the whole workflow", 0, cx)),
+                    )
+                    // Bird's-eye view, as a window cut into the plane's corner.
+                    .child(
+                        div()
+                            .id("workflow-overview")
+                            .test_support()
+                            .absolute()
+                            .right(px(12.0))
+                            .bottom(px(12.0))
+                            .child(self.minimap.clone()),
+                    )
+                    .when(empty, |view| {
                         view.child(
+                            // A plane-sized, input-transparent centring layer: the
+                            // plane stays draggable behind the arrival block.
                             div()
                                 .absolute()
-                                .top(px(32.0))
-                                .left(px(24.0))
-                                .text_sm()
-                                .child("Start weaving: drag a node here, or add one from Nodes."),
+                                .left(px(0.0))
+                                .top(px(0.0))
+                                .w(px(self.canvas_size.0))
+                                .h(px(self.canvas_size.1))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("canvas-empty")
+                                        .test_support()
+                                        .w(px(300.0))
+                                        .border_t_1()
+                                        .border_b_1()
+                                        .border_color(rgb(t::BENCH_LINE))
+                                        .py_3()
+                                        .child(
+                                            div()
+                                                .mb_2()
+                                                .size(px(26.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(3.0))
+                                                .border_1()
+                                                .border_color(rgb(t::ROOM_LINE_STRONG))
+                                                .child(Icon::new(IconName::Plus).size(px(14.0))),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_size(px(15.0))
+                                                .child("Start weaving"),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_sm()
+                                                .text_color(rgb(t::ROOM_INK_FAINT))
+                                                .child("Drag a node from the library into the workflow, or click one to add it."),
+                                        ),
+                                ),
                         )
                     }),
             )
             .child(
                 div()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .h(t::ROW_LOOSE)
                     .flex_shrink_0()
+                    .text_color(rgb(t::BENCH_INK))
                     .border_t_1()
-                    .border_color(rgb(0x343b45))
-                    .child("Connect output to input · Click wire, Delete to disconnect · Wheel to zoom · Shift+wheel / middle-drag to pan"),
+                    .border_color(rgb(t::BENCH_LINE))
+                    .child(div().size(px(6.0)).rounded_full().bg(rgb(t::BENCH_INK)))
+                    .child(
+                        div()
+                            .font_family(t::Face::Body.family())
+                            .text_size(t::Face::Body.size())
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(self.status.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(t::Face::EdgeCode.family())
+                            .font_weight(t::Face::EdgeCode.weight())
+                            .text_size(t::Face::EdgeCode.size())
+                            .text_color(rgb(t::BENCH_INK_DIM))
+                            .child(t::code("drag output to input")),
+                    ),
             )
+            .into_any_element()
+    }
+
+    /// One square canvas-control button carrying the plane's own line tone.
+    fn canvas_control(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        action: i8,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        Button::new(id)
+            .small()
+            .icon(icon)
+            .ghost()
+            .tooltip(label)
+            .accessibility_label(label)
+            .on_click(cx.listener(move |this, _, _, cx| this.canvas_navigation(action, cx)))
             .into_any_element()
     }
     fn reveal_canvas_node(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -476,7 +647,7 @@ impl Editor {
                             (
                                 port.id.clone(),
                                 format!(
-                                    "{} input · {}",
+                                    "{} in · {}",
                                     port.name,
                                     port.data_type.rsplit('.').next().unwrap_or(&port.data_type)
                                 ),
@@ -494,7 +665,7 @@ impl Editor {
                                         node.descriptor
                                             .parameter(id)
                                             .map(|parameter| {
-                                                format!("{} input · parameter", parameter.name)
+                                                format!("{} in · parameter", parameter.name)
                                             })
                                             .unwrap_or_else(|| id.clone()),
                                     )
@@ -514,7 +685,7 @@ impl Editor {
                                     HandleDef::source(HandlePosition::Right)
                                         .id(port.id.clone())
                                         .label(format!(
-                                            "{} output · {}",
+                                            "{} out · {}",
                                             port.name,
                                             port.data_type
                                                 .rsplit('.')
@@ -549,7 +720,15 @@ impl Editor {
                 )
                 .source_handle(e.from_port.clone())
                 .target_handle(e.to_port.clone())
-                .color(0xb5bdcb)
+                // A wire's colour says which kind of data it carries.
+                .color(t::data_type_color(
+                    self.session
+                        .editor
+                        .graph()
+                        .node(&CoreNodeId::from(e.from_node.as_str()))
+                        .and_then(|node| node.descriptor.output(&e.from_port))
+                        .map(|port| port.data_type.as_str()),
+                ))
             })
             .collect();
         let graph = self.session.editor.graph().clone();
@@ -1523,7 +1702,7 @@ impl Editor {
                 }
                 menu
             });
-        div().v_flex().gap_2().p_2().border_b_1().border_color(rgb(0x343b45))
+        div().v_flex().gap_2().p_2().border_b_1().border_color(rgb(t::ROOM_LINE))
             .child(div().h_flex().flex_wrap().gap_2()
                 .child(div().v_flex().gap_1().child("JPEG quality (1–100)").child(Input::new(&self.export_quality).w(px(120.0))))
                 .child(div().v_flex().gap_1().child("Long edge (1–8192 px)").child(Input::new(&self.export_long_edge).w(px(180.0))))
@@ -1781,10 +1960,20 @@ impl Render for Editor {
             .id("node-help")
             .size_full()
             .h_flex()
+            .items_center()
             .gap_2()
-            .p_2()
-            .text_xs()
-            .child("Controls are in the selected node.")
+            .px_3()
+            .bg(rgb(t::ROOM_PANEL))
+            .border_t_1()
+            .border_color(rgb(t::ROOM_LINE))
+            .child(
+                div()
+                    .font_family(t::Face::EdgeCode.family())
+                    .font_weight(t::Face::EdgeCode.weight())
+                    .text_size(t::Face::EdgeCode.size())
+                    .text_color(rgb(t::ROOM_INK_DIM))
+                    .child(t::code("parameters in frame")),
+            )
             .child(
                 Button::new("hide-inspector")
                     .small()
@@ -1803,13 +1992,16 @@ impl Render for Editor {
                 let toggle = category.clone();
                 div()
                     .v_flex()
-                    .gap_1()
+                    .child(
+                        // A ruled index: a full-width hairline separates rows, and
+                        // no container is drawn around the list.
+                        div().h(px(1.0)).w_full().bg(rgb(t::ROOM_LINE)),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("category-{category}")))
                             .small()
-                            .mt_2()
                             .justify_start()
-                            .label(category.clone())
+                            .label(t::code(&category))
                             .icon(if open {
                                 IconName::ChevronDown
                             } else {
@@ -1821,7 +2013,15 @@ impl Render for Editor {
                                 "{} {category}",
                                 if open { "Collapse" } else { "Expand" }
                             ))
-                            .child(div().text_xs().child(nodes.len().to_string()))
+                            // Push the count to the trailing edge so category rows
+                            // stay scannable next to uneven node names.
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(t::ROOM_INK_DIM))
+                                    .child(nodes.len().to_string()),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.search.read(cx).value().trim().is_empty() {
                                     return;
@@ -1842,6 +2042,8 @@ impl Render for Editor {
                             };
                             div()
                                 .id(SharedString::from(format!("drag-{kind}")))
+                                .border_b_1()
+                                .border_color(rgb(t::ROOM_LINE))
                                 .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                                 .child(
                                     Button::new(SharedString::from(kind.clone()))
@@ -1850,18 +2052,35 @@ impl Render for Editor {
                                         .icon(IconName::Plus)
                                         .ghost()
                                         .h_auto()
+                                        .rounded(t::RADIUS)
                                         .py_1()
+                                        // Indent rows under their category header.
+                                        .pl_3()
                                         .child(
                                             div()
-                                                .v_flex()
+                                                .id(SharedString::from(format!("node-name-{kind}")))
+                                                .test_support()
+                                                // Growing the label pins the icon to the left
+                                                // edge; a centred group would drift right
+                                                // on short names.
+                                                .flex_1()
                                                 .min_w_0()
+                                                .v_flex()
                                                 .items_start()
-                                                .child(descriptor.name)
                                                 .child(
                                                     div()
-                                                        .text_xs()
-                                                        .text_color(rgb(0xa6adb8))
-                                                        .child(descriptor.type_id),
+                                                        .font_family(t::Face::Title.family())
+                                                        .font_weight(t::Face::Title.weight())
+                                                        .text_size(t::Face::Title.size())
+                                                        .child(descriptor.name),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .font_family(t::Face::EdgeCode.family())
+                                                        .font_weight(t::Face::EdgeCode.weight())
+                                                        .text_size(t::Face::EdgeCode.size())
+                                                        .text_color(rgb(t::ROOM_INK_FAINT))
+                                                        .child(t::code(&descriptor.type_id)),
                                                 ),
                                         )
                                         .tooltip(tooltip)
@@ -1879,8 +2098,10 @@ impl Render for Editor {
             .track_focus(&self.focus)
             .size_full()
             .v_flex()
-            .bg(rgb(0x1c2026))
-            .text_color(rgb(0xe1e5eb))
+            .bg(rgb(t::ROOM_GROUND))
+            .text_color(rgb(t::ROOM_INK))
+            .font_family(t::Face::Body.family())
+            .text_size(t::Face::Body.size())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
                     || this.search.read(cx).focus_handle(cx).is_focused(window)
@@ -1922,7 +2143,7 @@ impl Render for Editor {
                 }
             }))
             .child(
-                div().h_flex().flex_wrap().gap_2().p_2().flex_shrink_0().border_b_1().border_color(rgb(0x343b45))
+                div().h_flex().flex_wrap().gap_2().p_2().flex_shrink_0().border_b_1().border_color(rgb(t::ROOM_LINE))
                     .child(div().font_weight(FontWeight::BOLD).mr_2().child("RawWeave"))
                     .child(Button::new("open").label("Open Image").primary().on_click(
                         cx.listener(|this, _, window, cx| this.choose_file(FileKind::Image, window, cx))))
@@ -1963,7 +2184,7 @@ impl Render for Editor {
                             })
                             .when(self.workspace.library_open, |group| group.child(
                                 resizable_panel().size(px(self.workspace.library_width)).size_range(px(180.0)..px(400.0)).flex_none().child(
-                                    div().id("library").test_support().size_full().overflow_y_scroll().v_flex().gap_1().p_2()
+                                    div().id("library").test_support().size_full().overflow_y_scroll().v_flex().p_2().bg(rgb(t::ROOM_PANEL))
                                         .child(div().h_flex().flex_wrap().gap_1().child(div().font_weight(FontWeight::BOLD).child("Nodes"))
                                             .child(Button::new("hide-library").small().label("Hide").on_click(cx.listener(|this, _, window, cx| this.toggle_panel(0, window, cx)))))
                                         .child(Input::new(&self.search))
@@ -1972,9 +2193,28 @@ impl Render for Editor {
                                                 this.collapsed_categories = this.session.editor.node_descriptors().iter().map(|node| node_category(&node.type_id)).collect(); cx.notify();
                                             })))
                                             .child(Button::new("expand-node-groups").small().label("Expand all").on_click(cx.listener(|this, _, _, cx| { this.collapsed_categories.clear(); cx.notify(); }))))
-                                        .child(div().text_xs().child("Drag into workflow · Click or Enter to add"))
+                                        .child(
+                                            div()
+                                                .py_1()
+                                                .font_family(t::Face::EdgeCode.family())
+                                                .font_weight(t::Face::EdgeCode.weight())
+                                                .text_size(t::Face::EdgeCode.size())
+                                                .text_color(rgb(t::ROOM_INK_FAINT))
+                                                .child(t::code("drag in · click or enter to add")),
+                                        )
                                         .when(!self.selected_output_types().is_empty(), |view| view.child(Checkbox::new("compatible-nodes").label("Compatible inputs only").checked(self.compatible_only).on_click(cx.listener(|this, checked, _, cx| { this.compatible_only = *checked; cx.notify(); }))))
-                                        .child(div().text_xs().child(format!("{library_count} matching {}", if library_count == 1 { "node" } else { "nodes" })))
+                                        .child(
+                                            div()
+                                                .pt_2()
+                                                .font_family(t::Face::EdgeCode.family())
+                                                .font_weight(t::Face::EdgeCode.weight())
+                                                .text_size(t::Face::EdgeCode.size())
+                                                .text_color(rgb(t::ROOM_INK_FAINT))
+                                                .child(t::code(&format!(
+                                                    "{library_count} matching {}",
+                                                    if library_count == 1 { "node" } else { "nodes" }
+                                                ))),
+                                        )
                                         .children(library)
                                         .when(library_count == 0, |view| view.child(div().text_sm().child("No matching nodes. Clear search or turn off compatible filtering.")))
                                 )
@@ -2002,30 +2242,55 @@ impl Render for Editor {
                 div()
                     .px_3()
                     .py_1()
-                    .text_xs()
                     .flex_shrink_0()
+                    .bg(rgb(t::ROOM_STRIP))
+                    .font_family(t::Face::Readout.family())
+                    .text_size(t::Face::Readout.size())
+                    .text_color(rgb(t::ROOM_INK_DIM))
                     .border_t_1()
-                    .border_color(rgb(0x343b45))
+                    .border_color(rgb(t::ROOM_LINE))
                     .child(format!("{}{} · {}", self.source_path.as_ref().map(|path| format!("{} · ", path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())).unwrap_or_default(), self.status, self.gpu_label))
                     .when(!self.export_status.is_empty(), |view| view.child(div().child(self.export_status.clone()))),
             )
     }
 }
+/// Map the design's casts onto the component theme once, so shared controls
+/// (buttons, inputs, menus, resizable handles) are in the world too.
 fn configure_theme(cx: &mut App) {
+    use native_theme as t;
     Theme::change(ThemeMode::Dark, None, cx);
     Theme::update(cx, |theme| {
-        theme.font_size = px(14.0);
-        theme.radius = px(3.0);
-        theme.radius_lg = px(3.0);
-        theme.colors.primary = rgb(0xf2efe6).into();
-        theme.colors.primary_foreground = rgb(0x14110d).into();
-        theme.colors.primary_hover = rgb(0xfffdf7).into();
-        theme.colors.primary_active = rgb(0xded6c4).into();
-        theme.colors.button_primary = theme.colors.primary;
-        theme.colors.button_primary_foreground = theme.colors.primary_foreground;
-        theme.colors.button_primary_hover = theme.colors.primary_hover;
-        theme.colors.button_primary_active = theme.colors.primary_active;
-        theme.colors.ring = rgb(0xe8a33d).into();
+        theme.font_family = t::Face::Body.family();
+        theme.font_size = t::Face::Body.size();
+        theme.mono_font_family = t::Face::Readout.family();
+        theme.mono_font_size = t::Face::Readout.size();
+        theme.radius = t::RADIUS;
+        theme.radius_lg = t::RADIUS;
+        // Room ground is warm near-black; the panel steps read by lightness alone.
+        theme.background = rgb(t::ROOM_GROUND).into();
+        theme.foreground = rgb(t::ROOM_INK).into();
+        theme.border = rgb(t::ROOM_LINE).into();
+        theme.input = rgb(t::ROOM_SUNK).into();
+        theme.muted = rgb(t::ROOM_RAISE).into();
+        theme.muted_foreground = rgb(t::ROOM_INK_DIM).into();
+        theme.primary = rgb(t::WAX_WHITE).into();
+        theme.primary_foreground = rgb(t::WAX_WHITE_INK).into();
+        theme.primary_hover = rgb(t::WAX_WHITE_BRIGHT).into();
+        theme.primary_active = rgb(t::ROOM_INK_BODY).into();
+        theme.button_primary = theme.primary;
+        theme.button_primary_foreground = theme.primary_foreground;
+        theme.button_primary_hover = theme.primary_hover;
+        theme.button_primary_active = theme.primary_active;
+        theme.ring = rgb(t::WAX_AMBER).into();
+        theme.danger = rgb(t::WAX_RED).into();
+        theme.danger_foreground = rgb(t::WAX_RED_INK).into();
+        // The plane and the judging station are their own casts, not chrome.
+        theme.colors.primary = rgb(t::WAX_WHITE).into();
+        theme.colors.foreground = rgb(t::ROOM_INK).into();
+        theme.colors.background = rgb(t::ROOM_GROUND).into();
+        theme.colors.border = rgb(t::ROOM_LINE).into();
+        theme.colors.input = rgb(t::ROOM_SUNK).into();
+        theme.colors.ring = rgb(t::WAX_AMBER).into();
     });
 }
 fn main() {
@@ -2034,6 +2299,9 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            if let Err(error) = native_theme::install_fonts(cx.text_system(), cx) {
+                eprintln!("RawWeave design faces: {error}");
+            }
             configure_theme(cx);
             let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
             let result = gpui_kit::open_window(
