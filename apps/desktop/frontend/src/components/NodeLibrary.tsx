@@ -2,6 +2,7 @@ import { useMemo, useState, type RefObject } from 'react';
 import type { NodeDescriptor } from '../editor/types';
 import { dataTypesCompatible } from '../editor/connections';
 import { Icon } from '../ui/Icon';
+import taxonomy from '../editor/node-categories.json';
 
 export const NODE_DRAG_TYPE = 'application/x-rawweave-node';
 
@@ -15,29 +16,10 @@ interface NodeLibraryProps {
   onCollapse?: () => void;
 }
 
-const CATEGORY_LABELS: Record<string, string> = { ai: 'AI', core: 'Core', pro: 'Pro Tools', raw: 'RAW' };
+const CATEGORY_LABELS = taxonomy.labels as Record<string, string>;
 
-// Presentation-only taxonomy: persisted node IDs and backend descriptors stay unchanged.
-const CATEGORIES: [string, string[]][] = [
-  ['Input & output', ['core.image-input', 'core.output', 'core.imageset-input']],
-  ['RAW development', ['raw.decode', 'raw.black-level', 'raw.white-balance', 'raw.highlight-reconstruction', 'raw.demosaic', 'raw.camera-transform', 'raw.lens-correction', 'raw.display-transform']],
-  ['Tone & exposure', ['core.exposure', 'core.local-exposure', 'core.levels', 'core.curves', 'core.invert', 'pro.tone-map', 'pro.advanced-tone-map']],
-  ['Color', ['core.color-matrix', 'pro.color-zones', 'pro.selective-color', 'pro.channel-mixer', 'pro.perceptual-saturation', 'pro.gamut-compression', 'pro.lut', 'pro.lut-tools']],
-  ['Geometry & lens', ['core.crop', 'core.resize', 'pro.defringe', 'pro.chromatic-aberration', 'pro.chromatic-aberration-correction', 'pro.distortion-correction', 'pro.distortion', 'pro.perspective-correction', 'pro.vignetting']],
-  ['Detail & noise', ['core.blur', 'pro.advanced-denoise', 'pro.denoise', 'pro.detail-separation', 'pro.wavelet-detail-separation', 'pro.deconvolution', 'pro.sharpen', 'pro.advanced-sharpen', 'pro.local-contrast', 'pro.texture']],
-  ['Film & effects', ['pro.film-curve', 'pro.film-simulation', 'pro.grain', 'pro.halation', 'pro.bloom', 'pro.dye-layer', 'pro.split-toning']],
-  ['Mask sources', ['core.mask-linear-gradient', 'core.mask-radial-gradient', 'core.mask-painted', 'core.mask-color-qualifier', 'core.mask-luminance', 'core.select-label', 'core.label-map-select']],
-  ['Mask combine', ['core.mask-add', 'core.mask-subtract', 'core.mask-intersect', 'core.mask-multiply']],
-  ['Mask refine', ['core.mask-invert', 'core.mask-threshold', 'core.mask-feather', 'core.mask-blur', 'core.mask-expand', 'core.mask-contract']],
-  ['Multi-image', ['core.imageset-collect', 'core.imageset-select', 'core.imageset-filter', 'core.imageset-map', 'core.imageset-group', 'core.exposure-set', 'core.alignment', 'core.hdr-merge', 'core.focus-stack']],
-  ['Values', ['core.constant', 'core.constant-float', 'core.constant-integer', 'core.constant-boolean', 'core.constant-string', 'core.metadata']],
-  ['Math & expressions', ['core.map-range', 'core.clamp', 'core.curve', 'core.expression']],
-  ['Logic & routing', ['core.compare', 'core.equal', 'core.greater-than', 'core.less-than', 'core.and', 'core.or', 'core.not', 'core.switch', 'core.select', 'core.enum-select', 'core.string-match']],
-  ['Analysis', ['pro.histogram-statistics', 'pro.histogram', 'pro.clipping-analysis', 'pro.clipping', 'pro.noise-estimate', 'pro.noise', 'pro.sharpness-estimate', 'pro.sharpness', 'pro.dynamic-range-estimate', 'pro.dynamic-range']],
-  ['AI masks', ['ai.subject-segmentation', 'ai.semantic-segmentation', 'ai.prompt-segmentation', 'ai.skin-mask', 'ai.sky-mask', 'ai.foreground-mask']],
-  ['AI analysis', ['ai.scene-analysis', 'ai.face-detection', 'ai.depth-estimation']],
-  ['AI editing', ['ai.inpaint', 'ai.generative-fill', 'ai.upscale']],
-];
+// Shared presentation-only taxonomy; persisted IDs and backend descriptors stay unchanged.
+const CATEGORIES = taxonomy.categories as [string, string[]][];
 const NODE_CATEGORIES = new Map(CATEGORIES.flatMap(([category, types]) => types.map((type) => [type, category] as const)));
 const CATEGORY_ORDER = new Map(CATEGORIES.map(([category], index) => [category, index]));
 

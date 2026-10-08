@@ -12,6 +12,7 @@ use thiserror::Error;
 mod external;
 
 pub use external::{ExternalError, ExternalHost, ExternalHostDiagnostics, ExternalNodePack};
+pub use rawweave_graph::types_compatible;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {

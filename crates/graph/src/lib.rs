@@ -1749,7 +1749,8 @@ fn parameter_data_type(parameter_type: ParameterType) -> &'static str {
 /// Two ports may connect when their types match, when either side is the
 /// `core.Any` wildcard used by routing nodes, or for the documented safe
 /// conversions: integer/float numerics and boolean/condition predicates.
-fn types_compatible(expected: &str, actual: &str) -> bool {
+/// Connection compatibility shared by graph validation and editor discovery filters.
+pub fn types_compatible(expected: &str, actual: &str) -> bool {
     expected == actual
         || expected == ANY_TYPE
         || actual == ANY_TYPE

@@ -1,6 +1,9 @@
 //! Native desktop session. Graph execution stays in the existing Rust engine.
+pub mod library;
+pub mod parameters;
+pub mod viewer;
 use rawweave_color::{DisplayTransform, SrgbDisplayTransform};
-use rawweave_image::{Dimensions, Image};
+use rawweave_image::{ColorDomain, Dimensions, Image, PixelFormat};
 use rawweave_node_api::{EvaluationContext, Value};
 use rawweave_project::EditorCore;
 use rawweave_raw::{RawDecodeLimits, RawloaderDecoder};
@@ -10,6 +13,46 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Capture one document before a pointer gesture, not one entry per movement.
+#[derive(Default)]
+pub struct MoveHistory {
+    before: Option<String>,
+}
+impl MoveHistory {
+    pub fn observe(&mut self, dragging: bool, before: String, after: &str) -> Option<String> {
+        if dragging {
+            self.before.get_or_insert(before);
+            None
+        } else {
+            self.before.take().filter(|value| value != after)
+        }
+    }
+    pub fn reset(&mut self) {
+        self.before = None;
+    }
+}
+
+#[cfg(test)]
+mod move_history_tests {
+    #[test]
+    fn moves_group_until_release_and_ignore_selection_or_return_to_origin() {
+        let mut history = super::MoveHistory::default();
+        assert_eq!(history.observe(false, "initial".into(), "initial"), None);
+        assert_eq!(history.observe(true, "initial".into(), "midway"), None);
+        assert_eq!(history.observe(true, "midway".into(), "final"), None);
+        assert_eq!(
+            history.observe(false, "final".into(), "final"),
+            Some("initial".into())
+        );
+        assert_eq!(history.observe(false, "final".into(), "final"), None);
+        history.observe(true, "initial".into(), "midway");
+        assert_eq!(history.observe(false, "midway".into(), "initial"), None);
+        history.observe(true, "initial".into(), "midway");
+        history.reset();
+        assert_eq!(history.observe(false, "loaded".into(), "loaded"), None);
+    }
+}
 
 #[derive(Clone)]
 pub enum Source {
@@ -105,6 +148,99 @@ impl Default for Session {
     }
 }
 impl Session {
+    pub fn select_target(&mut self, node: &str, port: &str) -> Result<(), String> {
+        let valid = self
+            .editor
+            .graph()
+            .node(&rawweave_core::NodeId::from(node))
+            .is_some_and(|node| {
+                node.descriptor
+                    .outputs
+                    .iter()
+                    .any(|output| output.id == port && preview_type(&output.data_type))
+            });
+        if !valid {
+            return Err("Select an available image output".into());
+        }
+        self.target = (node.to_owned(), port.to_owned());
+        Ok(())
+    }
+    /// Export the selected graph output at mip 0, never the viewer's proxy texture.
+    pub fn export(&self, path: &Path) -> Result<(), String> {
+        use rawweave_batch::{
+            BatchItem, BitDepth, ColorSpace, MetadataPolicy, OutputFormat, OutputRecipe,
+        };
+        let extension = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let format = match extension.as_str() {
+            "jpg" | "jpeg" => OutputFormat::Jpeg,
+            "png" => OutputFormat::Png,
+            "tif" | "tiff" => OutputFormat::Tiff,
+            "exr" => OutputFormat::OpenExr,
+            _ => return Err("Use a .png, .jpg, .tif or .exr filename".into()),
+        };
+        let image = match self.evaluate(0)? {
+            Value::Image(image) => image,
+            Value::SceneLinearRGB(scene) => {
+                rgb_image(scene.dimensions(), scene.pixels(), ColorDomain::LinearSrgb)?
+            }
+            Value::DisplayRGB(display) => {
+                rgb_image(display.dimensions(), display.pixels(), ColorDomain::Srgb)?
+            }
+            _ => return Err("Selected output is not an image".into()),
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // Stage encoding separately: the batch writer's overwrite policy removes the old file.
+        // Installing a NamedTempFile instead preserves the destination if encoding/install fails.
+        let staging = tempfile::tempdir_in(parent).map_err(|e| e.to_string())?;
+        let mut recipe = OutputRecipe::new(format, staging.path()).with_filename_template("export");
+        recipe.metadata_policy = MetadataPolicy::Strip;
+        if format == OutputFormat::OpenExr {
+            recipe.bit_depth = BitDepth::Float32;
+            recipe.color_space = ColorSpace::LinearSrgb;
+        } else if format == OutputFormat::Tiff {
+            recipe.bit_depth = BitDepth::Sixteen;
+        }
+        let encoded = rawweave_batch::write_output(
+            &image,
+            &recipe,
+            &BatchItem::new("export", "source", "source"),
+            0,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut output = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+        std::io::copy(
+            &mut std::fs::File::open(encoded).map_err(|e| e.to_string())?,
+            &mut output,
+        )
+        .map_err(|e| e.to_string())?;
+        output.as_file().sync_all().map_err(|e| e.to_string())?;
+        output.persist(path).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    fn evaluate(&self, mip: u8) -> Result<Value, String> {
+        let source = self.source.as_ref().ok_or("Select a source image")?;
+        let context = match source {
+            Source::Ordinary(image) if self.editor.graph().supports_source_mip(&self.target.0) => {
+                EvaluationContext::with_source_image(image.clone()).with_source_image_mip(mip)
+            }
+            Source::Ordinary(image) => EvaluationContext::with_source_image(image.clone()),
+            Source::Raw { bytes, path, .. } => EvaluationContext::default()
+                .with_source_bytes(Arc::clone(bytes))
+                .with_source_path(path),
+        }
+        .with_mip_level(mip);
+        self.editor
+            .evaluate(&self.target.0, &self.target.1, context)
+            .map_err(|e| e.to_string())
+    }
     pub fn attach(&mut self, source: Source) -> Result<(), String> {
         let raw = matches!(source, Source::Raw { .. });
         if self.awaiting_source {
@@ -136,6 +272,16 @@ impl Session {
         self.editor.load_workflow(json).map_err(|e| e.to_string())?;
         self.source = None;
         self.awaiting_source = true;
+        self.target = (String::new(), String::new());
+        self.reconcile_target();
+        Ok(())
+    }
+    /// Keep viewer state valid after deletion or history restoration.
+    pub fn reconcile_target(&mut self) -> bool {
+        let (node, port) = self.target.clone();
+        if self.select_target(&node, &port).is_ok() {
+            return false;
+        }
         self.target = [("output", "image"), ("display-transform", "display")]
             .into_iter()
             .find(|(id, port)| {
@@ -160,7 +306,7 @@ impl Session {
                     .next()
             })
             .unwrap_or_default();
-        Ok(())
+        true
     }
     pub fn preview(
         &self,
@@ -173,20 +319,7 @@ impl Session {
         let source = self.source.as_ref().ok_or("select a source image")?;
         let proxy = matches!(source, Source::Ordinary(_))
             && self.editor.graph().supports_source_mip(&self.target.0);
-        let context = match source {
-            Source::Ordinary(image) if proxy => {
-                EvaluationContext::with_source_image(image.clone()).with_source_image_mip(mip)
-            }
-            Source::Ordinary(image) => EvaluationContext::with_source_image(image.clone()),
-            Source::Raw { bytes, path, .. } => EvaluationContext::default()
-                .with_source_bytes(Arc::clone(bytes))
-                .with_source_path(path),
-        }
-        .with_mip_level(mip);
-        let value = self
-            .editor
-            .evaluate(&self.target.0, &self.target.1, context)
-            .map_err(|e| e.to_string())?;
+        let value = self.evaluate(mip)?;
         if cancellation.is_cancelled() {
             return Err("preview cancelled".into());
         }
@@ -219,6 +352,59 @@ impl Session {
         }
     }
 }
+fn rgb_image(
+    dimensions: Dimensions,
+    pixels: &[[f32; 3]],
+    domain: ColorDomain,
+) -> Result<Image, String> {
+    Image::from_pixels_with_metadata(
+        dimensions.width,
+        dimensions.height,
+        pixels.iter().map(|[r, g, b]| [*r, *g, *b, 1.0]).collect(),
+        PixelFormat::Rgba32Float,
+        domain,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    OpenImage,
+    OpenWorkflow,
+    SaveWorkflow,
+    Search,
+    Undo,
+    Redo,
+    Delete,
+}
+
+pub fn shortcut(
+    key: &str,
+    modifier: bool,
+    shift: bool,
+    alt: bool,
+    editing: bool,
+) -> Option<Shortcut> {
+    use Shortcut::*;
+    if alt {
+        return None;
+    }
+    if modifier {
+        match key {
+            "k" if !shift => Some(Search),
+            "o" => Some(if shift { OpenImage } else { OpenWorkflow }),
+            "s" if !shift => Some(SaveWorkflow),
+            "z" if !editing => Some(if shift { Redo } else { Undo }),
+            "y" if !editing && !shift => Some(Redo),
+            _ => None,
+        }
+    } else if !editing && matches!(key, "backspace" | "delete") {
+        Some(Delete)
+    } else {
+        None
+    }
+}
+
 pub fn preview_type(kind: &str) -> bool {
     matches!(
         kind,
@@ -293,6 +479,162 @@ fn display_frame(display: rawweave_color::DisplayRGB, mip: u8) -> Result<Preview
 mod tests {
     use super::*;
     #[test]
+    fn explicit_preview_targets_validate_without_mutating_on_failure() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(Image::new(3, 2).unwrap()))
+            .unwrap();
+        session.select_target("input", "image").unwrap();
+        assert_eq!(session.target, ("input".into(), "image".into()));
+        assert!(session.select_target("input", "missing").is_err());
+        assert!(session.select_target("missing", "image").is_err());
+        session
+            .editor
+            .add_node("number", "core.constant-float")
+            .unwrap();
+        assert!(session.select_target("number", "value").is_err());
+        assert_eq!(session.target, ("input".into(), "image".into()));
+    }
+    #[test]
+    fn removed_viewer_output_falls_back_to_an_available_target() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(Image::new(1, 1).unwrap()))
+            .unwrap();
+        session.select_target("output", "image").unwrap();
+        session.editor.remove_node("output").unwrap();
+        assert!(session.reconcile_target());
+        assert_eq!(session.target, ("input".into(), "image".into()));
+        assert!(!session.reconcile_target());
+        session.editor.remove_node("input").unwrap();
+        assert!(session.reconcile_target());
+        assert_eq!(session.target, (String::new(), String::new()));
+    }
+    #[test]
+    fn exports_evaluate_the_selected_output_and_keep_color_domains() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(
+                Image::from_pixels_with_metadata(
+                    1,
+                    1,
+                    vec![[0.25, 0.5, 0.75, 1.0]],
+                    PixelFormat::Rgba32Float,
+                    ColorDomain::Srgb,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        session.editor.add_node("bright", "core.exposure").unwrap();
+        session
+            .editor
+            .set_node_parameter(
+                "bright",
+                "exposure",
+                rawweave_node_api::ParameterValue::Float(1.0),
+            )
+            .unwrap();
+        session
+            .editor
+            .connect("input", "image", "bright", "image")
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("selected.PNG");
+        session.select_target("input", "image").unwrap();
+        session.export(&path).unwrap();
+        let original = rawweave_batch::decode_ordinary_file(&path).unwrap();
+        assert!((original.pixels()[0][0] - 0.25).abs() < 0.005);
+        session.select_target("bright", "image").unwrap();
+        session.export(&path).unwrap();
+        let bright = rawweave_batch::decode_ordinary_file(&path).unwrap();
+        assert!(bright.pixels()[0][0] > original.pixels()[0][0]);
+        assert_eq!(
+            rgb_image(
+                Dimensions::new(1, 1),
+                &[[2.0, 0.5, 0.25]],
+                ColorDomain::LinearSrgb
+            )
+            .unwrap()
+            .pixels()[0][0],
+            2.0
+        );
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn exr_export_preserves_scene_linear_highlights() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(
+                Image::from_pixels_with_metadata(
+                    1,
+                    1,
+                    vec![[2.5, 0.5, 0.25, 1.0]],
+                    PixelFormat::Rgba32Float,
+                    ColorDomain::LinearSrgb,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hdr.exr");
+        session.export(&path).unwrap();
+        let decoded = image::open(&path).unwrap().into_rgba32f();
+        assert_eq!(decoded.get_pixel(0, 0).0, [2.5, 0.5, 0.25, 1.0]);
+    }
+    #[test]
+    fn export_uses_full_resolution_and_preserves_existing_files_on_failure() {
+        let mut session = Session::default();
+        session
+            .attach(Source::Ordinary(
+                Image::from_pixels(3, 2, vec![[0.25, 0.5, 0.75, 1.0]; 6]).unwrap(),
+            ))
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        for extension in ["png", "jpg", "tif", "exr"] {
+            let path = directory.path().join(format!("result.{extension}"));
+            std::fs::write(&path, b"old").unwrap();
+            session.export(&path).unwrap();
+            let decoded = rawweave_batch::decode_ordinary_file(&path);
+            if extension != "exr" {
+                assert_eq!(decoded.unwrap().dimensions(), Dimensions::new(3, 2));
+            } else {
+                assert!(std::fs::metadata(&path).unwrap().len() > 3);
+            }
+        }
+        let path = directory.path().join("result.png");
+        let before = std::fs::read(&path).unwrap();
+        session.source = None;
+        assert!(session.export(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            session
+                .export(&directory.path().join("result.unknown"))
+                .is_err()
+        );
+    }
+    #[test]
+    fn shortcuts_match_tauri_and_leave_text_editing_native() {
+        use Shortcut::*;
+        assert_eq!(shortcut("o", true, false, false, false), Some(OpenWorkflow));
+        assert_eq!(shortcut("o", true, true, false, false), Some(OpenImage));
+        assert_eq!(shortcut("s", true, false, false, false), Some(SaveWorkflow));
+        assert_eq!(shortcut("z", true, false, false, false), Some(Undo));
+        assert_eq!(shortcut("z", true, true, false, false), Some(Redo));
+        assert_eq!(shortcut("y", true, false, false, false), Some(Redo));
+        assert_eq!(shortcut("k", true, false, false, true), Some(Search));
+        assert_eq!(
+            shortcut("backspace", false, false, false, false),
+            Some(Delete)
+        );
+        for key in ["z", "y", "backspace", "delete"] {
+            assert_eq!(
+                shortcut(key, key == "z" || key == "y", false, false, true),
+                None
+            );
+        }
+        assert_eq!(shortcut("o", true, false, true, false), None);
+    }
+    #[test]
     fn bgra_upload_and_sampled_bounds_are_exact() {
         let mut session = Session::default();
         session
@@ -356,6 +698,26 @@ mod tests {
                 .is_err()
         );
         assert!(session.source.is_none());
+    }
+    #[test]
+    fn licensed_raw_export_matches_display_without_double_encoding() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-data/images/raw/nikon-d70s-12bit-lossy.nef");
+        let mut session = Session::default();
+        session.attach(Source::open(&source).unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("raw.png");
+        session.export(&path).unwrap();
+        let exported = rawweave_batch::decode_ordinary_file(&path).unwrap();
+        let display = session.preview(0, &CancellationToken::new()).unwrap();
+        assert_eq!(exported.dimensions(), display.dimensions);
+        for index in [0, exported.pixels().len() / 2, exported.pixels().len() - 1] {
+            let [r, g, b, _] = exported.pixels()[index];
+            let bgra = &display.bgra[index * 4..index * 4 + 4];
+            for (channel, byte) in [b, g, r].into_iter().zip(bgra) {
+                assert!((channel * 255.0 - f32::from(*byte)).abs() < 1.1);
+            }
+        }
     }
     #[test]
     fn invalid_uploads_and_failed_saves_preserve_resources() {

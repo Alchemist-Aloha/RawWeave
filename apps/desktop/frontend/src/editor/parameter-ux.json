@@ -1,0 +1,766 @@
+{
+  "specific": {
+    "core.exposure:exposure": {
+      "name": "Exposure",
+      "description": "Brightens or darkens the image in exposure stops. Increase to lift the whole image; decrease to darken it. 0 EV leaves the image unchanged.",
+      "unit": "EV",
+      "min": -5,
+      "max": 5,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.local-exposure:exposure": {
+      "name": "Exposure",
+      "description": "Brightens or darkens the masked area in exposure stops. Increase to lift it; decrease to darken it. 0 EV leaves the image unchanged.",
+      "unit": "EV",
+      "min": -5,
+      "max": 5,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.blur:radius": {
+      "name": "Blur Radius",
+      "description": "Controls how far the blur reaches from each pixel. Larger radii soften broader structures; smaller radii soften fine detail. Very large radii can erase local contrast.",
+      "unit": "px",
+      "min": 0,
+      "max": 20,
+      "step": 0.1,
+      "precision": 1
+    },
+    "core.levels:black_point": {
+      "name": "Black Point",
+      "description": "Sets the input level mapped to black. Raise it to deepen shadows, but values set too high can crush shadow detail.",
+      "min": 0,
+      "max": 0.25,
+      "step": 0.001,
+      "precision": 3
+    },
+    "core.levels:white_point": {
+      "name": "White Point",
+      "description": "Sets the input level mapped to white. Lower it to brighten highlights, but values set too low can clip detail.",
+      "min": 0.75,
+      "max": 1.5,
+      "step": 0.001,
+      "precision": 3
+    },
+    "core.curves:gamma": {
+      "name": "Midtone Gamma",
+      "description": "Shapes the transfer curve. Higher values brighten midtones; lower values darken them. 1 is the neutral diagonal.",
+      "min": 0.25,
+      "max": 4,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.levels:gamma": {
+      "name": "Midtone Gamma",
+      "description": "Adjusts the brightness of midtones between the black and white points. Higher values brighten midtones; lower values darken them without moving the endpoints.",
+      "min": 0.25,
+      "max": 4,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.crop:x": {
+      "name": "Left Edge",
+      "description": "Sets the crop’s horizontal starting position in the image.",
+      "unit": "px",
+      "advanced": true
+    },
+    "core.crop:y": {
+      "name": "Top Edge",
+      "description": "Sets the crop’s vertical starting position in the image.",
+      "unit": "px",
+      "advanced": true
+    },
+    "core.crop:width": {
+      "name": "Crop Width",
+      "description": "Sets the width of the cropped area.",
+      "unit": "px"
+    },
+    "core.crop:height": {
+      "name": "Crop Height",
+      "description": "Sets the height of the cropped area.",
+      "unit": "px"
+    },
+    "core.resize:width": {
+      "name": "Output Width",
+      "description": "Sets the resized image width. The image proportions are not constrained by this value.",
+      "unit": "px"
+    },
+    "core.resize:height": {
+      "name": "Output Height",
+      "description": "Sets the resized image height. The image proportions are not constrained by this value.",
+      "unit": "px"
+    },
+    "raw.white-balance:red_gain": {
+      "name": "Red Balance",
+      "description": "Fine-tunes the red channel gain used for RAW white balance. Increase to add red; reduce to add its complementary cyan cast.",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "raw.white-balance:green_gain": {
+      "name": "Green Balance",
+      "description": "Fine-tunes the green channel gain used for RAW white balance. Increase to add green; reduce to add its complementary magenta cast.",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "raw.white-balance:blue_gain": {
+      "name": "Blue Balance",
+      "description": "Fine-tunes the blue channel gain used for RAW white balance. Increase to add blue; reduce to add its complementary yellow cast.",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "raw.highlight-reconstruction:threshold": {
+      "name": "Highlight Recovery Threshold",
+      "description": "Sets how close a RAW channel must be to clipping before reconstruction begins. Lower values recover more highlight detail but can affect bright tones that were not clipped.",
+      "min": 0.8,
+      "max": 1.2,
+      "step": 0.001,
+      "precision": 3,
+      "advanced": true
+    },
+    "raw.highlight-reconstruction:strength": {
+      "name": "Recovery Strength",
+      "description": "Controls how strongly clipped RAW highlights are rebuilt from neighboring color information. Higher values recover more color detail but may create false color or uneven tones.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "raw.camera-transform:working_space": {
+      "name": "Working Color Space",
+      "description": "Determines the color space used for downstream processing. Choose a wider gamut when later operations need to preserve saturated colors.",
+      "options": [
+        {
+          "value": "sRGB",
+          "label": "sRGB"
+        },
+        {
+          "value": "sRGB-linear",
+          "label": "Linear sRGB"
+        },
+        {
+          "value": "CameraNative",
+          "label": "Camera Native"
+        },
+        {
+          "value": "DisplayP3",
+          "label": "Display P3"
+        },
+        {
+          "value": "ProPhoto",
+          "label": "ProPhoto RGB"
+        },
+        {
+          "value": "Rec2020",
+          "label": "Rec. 2020"
+        }
+      ]
+    },
+    "pro.denoise:strength": {
+      "name": "Noise Reduction Strength",
+      "description": "Reduces visible image noise. Increase for smoother shadows; too much removes fine texture and can make details look waxy.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.advanced-denoise:strength": {
+      "name": "Noise Reduction Strength",
+      "description": "Reduces visible image noise. Increase for smoother shadows; too much removes fine texture and can make details look waxy.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.denoise:radius": {
+      "name": "Noise Sampling Radius",
+      "description": "Sets the neighborhood used to identify noise. Larger radii detect broader noise patterns but can smooth fine texture.",
+      "unit": "px",
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "pro.advanced-denoise:radius": {
+      "name": "Noise Sampling Radius",
+      "description": "Sets the neighborhood used to identify noise. Larger radii detect broader noise patterns but can smooth fine texture.",
+      "unit": "px",
+      "min": 1,
+      "max": 12,
+      "step": 1
+    },
+    "pro.denoise:preserve_detail": {
+      "name": "Fine Detail Protection",
+      "description": "Preserves fine texture while reducing noise. Increase to retain more detail; noise reduction may become less aggressive.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.advanced-denoise:preserve_detail": {
+      "name": "Fine Detail Protection",
+      "description": "Preserves fine texture while reducing noise. Increase to retain more detail; noise reduction may become less aggressive.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.sharpen:radius": {
+      "name": "Sharpening Radius",
+      "description": "Sets the width of edges affected by sharpening. Smaller radii emphasize fine detail; larger radii affect broader edges and can create halos.",
+      "unit": "px",
+      "min": 1,
+      "max": 5,
+      "step": 0.1,
+      "precision": 1
+    },
+    "pro.advanced-sharpen:radius": {
+      "name": "Sharpening Radius",
+      "description": "Sets the width of edges affected by sharpening. Smaller radii emphasize fine detail; larger radii affect broader edges and can create halos.",
+      "unit": "px",
+      "min": 1,
+      "max": 5,
+      "step": 0.1,
+      "precision": 1
+    },
+    "pro.sharpen:amount": {
+      "name": "Sharpening Strength",
+      "description": "Increases local contrast along edges. Raise it for crisper detail; excessive strength creates bright or dark halos.",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.advanced-sharpen:amount": {
+      "name": "Sharpening Strength",
+      "description": "Increases local contrast along edges. Raise it for crisper detail; excessive strength creates bright or dark halos.",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.sharpen:threshold": {
+      "name": "Edge Threshold",
+      "description": "Controls how different neighboring pixels must be before sharpening treats them as an edge. Lower values sharpen finer detail and noise; higher values protect smooth areas.",
+      "min": 0,
+      "max": 0.25,
+      "step": 0.001,
+      "precision": 3,
+      "advanced": true
+    },
+    "pro.advanced-sharpen:threshold": {
+      "name": "Edge Threshold",
+      "description": "Controls how different neighboring pixels must be before sharpening treats them as an edge. Lower values sharpen finer detail and noise; higher values protect smooth areas.",
+      "min": 0,
+      "max": 0.25,
+      "step": 0.001,
+      "precision": 3,
+      "advanced": true
+    },
+    "pro.deconvolution:radius": {
+      "name": "Blur Correction Radius",
+      "description": "Approximate radius of the blur being corrected. Increase for wider optical or motion blur; values that are too high can create halos and ringing.",
+      "unit": "px",
+      "min": 1,
+      "max": 5,
+      "step": 0.1,
+      "precision": 1
+    },
+    "pro.deconvolution:amount": {
+      "name": "Correction Strength",
+      "description": "Controls how strongly blur is reversed. Increase for clearer detail; excessive strength creates ringing and amplifies noise.",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.deconvolution:threshold": {
+      "name": "Noise Protection Threshold",
+      "description": "Protects low-contrast areas from deconvolution. Increase to reduce noise amplification; too high can leave soft detail untouched.",
+      "min": 0,
+      "max": 0.25,
+      "step": 0.001,
+      "precision": 3,
+      "advanced": true
+    },
+    "pro.deconvolution:iterations": {
+      "name": "Processing Passes",
+      "description": "Sets how many times the blur correction is refined. More passes can recover detail but take longer and may increase ringing or noise.",
+      "min": 1,
+      "max": 5,
+      "step": 1,
+      "advanced": true
+    },
+    "pro.local-contrast:radius": {
+      "name": "Local Contrast Scale",
+      "description": "Sets the size of image structures whose contrast is adjusted. Smaller values affect fine texture; larger values affect broader shapes.",
+      "unit": "px",
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "pro.texture:radius": {
+      "name": "Texture Scale",
+      "description": "Sets the size of image structures affected. Smaller values target fine texture; larger values affect broader detail.",
+      "unit": "px",
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "pro.local-contrast:amount": {
+      "name": "Local Contrast",
+      "description": "Adjusts contrast around nearby details. Positive values add definition; negative values soften local transitions. Strong settings can create halos.",
+      "min": -1,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.texture:amount": {
+      "name": "Texture Strength",
+      "description": "Adjusts contrast in texture at the selected scale. Positive values emphasize texture; negative values soften it.",
+      "min": -1,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.tone-map:exposure": {
+      "name": "Exposure",
+      "description": "Adjusts overall brightness before tone mapping. Positive values brighten; negative values darken.",
+      "unit": "EV",
+      "min": -5,
+      "max": 5,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.advanced-tone-map:exposure": {
+      "name": "Exposure",
+      "description": "Adjusts overall brightness before tone mapping. Positive values brighten; negative values darken.",
+      "unit": "EV",
+      "min": -5,
+      "max": 5,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.tone-map:operator": {
+      "name": "Tone Mapping Method",
+      "description": "Chooses how scene highlights are compressed for display. Different methods trade highlight detail, contrast, and natural-looking roll-off.",
+      "options": [
+        {
+          "value": "reinhard",
+          "label": "Reinhard"
+        },
+        {
+          "value": "filmic",
+          "label": "Filmic"
+        },
+        {
+          "value": "aces",
+          "label": "ACES"
+        }
+      ]
+    },
+    "pro.advanced-tone-map:operator": {
+      "name": "Tone Mapping Method",
+      "description": "Chooses how scene highlights are compressed for display. Different methods trade highlight detail, contrast, and natural-looking roll-off.",
+      "options": [
+        {
+          "value": "reinhard",
+          "label": "Reinhard"
+        },
+        {
+          "value": "filmic",
+          "label": "Filmic"
+        },
+        {
+          "value": "aces",
+          "label": "ACES"
+        }
+      ]
+    },
+    "pro.color-zones:hue": {
+      "name": "Target Hue",
+      "description": "Selects the center hue of the color range to adjust. Move around the color wheel to target a different hue.",
+      "unit": "°",
+      "min": 0,
+      "max": 1,
+      "step": 0.002777777777777778,
+      "precision": 0,
+      "factor": 360
+    },
+    "pro.color-zones:width": {
+      "name": "Hue Range Width",
+      "description": "Sets the hue-distance radius on either side of Target Hue. The affected arc spans twice this value and wraps across 0°/360°; adjustment strength fades toward its edges.",
+      "unit": "°",
+      "min": 0.002777777777777778,
+      "max": 0.5,
+      "step": 0.002777777777777778,
+      "precision": 0,
+      "factor": 360
+    },
+    "pro.split-toning:shadow_hue": {
+      "name": "Shadow Hue",
+      "description": "Sets the color tint added to shadows. Adjust saturation separately to control how visible the tint is.",
+      "unit": "°",
+      "min": 0,
+      "max": 1,
+      "step": 0.002777777777777778,
+      "precision": 0,
+      "factor": 360
+    },
+    "pro.split-toning:highlight_hue": {
+      "name": "Highlight Hue",
+      "description": "Sets the color tint added to highlights. Adjust saturation separately to control how visible the tint is.",
+      "unit": "°",
+      "min": 0,
+      "max": 1,
+      "step": 0.002777777777777778,
+      "precision": 0,
+      "factor": 360
+    },
+    "pro.split-toning:shadow_saturation": {
+      "name": "Shadow Saturation",
+      "description": "Controls the strength of the shadow tint. 0% applies no tint.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.split-toning:highlight_saturation": {
+      "name": "Highlight Saturation",
+      "description": "Controls the strength of the highlight tint. 0% applies no tint.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.split-toning:balance": {
+      "name": "Shadow–Highlight Balance",
+      "description": "Moves the tonal boundary between shadow and highlight tinting. Shift toward highlights or shadows to change which tones receive each color.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "ai.strength": {
+      "name": "Generation Strength",
+      "description": "Controls how strongly the generated result can change the input image. Lower values preserve more of the original; higher values allow greater change.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "ai.steps": {
+      "name": "Generation Steps",
+      "description": "Sets how many refinement steps the image generator performs. More steps may improve consistency but increase processing time; results depend on the provider and model.",
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "advanced": true
+    },
+    "ai.seed": {
+      "name": "Random Seed",
+      "description": "Sets the random starting point for generation. Reusing a seed with the same model and settings helps reproduce a result; 0 may request a provider-selected seed.",
+      "advanced": true
+    },
+    "ai.upscale:scale": {
+      "name": "Upscale Factor",
+      "description": "Sets the output size relative to the input. Higher factors create a larger image and require more processing.",
+      "unit": "×",
+      "min": 1,
+      "max": 4,
+      "step": 0.1,
+      "precision": 1
+    },
+    "core.compare:operation": {
+      "name": "Comparison",
+      "description": "Chooses how the two values are compared.",
+      "advanced": true,
+      "options": [
+        {
+          "value": "==",
+          "label": "Equal to"
+        },
+        {
+          "value": "!=",
+          "label": "Not equal to"
+        },
+        {
+          "value": ">",
+          "label": "Greater than"
+        },
+        {
+          "value": ">=",
+          "label": "At least"
+        },
+        {
+          "value": "<",
+          "label": "Less than"
+        },
+        {
+          "value": "<=",
+          "label": "At most"
+        }
+      ]
+    },
+    "core.mask-painted:mode": {
+      "name": "Brush Mode",
+      "description": "Adds the painted stroke to the mask or subtracts it from the existing mask.",
+      "options": [
+        {
+          "value": "add",
+          "label": "Add to mask"
+        },
+        {
+          "value": "subtract",
+          "label": "Subtract from mask"
+        }
+      ]
+    },
+    "pro.grain:amount": {
+      "name": "Grain Strength",
+      "description": "Controls how visible the simulated film grain is. Increase for a stronger texture; high values can obscure fine image detail.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "pro.grain:size": {
+      "name": "Grain Size",
+      "description": "Sets the scale of the simulated grain. Smaller grain is finer; larger grain is coarser and more visible.",
+      "unit": "px",
+      "min": 0.1,
+      "max": 8,
+      "step": 0.1,
+      "precision": 1
+    },
+    "pro.grain:monochrome": {
+      "name": "Monochrome Grain",
+      "description": "Uses neutral grain instead of adding colored grain variation."
+    },
+    "pro.halation:amount": {
+      "name": "Halation Strength",
+      "description": "Controls the red-orange glow around bright areas. Increase for a stronger film-like bloom; high values can wash out nearby detail.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.bloom:amount": {
+      "name": "Bloom Strength",
+      "description": "Controls the glow spreading from bright areas. Increase for a stronger soft glow; high values can reduce contrast and obscure detail.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.halation:threshold": {
+      "name": "Highlight Threshold",
+      "description": "Sets how bright a pixel must be before it contributes to the glow. Lower values include more of the image; higher values restrict the effect to brighter highlights.",
+      "min": 0,
+      "max": 4,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.bloom:threshold": {
+      "name": "Highlight Threshold",
+      "description": "Sets how bright a pixel must be before it contributes to the glow. Lower values include more of the image; higher values restrict the effect to brighter highlights.",
+      "min": 0,
+      "max": 4,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.halation:radius": {
+      "name": "Glow Radius",
+      "description": "Sets how far the highlight glow spreads. Larger radii create a broader, softer halo.",
+      "unit": "px",
+      "min": 1,
+      "max": 16,
+      "step": 1
+    },
+    "pro.bloom:radius": {
+      "name": "Glow Radius",
+      "description": "Sets how far the highlight glow spreads. Larger radii create a broader, softer halo.",
+      "unit": "px",
+      "min": 1,
+      "max": 16,
+      "step": 1
+    },
+    "pro.vignetting:amount": {
+      "name": "Vignette Strength",
+      "description": "Darkens or brightens the image corners relative to the center. Increase for stronger darkening; negative values can lighten the corners.",
+      "min": -1,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.vignetting:midpoint": {
+      "name": "Vignette Midpoint",
+      "description": "Sets how far the vignette extends toward the center. Lower values bring the effect inward; higher values keep it near the corners.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.vignetting:feather": {
+      "name": "Vignette Feather",
+      "description": "Controls how gradually the vignette fades into the unaffected area. Higher values create a softer transition.",
+      "min": 0.01,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.defringe:threshold": {
+      "name": "Fringe Detection Threshold",
+      "description": "Sets how strong a colored edge must be before it is corrected. Lower values also affect subtler color edges; higher values leave more fringe untouched.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "pro.defringe:amount": {
+      "name": "Fringe Correction Strength",
+      "description": "Controls how strongly colored fringes are reduced. Increase to remove more fringe; excessive correction can remove legitimate color along edges.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "core.mask-threshold:threshold": {
+      "name": "Mask Luminance Threshold",
+      "description": "Sets the luminance level separating selected and unselected mask areas. Lower values include darker regions; higher values select only brighter regions.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "core.mask-threshold:softness": {
+      "name": "Mask Edge Softness",
+      "description": "Softens the transition around the mask threshold. Increase for a gradual selection edge; decrease for a sharper boundary.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "core.mask-color-qualifier:tolerance": {
+      "name": "Color Range Width",
+      "description": "Controls how far colors may differ from the target and still be selected. Increase to include a wider range of colors.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.mask-color-qualifier:softness": {
+      "name": "Selection Edge Softness",
+      "description": "Softens the boundary of the color selection. Increase for a smoother transition; decrease for a more exact edge.",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.hdr-merge:highlight_threshold": {
+      "name": "Highlight Merge Threshold",
+      "description": "Controls when highlight detail is taken from another exposure in the set. Lower values bring in replacement detail sooner.",
+      "unit": "%",
+      "min": 0.5,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    },
+    "core.hdr-merge:deghost_threshold": {
+      "name": "Motion Ghosting Tolerance",
+      "description": "Controls how much movement between exposures can be blended. Lower values reject more moving areas; higher values blend more but may leave ghosting.",
+      "min": 0.01,
+      "max": 1,
+      "step": 0.01,
+      "precision": 2
+    },
+    "core.focus-stack:blend_floor": {
+      "name": "Minimum Blend Weight",
+      "description": "Sets the minimum contribution retained from each frame during focus stacking. Higher values can reduce abrupt transitions but may soften out-of-focus areas.",
+      "unit": "%",
+      "min": 0,
+      "max": 1,
+      "step": 0.01,
+      "precision": 0,
+      "factor": 100
+    }
+  },
+  "commonNames": {
+    "amount": "Effect Strength",
+    "radius": "Filter Radius",
+    "threshold": "Effect Threshold",
+    "iterations": "Processing Passes",
+    "sigma": "Detail Scale",
+    "epsilon": "Comparison Tolerance",
+    "steps": "Processing Steps",
+    "seed": "Random Seed",
+    "target_r": "Target Red",
+    "target_g": "Target Green",
+    "target_b": "Target Blue",
+    "center_x": "Center X Position",
+    "center_y": "Center Y Position",
+    "points": "Curve Points",
+    "preserve_detail": "Fine Detail Protection",
+    "midpoint": "Effect Midpoint",
+    "feather": "Edge Feather"
+  },
+  "commonDescriptions": {
+    "radius": "Sets the spatial reach around each pixel. Smaller values affect fine detail; larger values affect broader structures. Very large values can soften or alter more of the image than intended.",
+    "threshold": "Sets the point at which this operation begins affecting image values. Lower thresholds include more subtle detail; higher thresholds leave more of the image untouched.",
+    "amount": "Controls the strength of this image adjustment. Increase to make the effect more pronounced; decrease for a subtler result. Strong settings can introduce artifacts.",
+    "iterations": "Sets the number of processing passes. More passes can refine the result but take longer and may increase artifacts.",
+    "seed": "Sets the random starting point. Reusing a seed with the same settings helps reproduce a result; 0 may select a seed automatically.",
+    "tolerance": "Controls how closely colors or values must match to be included. Lower values select a narrower range; higher values include more variation.",
+    "softness": "Softens the transition around this effect. Increase for a gradual blend; decrease for a sharper boundary.",
+    "hardness": "Controls how sharply the effect fades at its edge. Higher values create a crisper boundary; lower values create a softer transition.",
+    "feather": "Softens the boundary of the affected area. Increase for a more gradual transition; decrease for a sharper edge.",
+    "points": "Defines the curve used to remap input values to output values. Moving points changes tonal response; the straight diagonal is neutral."
+  },
+  "advancedIds": [
+    "seed",
+    "workflow_definition",
+    "epsilon",
+    "operation",
+    "points",
+    "ordered",
+    "origin_x",
+    "origin_y"
+  ],
+  "pointCurveNodes": [
+    "core.curve",
+    "pro.lut",
+    "pro.lut-tools",
+    "pro.film-curve",
+    "pro.film-simulation"
+  ]
+}
