@@ -563,10 +563,9 @@ impl Viewers {
                         (
                             (node.id.as_str().to_owned(), port.id.clone()),
                             format!(
-                                "{} · {} ({})",
-                                node.descriptor.name,
-                                port.name,
-                                node.id.as_str()
+                                "{} · {}",
+                                self.session.node_label(node.id.as_str()),
+                                port.name
                             ),
                         )
                     })

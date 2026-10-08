@@ -2,7 +2,7 @@ pub mod bezier;
 pub mod smooth_step;
 pub mod straight;
 
-use gpui::{Background, PathBuilder, Point, SharedString, Window, px};
+use gpui::{Background, PathBuilder, Point, Window, px};
 
 use crate::store::FlowState;
 use crate::types::*;
@@ -21,28 +21,24 @@ pub fn paint_edges(state: &FlowState, window: &mut Window) {
     let win_h = win_size.height.as_f32();
     let margin = 100.0;
     let edge_color: Background = gpui::rgb(0xb1b1b7).into();
-    let selected_color: Background = gpui::rgb(0x555555).into();
+    let selected_color: Background = gpui::rgb(0x3b82f6).into();
 
     for edge in &state.edges {
         if edge.hidden {
             continue;
         }
 
-        // Find source and target nodes (single lookup each)
-        let source_node = match state.get_node(&edge.source) {
-            Some(n) => n,
-            None => continue,
-        };
-        let target_node = match state.get_node(&edge.target) {
-            Some(n) => n,
-            None => continue,
-        };
-
         // Compute handle positions and screen coordinates inline
-        let source_handle_pos =
-            find_handle_position(source_node, &edge.source_handle, HandleType::Source);
-        let target_handle_pos =
-            find_handle_position(target_node, &edge.target_handle, HandleType::Target);
+        let Some(source_handle_pos) =
+            state.handle_position(&edge.source, &edge.source_handle, HandleType::Source)
+        else {
+            continue;
+        };
+        let Some(target_handle_pos) =
+            state.handle_position(&edge.target, &edge.target_handle, HandleType::Target)
+        else {
+            continue;
+        };
 
         let Some((sx, sy)) =
             state.find_handle_center(&edge.source, &edge.source_handle, source_handle_pos)
@@ -71,7 +67,11 @@ pub fn paint_edges(state: &FlowState, window: &mut Window) {
         } else {
             edge_color.clone()
         };
-        let stroke = edge.stroke_width.unwrap_or(2.0);
+        let stroke = if edge.selected {
+            edge.stroke_width.unwrap_or(2.0).max(3.0)
+        } else {
+            edge.stroke_width.unwrap_or(2.0)
+        };
 
         match edge.edge_type {
             EdgeType::Bezier { curvature } => {
@@ -213,12 +213,10 @@ fn paint_arrowhead(
 
 /// Compute the label position (midpoint) for an edge.
 pub fn compute_edge_label_position(state: &FlowState, edge: &FlowEdge) -> Option<(f32, f32)> {
-    let source_node = state.get_node(&edge.source)?;
-    let target_node = state.get_node(&edge.target)?;
     let source_handle_pos =
-        find_handle_position(source_node, &edge.source_handle, HandleType::Source);
+        state.handle_position(&edge.source, &edge.source_handle, HandleType::Source)?;
     let target_handle_pos =
-        find_handle_position(target_node, &edge.target_handle, HandleType::Target);
+        state.handle_position(&edge.target, &edge.target_handle, HandleType::Target)?;
     let (sx, sy) =
         state.find_handle_center(&edge.source, &edge.source_handle, source_handle_pos)?;
     let (tx, ty) =
@@ -251,19 +249,15 @@ pub fn hit_test_edges(state: &FlowState, mx: f32, my: f32, threshold: f32) -> Op
             continue;
         }
 
-        let source_node = match state.get_node(&edge.source) {
-            Some(n) => n,
-            None => continue,
-        };
-        let target_node = match state.get_node(&edge.target) {
-            Some(n) => n,
-            None => continue,
-        };
-
         let source_handle_pos =
-            find_handle_position(source_node, &edge.source_handle, HandleType::Source);
+            state.handle_position(&edge.source, &edge.source_handle, HandleType::Source);
         let target_handle_pos =
-            find_handle_position(target_node, &edge.target_handle, HandleType::Target);
+            state.handle_position(&edge.target, &edge.target_handle, HandleType::Target);
+        let (Some(source_handle_pos), Some(target_handle_pos)) =
+            (source_handle_pos, target_handle_pos)
+        else {
+            continue;
+        };
 
         let (sx, sy) =
             match state.find_handle_center(&edge.source, &edge.source_handle, source_handle_pos) {
@@ -354,28 +348,4 @@ fn point_to_cubic_bezier_distance(
         }
     }
     min_dist
-}
-
-/// Find the handle position for a given node and handle type.
-fn find_handle_position(
-    node: &FlowNode,
-    handle_id: &Option<SharedString>,
-    handle_type: HandleType,
-) -> HandlePosition {
-    // Try exact match first
-    if let Some(id) = handle_id {
-        if let Some(def) = node.handles.iter().find(|h| h.id.as_ref() == Some(id)) {
-            return def.position;
-        }
-    }
-
-    // Fall back to first handle of the right type
-    node.handles
-        .iter()
-        .find(|h| h.handle_type == handle_type)
-        .map(|h| h.position)
-        .unwrap_or(match handle_type {
-            HandleType::Source => HandlePosition::Right,
-            HandleType::Target => HandlePosition::Left,
-        })
 }

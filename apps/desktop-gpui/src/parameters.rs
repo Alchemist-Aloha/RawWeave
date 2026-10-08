@@ -410,6 +410,101 @@ fn round_trip_display(value: f32, factor: f64, min_precision: usize) -> String {
     shown.to_string()
 }
 
+/// Authored parameter diagram only, not an evaluated image/value output.
+pub fn transfer_points(
+    kind: &str,
+    values: &std::collections::BTreeMap<String, ParameterValue>,
+) -> Result<Vec<(f32, f32)>, String> {
+    let number = |key: &str, fallback: f32| match values.get(key) {
+        Some(ParameterValue::Float(value)) => *value,
+        Some(ParameterValue::Integer(value)) => *value as f32,
+        None => fallback,
+        _ => f32::NAN,
+    };
+    let mut points = vec![];
+    if kind == "core.levels" {
+        let (black, white, gamma) = (
+            number("black_point", 0.0),
+            number("white_point", 1.0),
+            number("gamma", 1.0),
+        );
+        if ![black, white, gamma].iter().all(|value| value.is_finite())
+            || white <= black
+            || gamma <= 0.0
+        {
+            return Err(
+                "White must exceed black; gamma must be finite and greater than zero.".into(),
+            );
+        }
+        for i in 0..=64 {
+            let x = f64::from(black.min(0.0))
+                + f64::from(white.max(1.0) - black.min(0.0)) * f64::from(i) / 64.0;
+            let y = ((x - f64::from(black)) / (f64::from(white) - f64::from(black)))
+                .clamp(0.0, 1.0)
+                .powf(1.0 / f64::from(gamma));
+            points.push((x as f32, y as f32));
+        }
+    } else if matches!(kind, "core.map-range" | "core.clamp") {
+        let mapping = kind == "core.map-range";
+        let (start, end) = (
+            number(if mapping { "in_min" } else { "min" }, 0.0),
+            number(if mapping { "in_max" } else { "max" }, 1.0),
+        );
+        let (out_start, out_end) = if mapping {
+            (number("out_min", 0.0), number("out_max", 1.0))
+        } else {
+            (start, end)
+        };
+        let clamp = if mapping {
+            match values.get("clamp") {
+                Some(ParameterValue::Boolean(value)) => *value,
+                None => false,
+                _ => return Err("Clamp must be a boolean.".into()),
+            }
+        } else {
+            true
+        };
+        if ![start, end, out_start, out_end]
+            .iter()
+            .all(|value| value.is_finite())
+            || (mapping && (end - start).abs() <= f32::EPSILON)
+            || (!mapping && start > end)
+        {
+            return Err("Enter finite range endpoints; mapping inputs must be distinct and clamp minimum must not exceed maximum.".into());
+        }
+        let (low, high) = (f64::from(start.min(end)), f64::from(start.max(end)));
+        let padding = if high == low {
+            low.abs().max(1.0) / 4.0
+        } else {
+            (high - low) / 4.0
+        };
+        for x in [low - padding, low, high, high + padding] {
+            let y = if mapping {
+                f64::from(out_start)
+                    + (x - f64::from(start)) / (f64::from(end) - f64::from(start))
+                        * f64::from(out_end - out_start)
+            } else {
+                x
+            };
+            let y = if clamp {
+                y.clamp(
+                    f64::from(out_start.min(out_end)),
+                    f64::from(out_start.max(out_end)),
+                )
+            } else {
+                y
+            };
+            points.push((x as f32, y as f32));
+        }
+    } else {
+        return Err("No transfer reference for this node.".into());
+    }
+    if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+        return Err("This range cannot be drawn with finite coordinates.".into());
+    }
+    Ok(points)
+}
+
 pub fn curve_points(text: &str, scalar: bool) -> Result<Vec<(f32, f32)>, String> {
     let points = if scalar {
         parse_points(text)?
@@ -421,6 +516,32 @@ pub fn curve_points(text: &str, scalar: bool) -> Result<Vec<(f32, f32)>, String>
     }
     Ok(points)
 }
+/// Move an existing point without crossing neighbours; exact text editing remains available for HDR values.
+pub fn move_curve_point(
+    text: &str,
+    scalar: bool,
+    index: usize,
+    x: f32,
+    y: f32,
+) -> Result<String, String> {
+    let mut points = curve_points(text, scalar)?;
+    if !x.is_finite() || !y.is_finite() || index >= points.len() {
+        return Err("Invalid curve point".into());
+    }
+    let original = points[index];
+    let x = if index == 0 || index + 1 == points.len() {
+        original.0
+    } else {
+        let low = points[index - 1].0;
+        let high = points[index + 1].0;
+        if x <= low || x >= high { original.0 } else { x }
+    };
+    points[index] = (x, y);
+    let text = serialize_points(&points)?;
+    curve_points(&text, scalar)?;
+    Ok(text)
+}
+
 fn serialize_points(points: &[(f32, f32)]) -> Result<String, String> {
     let text = points
         .iter()
@@ -620,6 +741,29 @@ mod tests {
 
     #[test]
     fn curve_list_tools_preserve_hdr_and_locked_endpoints() {
+        let levels = transfer_points("core.levels", &Default::default()).unwrap();
+        assert_eq!(levels[32], (0.5, 0.5));
+        let values = [
+            ("in_min".into(), ParameterValue::Float(1.0)),
+            ("in_max".into(), ParameterValue::Float(0.0)),
+        ]
+        .into();
+        let mapped = transfer_points("core.map-range", &values).unwrap();
+        assert!(
+            mapped.first().unwrap().1 > 1.0 && mapped.last().unwrap().1 < 0.0,
+            "reversed ranges must extrapolate, not clip"
+        );
+        let values = [("black_point".into(), ParameterValue::Float(2.0))].into();
+        assert!(transfer_points("core.levels", &values).is_err());
+        assert_eq!(
+            move_curve_point("0,0;0.5,0.7;1,1", false, 1, 0.6, 2.0).unwrap(),
+            "0,0;0.6,2;1,1"
+        );
+        assert_eq!(
+            move_curve_point("-5,-2;5,12", true, 0, 10.0, -4.0).unwrap(),
+            "-5,-4;5,12"
+        );
+        assert!(move_curve_point("0,0;1,1", false, 1, 0.5, f32::NAN).is_err());
         let (text, index) = add_curve_point("-5,-2;5,12", true).unwrap();
         assert_eq!(text, "-5,-2;0,5;5,12");
         assert_eq!(index, 1);

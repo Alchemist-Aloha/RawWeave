@@ -41,6 +41,10 @@ pub struct HandleDef {
     pub id: Option<SharedString>,
     pub handle_type: HandleType,
     pub position: HandlePosition,
+    /// Optional distance from the top/left edge in world coordinates.
+    pub offset: Option<f32>,
+    /// Human-readable port description, rendered beside the socket.
+    pub label: Option<SharedString>,
     /// Whether this handle can accept/start connections. Default: true.
     pub is_connectable: bool,
 }
@@ -51,6 +55,8 @@ impl HandleDef {
             id: None,
             handle_type: HandleType::Source,
             position,
+            offset: None,
+            label: None,
             is_connectable: true,
         }
     }
@@ -60,8 +66,20 @@ impl HandleDef {
             id: None,
             handle_type: HandleType::Target,
             position,
+            offset: None,
+            label: None,
             is_connectable: true,
         }
+    }
+
+    pub fn offset(mut self, offset: f32) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 
     pub fn connectable(mut self, connectable: bool) -> Self {

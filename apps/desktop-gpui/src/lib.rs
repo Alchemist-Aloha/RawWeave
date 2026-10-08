@@ -1,5 +1,6 @@
 //! Native desktop session. Graph execution stays in the existing Rust engine.
 pub mod export;
+pub mod geometry;
 pub mod library;
 pub mod parameters;
 pub mod spatial;

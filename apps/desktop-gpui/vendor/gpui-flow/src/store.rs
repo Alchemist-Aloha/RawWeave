@@ -47,6 +47,7 @@ pub struct FlowState {
     pub snap_to_grid: bool,
     pub snap_grid: (f32, f32),
     pub connection_radius: f32,
+    pub connection_validator: Option<std::rc::Rc<dyn Fn(&Connection) -> bool>>,
 }
 
 impl FlowState {
@@ -69,11 +70,12 @@ impl FlowState {
             selection_box: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            min_zoom: 0.8,
+            min_zoom: 0.25,
             max_zoom: 2.5,
             snap_to_grid: false,
             snap_grid: (20.0, 20.0),
-            connection_radius: 20.0,
+            connection_radius: 24.0,
+            connection_validator: None,
         }
     }
 
@@ -223,6 +225,37 @@ impl FlowState {
         self.handle_bounds.insert(key, resolved);
     }
 
+    /// Where a handle sits on its node, resolved by id **and** direction.
+    ///
+    /// Inputs and outputs frequently share a port id (Exposure, Output, Crop all
+    /// name theirs `image`), so matching on the id alone would anchor an outgoing
+    /// edge to the node's own input.
+    pub fn handle_position(
+        &self,
+        node_id: &NodeId,
+        handle_id: &Option<SharedString>,
+        handle_type: HandleType,
+    ) -> Option<HandlePosition> {
+        let node = self.get_node(node_id)?;
+        handle_id
+            .as_ref()
+            .and_then(|id| {
+                node.handles.iter().find(|handle| {
+                    handle.handle_type == handle_type && handle.id.as_ref() == Some(id)
+                })
+            })
+            .or_else(|| {
+                node.handles
+                    .iter()
+                    .find(|handle| handle.handle_type == handle_type)
+            })
+            .map(|handle| handle.position)
+            .or(Some(match handle_type {
+                HandleType::Source => HandlePosition::Right,
+                HandleType::Target => HandlePosition::Left,
+            }))
+    }
+
     /// Find the screen-space center of a handle.
     ///
     /// Computes the position directly from the node's flow coordinates + viewport,
@@ -246,14 +279,18 @@ impl FlowState {
 
         // Use measured wrapper dimensions if available, otherwise estimate.
         // measured_width/height store the full wrapper size (set by the measurement canvas).
-        let w = node.measured_width.map(|p| p.as_f32()).unwrap_or(114.0);
-        let h = node.measured_height.map(|p| p.as_f32()).unwrap_or(54.0);
+        let w = node.measured_width.map(|p| p.as_f32()).unwrap_or(114.0) * self.viewport.zoom;
+        let h = node.measured_height.map(|p| p.as_f32()).unwrap_or(54.0) * self.viewport.zoom;
 
+        let offset = side
+            .get(index)
+            .and_then(|handle| handle.offset)
+            .map(|offset| offset * self.viewport.zoom);
         let (cx, cy) = match handle_position {
-            HandlePosition::Top => (sx + w * fraction, sy),
-            HandlePosition::Bottom => (sx + w * fraction, sy + h),
-            HandlePosition::Left => (sx, sy + h * fraction),
-            HandlePosition::Right => (sx + w, sy + h * fraction),
+            HandlePosition::Top => (sx + offset.unwrap_or(w * fraction), sy),
+            HandlePosition::Bottom => (sx + offset.unwrap_or(w * fraction), sy + h),
+            HandlePosition::Left => (sx, sy + offset.unwrap_or(h * fraction)),
+            HandlePosition::Right => (sx + w, sy + offset.unwrap_or(h * fraction)),
         };
         Some((cx, cy))
     }
@@ -385,7 +422,7 @@ impl FlowState {
         let mut best: Option<(f32, SnapTarget)> = None;
 
         for node in &self.nodes {
-            if node.hidden {
+            if node.hidden || !node.connectable {
                 continue;
             }
             // Can't connect to the same node
@@ -403,6 +440,24 @@ impl FlowState {
                     continue;
                 }
 
+                let connection = if draft.from_type == HandleType::Source {
+                    Connection {
+                        source: draft.from_node.clone(),
+                        source_handle: draft.from_handle.clone(),
+                        target: node.id.clone(),
+                        target_handle: handle.id.clone(),
+                    }
+                } else {
+                    Connection {
+                        source: node.id.clone(),
+                        source_handle: handle.id.clone(),
+                        target: draft.from_node.clone(),
+                        target_handle: draft.from_handle.clone(),
+                    }
+                };
+                if !self.is_valid_connection(&connection) {
+                    continue;
+                }
                 if let Some((hx, hy)) =
                     self.find_handle_center(&node.id, &handle.id, handle.position)
                 {
@@ -433,6 +488,33 @@ impl FlowState {
 
     /// Check if a connection is valid (default rules).
     pub fn is_valid_connection(&self, connection: &Connection) -> bool {
+        if self
+            .connection_validator
+            .as_ref()
+            .is_some_and(|validator| !validator(connection))
+        {
+            return false;
+        }
+        let valid_handle = |node_id: &NodeId, id: &Option<SharedString>, kind| {
+            self.get_node(node_id).is_some_and(|node| {
+                node.connectable
+                    && !node.hidden
+                    && node.handles.iter().any(|handle| {
+                        handle.id == *id && handle.handle_type == kind && handle.is_connectable
+                    })
+            })
+        };
+        if !valid_handle(
+            &connection.source,
+            &connection.source_handle,
+            HandleType::Source,
+        ) || !valid_handle(
+            &connection.target,
+            &connection.target_handle,
+            HandleType::Target,
+        ) {
+            return false;
+        }
         // No self-connections
         if connection.source == connection.target {
             return false;
@@ -469,6 +551,10 @@ impl FlowState {
         if let Some(ref th) = connection.target_handle {
             edge.target_handle = Some(th.clone());
         }
+        // Inputs accept one wire; reconnecting replaces it in the same gesture.
+        self.edges.retain(|existing| {
+            existing.target != edge.target || existing.target_handle != edge.target_handle
+        });
         self.edges.push(edge);
     }
 }

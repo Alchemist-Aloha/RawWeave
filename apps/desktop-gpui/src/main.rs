@@ -1,4 +1,5 @@
 extern crate gpui_kit as gpui;
+mod native_nodes;
 mod native_scopes;
 mod native_viewer;
 #[cfg(all(test, feature = "ui-tests"))]
@@ -21,7 +22,7 @@ use native_viewer::Viewers;
 use rawweave_batch::{Compression, OutputSharpening};
 use rawweave_core::NodeId as CoreNodeId;
 use rawweave_gpui::export::ExportSettings;
-use rawweave_gpui::library::{drop_position, library_groups};
+use rawweave_gpui::library::{drop_position, library_groups, node_category};
 use rawweave_gpui::parameters::{
     ParameterDraft, add_curve_point, curve_points, parameter_ux, remove_curve_point,
 };
@@ -66,6 +67,7 @@ struct Field {
     error: Option<String>,
     stepping: bool,
     curve_index: usize,
+    curve_bounds: Option<Bounds<Pixels>>,
 }
 impl Field {
     fn set_widget_value(&self, text: String, window: &mut Window, cx: &mut App) {
@@ -116,6 +118,9 @@ struct Editor {
     canvas_size: (f32, f32),
     pending_canvas_fit: bool,
     pending_canvas_focus: Option<String>,
+    controls_open: bool,
+    curve_gesture: Option<(usize, [f32; 4])>,
+    geometry: Entity<native_nodes::GeometryHelper>,
 }
 impl Editor {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -130,26 +135,17 @@ impl Editor {
             .unwrap_or_default();
         let flow_state = cx.new(|_| FlowState::new(vec![], vec![]));
         let renderer_state = flow_state.clone();
+        let owner = cx.entity().downgrade();
+        let renderer_owner = owner.clone();
         let flow = cx.new(|cx| {
             FlowGraph::new(flow_state.clone(), cx)
-                .default_renderer(move |node, _, cx| {
+                .default_renderer(move |node, window, cx| {
                     let zoom = renderer_state.read(cx).viewport.zoom;
-                    div()
-                        .id(SharedString::from(format!("node-content-{}", node.id)))
-                        .test_support()
-                        .w(px(160.0 * zoom))
-                        .v_flex()
-                        .gap(px(4.0 * zoom))
-                        .text_size(px(14.0 * zoom))
-                        .text_color(rgb(0xe1e5eb))
-                        .child(node.label.to_string())
-                        .child(
-                            div()
-                                .text_size(px(10.5 * zoom))
-                                .text_color(rgb(0xa6adb8))
-                                .child(node.id.to_string()),
-                        )
-                        .into_any_element()
+                    renderer_owner
+                        .update(cx, |this, cx| {
+                            this.render_graph_node(node, zoom, window, cx)
+                        })
+                        .unwrap_or_else(|_| div().into_any_element())
                 })
                 .bg_color(0x17191c)
                 .grid_color(0x303439)
@@ -226,6 +222,9 @@ impl Editor {
             canvas_size: (600.0, 500.0),
             pending_canvas_fit: true,
             pending_canvas_focus: None,
+            controls_open: true,
+            curve_gesture: None,
+            geometry: cx.new(|_| native_nodes::GeometryHelper::new(owner.clone())),
         };
         this.rebuild_flow(cx);
         let enabled = this.workspace.viewer_open;
@@ -320,6 +319,11 @@ impl Editor {
         .absolute()
         .size_full();
         let state = self.flow_state.read(cx);
+        let connections = state
+            .edges
+            .iter()
+            .filter(|edge| edge.selected && edge.deletable)
+            .count();
         div()
             .v_flex()
             .size_full()
@@ -373,8 +377,13 @@ impl Editor {
                             .child(format!("{:.0}%", state.viewport.zoom * 100.0)),
                     ),
             )
+            .when(connections > 0, |view| view.child(div().h_flex().gap_2().px_2().py_1().flex_shrink_0()
+                .child(format!("{connections} connection{} selected", if connections == 1 { "" } else { "s" }))
+                .child(Button::new("disconnect-selection").small().label("Disconnect").tooltip("Remove selected connections; keep their nodes").on_click(cx.listener(|this, _, window, cx| this.disconnect_selection(window, cx))))))
             .child(
                 div()
+                    .id("workflow-canvas")
+                    .test_support()
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -406,7 +415,7 @@ impl Editor {
                     .flex_shrink_0()
                     .border_t_1()
                     .border_color(rgb(0x343b45))
-                    .child("Connect output to input · Middle-drag to pan · Wheel to zoom"),
+                    .child("Connect output to input · Click wire, Delete to disconnect · Wheel to zoom · Shift+wheel / middle-drag to pan"),
             )
             .into_any_element()
     }
@@ -424,7 +433,7 @@ impl Editor {
                     )
                 });
             if let Some((x, y, w, h)) = bounds {
-                state.viewport.zoom = state.viewport.zoom.min(
+                state.viewport.zoom = state.viewport.zoom.max(0.8).min(
                     ((width - 16.0) / w)
                         .min((height - 16.0) / h)
                         .max(state.min_zoom),
@@ -446,46 +455,85 @@ impl Editor {
     fn rebuild_flow(&mut self, cx: &mut Context<Self>) {
         self.pending_canvas_focus = None;
         self.move_history.reset();
-        let nodes = self
-            .session
-            .editor
-            .graph()
-            .nodes()
-            .values()
-            .enumerate()
-            .map(|(i, node)| {
-                let (x, y) = self
-                    .layout
-                    .get(node.id.as_str())
-                    .copied()
-                    .unwrap_or((40.0 + (i % 2) as f32 * 240.0, 40.0 + (i / 2) as f32 * 160.0));
-                let handles = node
-                    .descriptor
-                    .inputs
-                    .iter()
-                    .map(|p| HandleDef::target(HandlePosition::Left).id(p.id.clone()))
-                    .chain(
-                        node.exposed_parameters
-                            .iter()
-                            .filter(|id| !node.descriptor.inputs.iter().any(|p| p.id == **id))
-                            .map(|id| HandleDef::target(HandlePosition::Left).id(id.clone())),
-                    )
-                    .chain(
-                        node.descriptor
-                            .outputs
-                            .iter()
-                            .map(|p| HandleDef::source(HandlePosition::Right).id(p.id.clone())),
-                    )
-                    .collect();
-                let mut view = FlowNode::new(node.id.as_str().to_owned(), x, y)
-                    .label(node.descriptor.name.clone())
-                    .node_type(node.type_id.clone())
-                    .handles(handles)
-                    .size(190.0, 70.0);
-                view.selected = self.selected.as_deref() == Some(node.id.as_str());
-                view
-            })
-            .collect();
+        let nodes =
+            self.session
+                .editor
+                .graph()
+                .nodes()
+                .values()
+                .enumerate()
+                .map(|(i, node)| {
+                    let (x, y) = self
+                        .layout
+                        .get(node.id.as_str())
+                        .copied()
+                        .unwrap_or((40.0 + (i % 2) as f32 * 440.0, 40.0 + (i / 2) as f32 * 240.0));
+                    let inputs = node
+                        .descriptor
+                        .inputs
+                        .iter()
+                        .map(|port| {
+                            (
+                                port.id.clone(),
+                                format!(
+                                    "{} input · {}",
+                                    port.name,
+                                    port.data_type.rsplit('.').next().unwrap_or(&port.data_type)
+                                ),
+                            )
+                        })
+                        .chain(
+                            node.exposed_parameters
+                                .iter()
+                                .filter(|id| {
+                                    !node.descriptor.inputs.iter().any(|port| port.id == **id)
+                                })
+                                .map(|id| {
+                                    (
+                                        id.clone(),
+                                        node.descriptor
+                                            .parameter(id)
+                                            .map(|parameter| {
+                                                format!("{} input · parameter", parameter.name)
+                                            })
+                                            .unwrap_or_else(|| id.clone()),
+                                    )
+                                }),
+                        );
+                    let handles =
+                        inputs
+                            .enumerate()
+                            .map(|(index, (id, label))| {
+                                HandleDef::target(HandlePosition::Left)
+                                    .id(id)
+                                    .label(label)
+                                    .offset(64.0 + index as f32 * 26.0)
+                            })
+                            .chain(node.descriptor.outputs.iter().enumerate().map(
+                                |(index, port)| {
+                                    HandleDef::source(HandlePosition::Right)
+                                        .id(port.id.clone())
+                                        .label(format!(
+                                            "{} output · {}",
+                                            port.name,
+                                            port.data_type
+                                                .rsplit('.')
+                                                .next()
+                                                .unwrap_or(&port.data_type)
+                                        ))
+                                        .offset(64.0 + index as f32 * 26.0)
+                                },
+                            ))
+                            .collect();
+                    let mut view = FlowNode::new(node.id.as_str().to_owned(), x, y)
+                        .label(self.session.node_label(node.id.as_str()))
+                        .node_type(node.type_id.clone())
+                        .handles(handles)
+                        .size(332.0, 112.0);
+                    view.selected = self.selected.as_deref() == Some(node.id.as_str());
+                    view
+                })
+                .collect();
         let edges = self
             .session
             .editor
@@ -504,7 +552,47 @@ impl Editor {
                 .color(0xb5bdcb)
             })
             .collect();
+        let graph = self.session.editor.graph().clone();
         self.flow_state.update(cx, |state, _| {
+            state.connection_validator = Some(std::rc::Rc::new(move |connection| {
+                let Some(output) = graph
+                    .node(&CoreNodeId::from(connection.source.as_ref()))
+                    .and_then(|node| {
+                        connection
+                            .source_handle
+                            .as_deref()
+                            .and_then(|port| node.descriptor.output(port))
+                    })
+                else {
+                    return false;
+                };
+                let Some(target) = graph.node(&CoreNodeId::from(connection.target.as_ref())) else {
+                    return false;
+                };
+                let Some(port) = connection.target_handle.as_deref() else {
+                    return false;
+                };
+                let expected = target
+                    .descriptor
+                    .input(port)
+                    .map(|input| input.data_type.as_str())
+                    .or_else(|| {
+                        target
+                            .exposed_parameters
+                            .contains(port)
+                            .then(|| target.descriptor.parameter(port))
+                            .flatten()
+                            .map(|parameter| match parameter.parameter_type {
+                                ParameterType::Float => "value.Float",
+                                ParameterType::Integer => "value.Integer",
+                                ParameterType::Boolean => "value.Boolean",
+                                ParameterType::String => "value.String",
+                            })
+                    });
+                expected.is_some_and(|expected| {
+                    rawweave_project::types_compatible(expected, &output.data_type)
+                })
+            }));
             state.set_nodes(nodes);
             state.set_edges(edges);
         });
@@ -646,7 +734,13 @@ impl Editor {
                 }) {
                     candidate
                         .connect(e.source.as_ref(), from, e.target.as_ref(), to)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|error| {
+                            format!(
+                                "Cannot connect {} · {from} to {} · {to}: {error}",
+                                self.session.node_label(e.source.as_ref()),
+                                self.session.node_label(e.target.as_ref())
+                            )
+                        })?;
                 }
             }
             Ok(())
@@ -686,6 +780,8 @@ impl Editor {
         if selected != self.selected {
             self.selected = selected;
             self.rebuild_fields(window, cx);
+            self.refresh_geometry(window, cx);
+            self.flow.update(cx, |_, cx| cx.notify());
         }
         if changed {
             self.session.reconcile_target();
@@ -696,6 +792,8 @@ impl Editor {
     fn rebuild_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.fields.clear();
         self.field_subscriptions.clear();
+        self.controls_open = true;
+        self.curve_gesture = None;
         let Some(node) = self
             .selected
             .as_ref()
@@ -821,6 +919,7 @@ impl Editor {
                 error: None,
                 stepping: false,
                 curve_index: 0,
+                curve_bounds: None,
             });
         }
     }
@@ -1048,12 +1147,15 @@ impl Editor {
         cx.notify();
     }
     fn request_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_geometry(window, cx);
+        self.flow.update(cx, |_, cx| cx.notify());
         let snapshot = self.session.clone();
         self.viewers.update(cx, |viewers, cx| {
             viewers.set_session(snapshot, false, window, cx)
         });
     }
     fn reset_viewers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_geometry(window, cx);
         let snapshot = self.session.clone();
         self.viewers.update(cx, |viewers, cx| {
             viewers.set_session(snapshot, true, window, cx)
@@ -1291,7 +1393,7 @@ impl Editor {
                 for (panel, name, open) in [
                     (0, "Nodes", prefs.library_open),
                     (1, "Viewer and scopes", prefs.viewer_open),
-                    (2, "Parameters", prefs.inspector_open),
+                    (2, "Node help", prefs.inspector_open),
                 ] {
                     let weak = weak.clone();
                     menu = menu.item(PopupMenuItem::new(name).checked(open).on_click(
@@ -1307,8 +1409,6 @@ impl Editor {
                     (0, 24.0, "Nodes: wider"),
                     (1, -24.0, "Viewer: narrower"),
                     (1, 24.0, "Viewer: wider"),
-                    (2, -24.0, "Parameters: shorter"),
-                    (2, 24.0, "Parameters: taller"),
                 ] {
                     let weak = weak.clone();
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
@@ -1486,6 +1586,16 @@ impl Editor {
         })
         .detach();
     }
+    fn disconnect_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_canvas_move(window, cx);
+        self.flow_state.update(cx, |state, _| {
+            state
+                .edges
+                .retain(|edge| !(edge.selected && edge.deletable))
+        });
+        self.sync_flow(window, cx);
+        self.flow.update(cx, |_, cx| cx.notify());
+    }
     fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flow_state.update(cx, |state, _| {
             let removed: Vec<_> = state
@@ -1645,7 +1755,13 @@ impl Editor {
                         self.redo.push(current);
                     }
                 }
-                self.selected = None;
+                self.selected = self.selected.take().filter(|id| {
+                    self.session
+                        .editor
+                        .graph()
+                        .node(&CoreNodeId::from(id.as_str()))
+                        .is_some()
+                });
                 self.rebuild_fields(window, cx);
                 self.rebuild_flow(cx);
                 self.request_preview(window, cx);
@@ -1659,87 +1775,23 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let export_controls = self.export_controls(cx);
         let (file_menu, view_menu) = self.workflow_menus(cx);
-        let has_parameters = !self.fields.is_empty();
-        let inspector_height = if has_parameters {
-            self.workspace.inspector_height
-        } else {
-            48.0
-        };
-        let selected_title = self
-            .selected
-            .as_ref()
-            .and_then(|id| {
-                self.session
-                    .editor
-                    .graph()
-                    .node(&CoreNodeId::from(id.as_str()))
-            })
-            .map(|node| format!("{} · {}", node.descriptor.name, node.id))
-            .unwrap_or_else(|| "Parameters · Select a node".into());
+        let has_parameters = false; // Editing is in the node; the optional dock is a short help rail.
+        let inspector_height = 48.0;
         let inspector = div()
-                                    .id("parameters")
-                                    .test_support()
-                                    .size_full()
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .overflow_x_hidden()
-                                    .overflow_y_scroll()
-                                    .v_flex()
-                                    .p_3()
-                                    .gap_2()
-                                    .child(div().h_flex().flex_wrap().gap_2()
-                                        .child(div().font_weight(FontWeight::BOLD).child(selected_title))
-                                        .child(Button::new("hide-inspector").small().label("Hide parameters")
-                                            .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(2, window, cx)))))
-                                    .when(self.fields.iter().any(|field|field.draft.ux.advanced),|view|view.child(Button::new("advanced-parameters").label(if self.show_advanced {"Hide Advanced"} else {"Show Advanced"}).on_click(cx.listener(|this,_,window,cx|{window.focus(&this.focus,cx);this.show_advanced = !this.show_advanced;cx.notify();}))))
-                                    .children(self.fields.iter().enumerate().filter(|(_,field)| !field.draft.ux.advanced || self.show_advanced).map(|(index,field)| {
-                                        let ux=&field.draft.ux;
-                                        let points=if ux.point_curve {curve_points(field.draft.text(),ux.scalar_curve).ok()} else {None};
-                                        let control=if field.draft.descriptor.parameter_type==ParameterType::Boolean {
-                                            Checkbox::new(("boolean",index)).label(ux.name.clone()).checked(matches!(field.draft.committed(),ParameterValue::Boolean(true)))
-                                                .on_click(cx.listener(move |this,value,window,cx|this.choose_field(index,ParameterValue::Boolean(*value),window,cx))).into_any_element()
-                                        } else if !ux.options.is_empty() {
-                                            let options=ux.options.clone();let current=field.draft.text().to_owned();let weak=cx.entity().downgrade();
-                                            let label=options.iter().find(|(value,_)|value==&current).map(|(_,label)|label.clone()).unwrap_or_else(||current.clone());
-                                            Button::new(("choice",index)).label(label).dropdown_menu(move |mut menu,_,_| {
-                                                for (value,label) in &options {let value=value.clone();let weak=weak.clone();menu=menu.item(PopupMenuItem::new(label.clone()).checked(value==current).on_click(move |_,window,cx|{let _=weak.update(cx,|this,cx|this.choose_field(index,ParameterValue::String(value.clone()),window,cx));}));}menu
-                                            }).into_any_element()
-                                        } else {match &field.state {AnyInputState::Input(state)=>Input::new(state).into_any_element(),AnyInputState::Textarea(state)=>Textarea::new(state).into_any_element(),_=>div().child("Unsupported parameter field").into_any_element()}};
-                                        div().v_flex().gap_1().border_b_1().border_color(rgb(0x343b45)).pb_2()
-                                            .capture_key_down(cx.listener(move |this,event:&KeyDownEvent,window,cx| {
-                                                let text_focused=this.fields.get(index).is_some_and(|field|field.state.focus_handle(cx).is_focused(window));
-                                                if !text_focused {return;}
-                                                if event.keystroke.key=="escape" {this.cancel_field(index,window,cx);cx.stop_propagation();}
-                                                else if matches!(event.keystroke.key.as_str(),"up"|"down") && !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform
-                                                    && let Some(field)=this.fields.get_mut(index) && field.draft.numeric() {
-                                                        field.stepping = true;
-                                                        let multiplier=if event.keystroke.key=="up" {1.0} else {-1.0};
-                                                        field.error=field.draft.step(multiplier).err();let text=field.draft.text().to_owned();
-                                                        if let Some(input)=field.state.as_input() {input.update(cx,|input,cx|input.replace_all(text,window,cx));}cx.stop_propagation();cx.notify();
-                                                }
-                                            }))
-                                            .on_key_up(cx.listener(move |this,event:&KeyUpEvent,window,cx|{if matches!(event.keystroke.key.as_str(),"up"|"down") && this.fields.get(index).is_some_and(|field|field.stepping) {this.commit_field(index,window,cx);}}))
-                                            .child(div().h_flex().flex_wrap().gap_2().child(format!("{}{}",ux.name,ux.unit.as_ref().map(|unit|format!(" ({unit})")).unwrap_or_default()))
-                                                .child(div().capture_any_mouse_down(cx.listener(move |this,_,window,cx|this.cancel_field(index,window,cx))).child(Button::new(("reset",index)).label("Reset").disabled(!field.draft.modified()).on_click(cx.listener(move |this,_,window,cx|this.reset_field(index,window,cx)))))
-                                                .child(Button::new(("port",index)).label(if field.exposed {"Hide input"} else {"As input"}).on_click(cx.listener(move |this,_,window,cx|this.toggle_parameter_port(index,window,cx)))))
-                                            .when_some(points.as_ref(),|view,points| {
-                                                let selected=field.curve_index.min(points.len().saturating_sub(1));
-                                                view.child(div().v_flex().gap_1()
-                                                    .when_some(points.get(selected),|view,(x,y)|view.child(div().text_sm().child(format!("Point {} of {}: input {x}, output {y}",selected+1,points.len()))))
-                                                    .child(div().h_flex().flex_wrap().gap_1()
-                                                        .child(Button::new(("curve-previous",index)).label("Previous point").disabled(selected==0).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,false,cx))))
-                                                        .child(Button::new(("curve-next",index)).label("Next point").disabled(selected+1>=points.len()).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,true,cx))))
-                                                        .child(Button::new(("curve-add",index)).label("Add point").disabled(points.len()>=4096).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,false,window,cx))))
-                                                        .child(Button::new(("curve-remove",index)).label("Delete point").disabled(selected==0||selected+1>=points.len()).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,true,window,cx)))))
-                                                    .child(div().text_xs().text_color(rgb(0xa6adb8)).child("Add inserts the midpoint of the widest input interval. Endpoints cannot be deleted with these controls; edit exact x,y pairs below.")))
-                                            })
-                                            .child(control)
-                                            .when(ux.multiline,|view|view.child(div().text_xs().text_color(rgb(0xa6adb8)).child("Shift+Enter inserts a line; Enter applies; Escape cancels.")))
-                                            .when_some(field.slider.as_ref(),|view,slider|view.child(Slider::new(slider).w_full()))
-                                            .child(div().text_xs().text_color(rgb(0xa6adb8)).child(ux.description.clone()))
-                                            .when(field.draft.outside_recommended(),|view|view.child(div().text_xs().child("Outside recommended slider range; exact value is preserved.")))
-                                            .when_some(field.error.as_ref(),|view,error|view.child(div().text_xs().text_color(rgb(0xffa480)).child(error.clone())))
-                                    })).into_any_element();
+            .id("node-help")
+            .size_full()
+            .h_flex()
+            .gap_2()
+            .p_2()
+            .text_xs()
+            .child("Controls are in the selected node.")
+            .child(
+                Button::new("hide-inspector")
+                    .small()
+                    .label("Hide help")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(2, window, cx))),
+            )
+            .into_any_element();
         let canvas_panel = self.canvas_panel(cx);
         let searching = !self.search.read(cx).value().trim().is_empty();
         let groups = self.library_nodes(cx);
@@ -1755,15 +1807,25 @@ impl Render for Editor {
                     .child(
                         Button::new(SharedString::from(format!("category-{category}")))
                             .small()
+                            .mt_2()
+                            .justify_start()
                             .label(category.clone())
+                            .icon(if open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .ghost()
                             .toggled(open)
                             .tooltip(format!(
                                 "{} {category}",
                                 if open { "Collapse" } else { "Expand" }
                             ))
                             .child(div().text_xs().child(nodes.len().to_string()))
-                            .disabled(searching)
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.search.read(cx).value().trim().is_empty() {
+                                    return;
+                                }
                                 if !this.collapsed_categories.remove(&toggle) {
                                     this.collapsed_categories.insert(toggle.clone());
                                 }
@@ -1783,7 +1845,25 @@ impl Render for Editor {
                                 .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
                                 .child(
                                     Button::new(SharedString::from(kind.clone()))
-                                        .label(descriptor.name)
+                                        .accessibility_label(tooltip.clone())
+                                        .justify_start()
+                                        .icon(IconName::Plus)
+                                        .ghost()
+                                        .h_auto()
+                                        .py_1()
+                                        .child(
+                                            div()
+                                                .v_flex()
+                                                .min_w_0()
+                                                .items_start()
+                                                .child(descriptor.name)
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0xa6adb8))
+                                                        .child(descriptor.type_id),
+                                                ),
+                                        )
                                         .tooltip(tooltip)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.add_library_node(&kind, None, window, cx)
@@ -1801,11 +1881,17 @@ impl Render for Editor {
             .v_flex()
             .bg(rgb(0x1c2026))
             .text_color(rgb(0xe1e5eb))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
                     || this.search.read(cx).focus_handle(cx).is_focused(window)
                     || this.export_quality.read(cx).focus_handle(cx).is_focused(window)
                     || this.export_long_edge.read(cx).focus_handle(cx).is_focused(window);
+                if event.keystroke.key == "escape" {
+                    if let Some((index,_)) = this.curve_gesture.take() { this.cancel_field(index,window,cx); }
+                    this.geometry.update(cx, |helper,cx| helper.cancel(cx));
+                    this.flow_state.update(cx, |state,_| state.connecting = None);
+                    this.flow.update(cx, |_,cx| cx.notify());
+                }
                 let modifiers = event.keystroke.modifiers;
                 if !editing && event.keystroke.key == "?" {
                     this.show_shortcuts = !this.show_shortcuts;
@@ -1881,6 +1967,11 @@ impl Render for Editor {
                                         .child(div().h_flex().flex_wrap().gap_1().child(div().font_weight(FontWeight::BOLD).child("Nodes"))
                                             .child(Button::new("hide-library").small().label("Hide").on_click(cx.listener(|this, _, window, cx| this.toggle_panel(0, window, cx)))))
                                         .child(Input::new(&self.search))
+                                        .child(div().h_flex().flex_wrap().gap_1()
+                                            .child(Button::new("collapse-node-groups").small().label("Collapse all").on_click(cx.listener(|this, _, _, cx| {
+                                                this.collapsed_categories = this.session.editor.node_descriptors().iter().map(|node| node_category(&node.type_id)).collect(); cx.notify();
+                                            })))
+                                            .child(Button::new("expand-node-groups").small().label("Expand all").on_click(cx.listener(|this, _, _, cx| { this.collapsed_categories.clear(); cx.notify(); }))))
                                         .child(div().text_xs().child("Drag into workflow · Click or Enter to add"))
                                         .when(!self.selected_output_types().is_empty(), |view| view.child(Checkbox::new("compatible-nodes").label("Compatible inputs only").checked(self.compatible_only).on_click(cx.listener(|this, checked, _, cx| { this.compatible_only = *checked; cx.notify(); }))))
                                         .child(div().text_xs().child(format!("{library_count} matching {}", if library_count == 1 { "node" } else { "nodes" })))
@@ -1939,36 +2030,38 @@ fn configure_theme(cx: &mut App) {
 }
 fn main() {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        configure_theme(cx);
-        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        let result = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_decorations: Some(WindowDecorations::Server),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("RawWeave — Native".into()),
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            configure_theme(cx);
+            let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
+            let result = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_decorations: Some(WindowDecorations::Server),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("RawWeave — Native".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            cx,
-            move |window, cx| {
-                cx.new(|cx| {
-                    let mut view = Editor::new(window, cx);
-                    if let Some(path) = path {
-                        view.open_path(path, window, cx);
-                    }
-                    view
-                })
-            },
-        );
-        if let Err(error) = result {
-            eprintln!("Could not open native GPU window: {error}");
-            cx.quit();
-        } else {
-            cx.activate(true);
-        }
-    });
+                },
+                cx,
+                move |window, cx| {
+                    cx.new(|cx| {
+                        let mut view = Editor::new(window, cx);
+                        if let Some(path) = path {
+                            view.open_path(path, window, cx);
+                        }
+                        view
+                    })
+                },
+            );
+            if let Err(error) = result {
+                eprintln!("Could not open native GPU window: {error}");
+                cx.quit();
+            } else {
+                cx.activate(true);
+            }
+        });
 }

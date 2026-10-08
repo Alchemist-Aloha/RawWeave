@@ -174,6 +174,9 @@ impl FlowGraph {
                 snap_node_id,
                 node_bg,
                 node_border,
+                viewport.zoom,
+                _entity_id,
+                &self.focus_handle,
             )
         } else {
             Vec::new()
@@ -290,6 +293,7 @@ impl FlowGraph {
     }
 
     /// Render handle dots for a node.
+    #[allow(clippy::too_many_arguments)] // Cohesive per-node render inputs; a struct would only rename them.
     fn render_handles(
         handles: &[HandleDef],
         node_id: &NodeId,
@@ -298,8 +302,11 @@ impl FlowGraph {
         snap_node_id: Option<&NodeId>,
         default_bg: u32,
         default_border: u32,
+        zoom: f32,
+        entity_id: EntityId,
+        focus: &FocusHandle,
     ) -> Vec<AnyElement> {
-        let handle_size = 10.0;
+        let handle_size = 24.0;
         let half = handle_size / 2.0;
         let is_snapped_node = snap_node_id == Some(node_id);
 
@@ -310,6 +317,8 @@ impl FlowGraph {
                 let node_id = node_id.clone();
                 let handle_id = handle.id.clone();
                 let handle_type = handle.handle_type;
+                let is_connectable = handle.is_connectable;
+                let focus = focus.clone();
                 let handle_position = handle.position;
                 let state = state.clone();
 
@@ -326,7 +335,7 @@ impl FlowGraph {
                 } else {
                     (gpui::rgb(default_bg), gpui::rgb(default_border), 1.0)
                 };
-                let dot_size = handle_size * size_mult;
+                let dot_size = 10.0 * size_mult;
 
                 let dot = div()
                     .w(px(dot_size))
@@ -349,7 +358,12 @@ impl FlowGraph {
                         let state = state.clone();
                         let node_id = node_id.clone();
                         let handle_id = handle_id.clone();
-                        move |event, _window, cx| {
+                        move |event, window, cx| {
+                            if !is_connectable {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            window.focus(&focus, cx);
                             let mouse_pos = event.position;
                             state.update(cx, |state, _| {
                                 // Find handle center for the from_point
@@ -369,50 +383,7 @@ impl FlowGraph {
                                 // Prevent node drag
                                 state.drag_state = None;
                             });
-                        }
-                    })
-                    // Handle mouse up → complete connection if valid
-                    .on_mouse_up(MouseButton::Left, {
-                        let state = state.clone();
-                        let node_id = node_id.clone();
-                        let handle_id = handle_id.clone();
-                        move |_event, _window, cx| {
-                            state.update(cx, |state, _| {
-                                if let Some(draft) = state.connecting.take() {
-                                    // Build the connection
-                                    let (source, target, source_handle, target_handle) =
-                                        if draft.from_type == HandleType::Source {
-                                            (
-                                                draft.from_node.clone(),
-                                                node_id.clone(),
-                                                draft.from_handle.clone(),
-                                                handle_id.clone(),
-                                            )
-                                        } else {
-                                            (
-                                                node_id.clone(),
-                                                draft.from_node.clone(),
-                                                handle_id.clone(),
-                                                draft.from_handle.clone(),
-                                            )
-                                        };
-
-                                    let connection = Connection {
-                                        source,
-                                        target,
-                                        source_handle,
-                                        target_handle,
-                                    };
-
-                                    if state.is_valid_connection(&connection) {
-                                        state.push_undo();
-                                        let edge_id: SharedString =
-                                            format!("e{}-{}", connection.source, connection.target)
-                                                .into();
-                                        state.add_edge_from_connection(&connection, edge_id);
-                                    }
-                                }
-                            });
+                            cx.notify(entity_id);
                         }
                     });
 
@@ -445,7 +416,31 @@ impl FlowGraph {
                         .ml(px(-half)),
                 };
 
-                container.child(dot).into_any_element()
+                container
+                    .when_some(handle.offset, |el, offset| match handle.position {
+                        HandlePosition::Left | HandlePosition::Right => el.top(px(offset * zoom)),
+                        _ => el.left(px(offset * zoom)),
+                    })
+                    .child(dot)
+                    .when_some(handle.label.clone(), |el, label| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .text_size(px(10.5 * zoom))
+                                .text_color(gpui::rgb(0xe1e5eb))
+                                .w(px(130.0 * zoom))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .when(handle.position == HandlePosition::Left, |el| {
+                                    el.left(px(half + 8.0))
+                                })
+                                .when(handle.position == HandlePosition::Right, |el| {
+                                    el.right(px(half + 8.0)).text_right()
+                                })
+                                .child(label),
+                        )
+                    })
+                    .into_any_element()
             })
             .collect()
     }
@@ -840,7 +835,9 @@ impl Render for FlowGraph {
             // Mouse down on empty space → start panning, deselect, or edge selection
             .on_mouse_down(MouseButton::Left, {
                 let entity_id = entity_id;
-                move |event, _window, cx| {
+                let focus = self.focus_handle.clone();
+                move |event, window, cx| {
+                    window.focus(&focus, cx);
                     let mouse_pos = event.position;
                     state_for_mouse_down.update(cx, |state, _| {
                         // If a node drag or connection was already started, skip
@@ -931,8 +928,10 @@ impl Render for FlowGraph {
                                 let (nx, ny) = viewport.flow_to_screen(node.position);
                                 let (nx, ny) =
                                     (nx + state.canvas_origin.x, ny + state.canvas_origin.y);
-                                let nw = node.measured_width.map(|p| p.as_f32()).unwrap_or(150.0);
-                                let nh = node.measured_height.map(|p| p.as_f32()).unwrap_or(40.0);
+                                let nw = node.measured_width.map(|p| p.as_f32()).unwrap_or(150.0)
+                                    * viewport.zoom;
+                                let nh = node.measured_height.map(|p| p.as_f32()).unwrap_or(40.0)
+                                    * viewport.zoom;
                                 // AABB intersection
                                 let intersects = nx < ex && nx + nw > sx && ny < ey && ny + nh > sy;
                                 node.selected = intersects;
@@ -993,7 +992,7 @@ impl Render for FlowGraph {
             // Global mouse up → end dragging, panning, or cancel connection
             .on_mouse_up(MouseButton::Left, {
                 let entity_id = entity_id;
-                move |_event, _window, cx| {
+                move |event, _window, cx| {
                     let mut changed = false;
 
                     state_for_mouse_up.update(cx, |state, _| {
@@ -1002,7 +1001,12 @@ impl Render for FlowGraph {
                             changed = true;
                         }
                         if let Some(draft) = state.connecting.take() {
-                            if let Some(snap) = draft.snap_target {
+                            // Resolve at release, not the last move (which may be coalesced).
+                            if let Some(snap) = state.find_snap_target(
+                                &draft,
+                                event.position.x.as_f32(),
+                                event.position.y.as_f32(),
+                            ) {
                                 // Complete the connection
                                 let (source, target, source_handle, target_handle) =
                                     if draft.from_type == HandleType::Source {
@@ -1030,9 +1034,14 @@ impl Render for FlowGraph {
 
                                 if state.is_valid_connection(&connection) {
                                     state.push_undo();
-                                    let edge_id: SharedString =
-                                        format!("e{}-{}", connection.source, connection.target)
-                                            .into();
+                                    let edge_id: SharedString = format!(
+                                        "e{}:{:?}-{}:{:?}",
+                                        connection.source,
+                                        connection.source_handle,
+                                        connection.target,
+                                        connection.target_handle
+                                    )
+                                    .into();
                                     state.add_edge_from_connection(&connection, edge_id);
                                 }
                             }
@@ -1109,19 +1118,21 @@ impl Render for FlowGraph {
                     }
                 }
             })
-            // Scroll to zoom / pan
+            // Wheel zooms at the cursor; Shift+wheel retains trackpad/sideways pan.
             .on_scroll_wheel({
                 move |event, _window, cx| {
                     let delta = event.delta.pixel_delta(px(20.0));
                     let mouse_pos = event.position;
 
-                    if event.modifiers.platform || event.modifiers.control {
-                        // Zoom towards mouse
-                        let zoom_delta = -delta.y.as_f32() * 0.01;
+                    if !event.modifiers.shift || event.modifiers.platform || event.modifiers.control
+                    {
+                        // Positive GPUI wheel delta is wheel-up. Multiplicative steps
+                        // keep wheel-down reciprocal and useful at every zoom level.
+                        let factor = (delta.y.as_f32() * 0.002).exp();
                         state_for_scroll.update(cx, |state, _| {
                             let old_zoom = state.viewport.zoom;
                             let new_zoom =
-                                (old_zoom + zoom_delta).clamp(state.min_zoom, state.max_zoom);
+                                (old_zoom * factor).clamp(state.min_zoom, state.max_zoom);
                             let mx = mouse_pos.x.as_f32() - state.canvas_origin.x;
                             let my = mouse_pos.y.as_f32() - state.canvas_origin.y;
                             state.viewport.x = mx - (mx - state.viewport.x) * (new_zoom / old_zoom);
