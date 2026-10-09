@@ -504,10 +504,30 @@ const imageSetDescriptors: NodeDescriptor[] = [
   { ...imageSetCollectionDescriptor('core.imageset-group', 'Group'), parameters: [stringParameter('tag', 'Tag', ''), stringParameter('value', 'Value', '')], outputs: [outputPort('images', 'Image Set', 'core.ImageSet'), outputPort('set', 'Image Set (alias)', 'core.ImageSet'), outputPort('group', 'Group', 'value.String')] },
 ];
 
+const localExposure = imageProcessingDescriptor('core.local-exposure', 'Local Exposure');
+localExposure.inputs.push(input('mask', 'Mask', 'core.Mask', false), input('exposure', 'Exposure', 'value.Float', false));
+localExposure.parameters.push(parameter('exposure', 'Exposure', 0));
+localExposure.capabilities = tileCapabilities;
+
+// Keep existing image sockets and identifiers; scene sockets remain explicitly typed.
+for (const descriptor of [exposure, localExposure, blur, resize, colorMatrix, output]) {
+  descriptor.inputs.find((port) => port.id === 'image')!.required = false;
+  descriptor.inputs.push(input('scene', 'Scene Linear RGB', 'color.SceneLinearRGB', false));
+  descriptor.outputs.push(outputPort('scene', 'Scene Linear RGB', 'color.SceneLinearRGB'));
+}
+const sceneToImage: NodeDescriptor = {
+  typeId: 'core.scene-linear-to-image', name: 'Scene Linear RGB to Image', version: 1,
+  inputs: [input('scene', 'Scene Linear RGB', 'color.SceneLinearRGB', true)],
+  outputs: [outputPort('image', 'Linear sRGB Image', 'core.Image')],
+  parameters: [], capabilities: ['CPU', 'FullFrame', 'MipInvariant'],
+};
+
 export const builtInDescriptors: NodeDescriptor[] = [
   imageInput,
   constantFloat,
   exposure,
+  localExposure,
+  sceneToImage,
   invert,
   resize,
   crop,

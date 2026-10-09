@@ -957,7 +957,7 @@ pub fn register_nodes_with_decoder_instance<D: RawDecoder + 'static>(
     register_nodes_with_decoder(registry, Arc::new(decoder))
 }
 
-/// Register RAW nodes with the default rawloader adapter.
+/// Register RAW nodes with the default rawler adapter (legacy type name retained).
 pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_api::RegistryError> {
     register_nodes_with_decoder(registry, Arc::new(RawloaderDecoder::default()))
 }

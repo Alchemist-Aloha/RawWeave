@@ -1,6 +1,9 @@
-# RawWeave native desktop migration
+# RawWeave native desktop
 
-Branch: `feat/gpui-desktop`. This is a working first native frontend, **not complete Tauri feature parity**. The existing Tauri application remains available during migration.
+GPUI is the default application selected by `scripts/build-all-in-one.sh` and
+`scripts/run-rawweave.sh`. It has **not reached complete Tauri feature parity**.
+The legacy Tauri application remains in the repository for migration coverage,
+but is not part of the default desktop build or launcher.
 
 ## Run
 
@@ -12,9 +15,11 @@ cargo run --locked --manifest-path apps/desktop-gpui/Cargo.toml -- \
 Release build and launch:
 
 ```sh
-cargo build --release --locked --manifest-path apps/desktop-gpui/Cargo.toml -p rawweave-gpui
-./apps/desktop-gpui/target/release/rawweave-gpui
+./scripts/build-all-in-one.sh  # installs GPUI as bin/rawweave-desktop
+./scripts/run-rawweave.sh
 ```
+
+These scripts require neither pnpm nor a Tauri/WebKitGTK runtime.
 
 The optional command-line argument opens an image. Otherwise use **Open Image**. On Linux this requires a working X11/Wayland session, Vulkan driver, fonts and a desktop file-picker portal. For the local display used during verification: `DISPLAY=:0 GPUI_FORCE_X11=1`.
 
@@ -38,8 +43,23 @@ The optional command-line argument opens an image. Otherwise use **Open Image**.
 - Compatible version-1 frontend workflow envelope (`graph` string and `positions`) and bare engine graph JSON. Atomic workflow saves avoid truncating an existing file on failure.
 - Export selected canvas nodes as an engine-compatible blueprint (version `1.0.0`, filename supplies ID/name), retaining exposed parameters and crossing input/output declarations. Instantiate a validated blueprint as the active graph; successful import clears runtime sources/history/layout and waits for a compatible source, while failed import preserves the current document. These actions do not retain a blueprint-authoring session, provide workflow-level boundary bindings or create/navigate nested subgraphs; those remain migration gaps.
 - Background CPU graph evaluation, shared immutable source buffers, mip-aware/coarse-to-fine previews, obsolete-result rejection, Fit/100%, pan and wheel zoom.
+- Ordinary image previews honor `ColorDomain::LinearSrgb` through the shared `SrgbDisplayTransform`, while sRGB-coded images are uploaded without a second transfer. Scene-to-Image output therefore displays consistently with scene RGB at full resolution; preview mips may differ because image mips filter pixels while RAW scene previews sample the sensor grid. Alpha is retained and processing buffers remain unchanged.
 - Direct BGRA preview upload to GPUI's native GPU image atlas. GPUI performs textured image scaling/composition; there is **no PNG encoding, JSON pixel IPC, preview URI fetch or GPU readback** in this display path. Old atlas entries are explicitly released.
 - Actual adapter/software status is reported, not simulated. Local Linux verification selected NVIDIA GeForce GTX 1070, NVIDIA driver, `software=false`; a real JPEG was visibly displayed. RAW sampling/bounds are regression-tested. No native frame-time benchmark or camera-wide color claim.
+
+Exposure, Local Exposure, Blur, Resize, Color Matrix, Levels, Curves, Invert and
+Output offer explicit `scene` sockets alongside unchanged `image` sockets. All
+pro-tools filters/analysis and image-derived/gradient/painted masks accept scenes;
+Detail Separation exposes `base_scene`/`detail_scene`. Connected-input thumbnails
+and gradient helpers follow scene wires as well as Image wires. Use one input
+family at a time. Levels' authored transfer diagram switches to the signed,
+unclipped scene response when its scene socket is connected. Scene processing
+preserves working-space metadata and unclipped float values; its current raster is whole-frame, not region-origin-aware.
+Add **Scene Linear RGB to Image** (`core.scene-linear-to-image`) after Camera
+Transform/scene adjustments when entering image-only nodes. It converts known
+primaries to linear sRGB, adds alpha 1, and requests full-resolution inputs;
+it does not apply display gamma or clip highlights. Keep Display Transform last
+on the typed scene chain. See `docs/STEP_03_RAW_FOUNDATION.md` for boundaries.
 
 RAW development and color processing remain in Rust nodes on CPU. This is native GPU **display**, not a GPU-resident RAW processing chain and not a restoration of the removed WebGPU demosaic experiment. Uploads are bounded to 128 MiB and 8192 pixels per axis; larger 100% previews require tiled display support.
 

@@ -1830,22 +1830,24 @@ fn cached_node_result(
     cached_image: Option<RenderResult>,
     cached_mask: Option<MaskRenderResult>,
 ) -> Option<NodeResult> {
-    let output = node.descriptor.outputs.first()?;
-    if node.descriptor.outputs.len() != 1 {
+    // Raster caches are populated only for singleton results. A descriptor may
+    // additionally declare an alternative typed output (Image versus Scene RGB).
+    let (data_type, value) = if let Some(cached) = cached_image {
+        ("core.Image", Value::Image(cached.image.as_ref().clone()))
+    } else {
+        let cached = cached_mask?;
+        ("core.Mask", Value::Mask(cached.mask.as_ref().clone()))
+    };
+    let mut matching = node
+        .descriptor
+        .outputs
+        .iter()
+        .filter(|output| output.data_type == data_type);
+    let output = matching.next()?;
+    if matching.next().is_some() {
         return None;
     }
-    match output.data_type.as_str() {
-        "core.Image" => cached_image.map(|cached| {
-            NodeResult::single(
-                output.id.clone(),
-                Value::Image(cached.image.as_ref().clone()),
-            )
-        }),
-        "core.Mask" => cached_mask.map(|cached| {
-            NodeResult::single(output.id.clone(), Value::Mask(cached.mask.as_ref().clone()))
-        }),
-        _ => None,
-    }
+    Some(NodeResult::single(output.id.clone(), value))
 }
 
 fn single_image(result: &NodeResult) -> Option<&rawweave_image::Image> {

@@ -1,17 +1,19 @@
 //! First-party professional photographic tools built on the public node API.
 //!
-//! The pack deliberately operates on `core.Image` values and keeps the graph
-//! contract free of private shortcuts. All algorithms are deterministic,
-//! bounded, and preserve the source image's global origin and metadata.
+//! Image and scene-linear inputs share deterministic, bounded pixel kernels.
+//! Image paths preserve global origin/metadata; scene paths preserve working space
+//! and preview sampling without copying the source into an RGBA image.
 
 #[cfg(test)]
 use std::cell::Cell;
 
-use rawweave_image::{Image, Mask, Region};
+#[cfg(test)]
+use rawweave_image::Image;
+use rawweave_image::{Mask, Region};
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
     NodePack, NodeRegistry, NodeResult, ParameterDescriptor, ParameterValue, Parameters,
-    PortDescriptor, RegistryError, Value,
+    PortDescriptor, RegistryError, RgbInput, Value, scene_output_id, with_scene_ports,
 };
 
 /// Pixel budget for the region one node evaluates in a single pass.
@@ -140,12 +142,8 @@ fn descriptors_for_aliases(
         .collect()
 }
 
-fn image_input(inputs: &Inputs) -> Result<Image, NodeError> {
-    match inputs.get("image") {
-        Some(Value::Image(image)) => Ok(image.clone()),
-        Some(_) => Err(NodeError::InvalidParameter("image".to_owned())),
-        None => Err(NodeError::MissingInput("image".to_owned())),
-    }
+fn image_input(inputs: &Inputs) -> Result<RgbInput<'_>, NodeError> {
+    RgbInput::from_inputs(inputs)
 }
 
 fn finite_float(parameters: &Parameters, id: &str, default: f32) -> Result<f32, NodeError> {
@@ -222,13 +220,8 @@ fn string_parameter_value<'a>(
     }
 }
 
-fn source_region(image: &Image, context: &EvaluationContext) -> Region {
-    match context.requested_region() {
-        Some(requested) => requested
-            .intersection(image.global_region())
-            .unwrap_or_else(|| Region::new(requested.x, requested.y, 0, 0)),
-        None => image.global_region(),
-    }
+fn source_region(image: &RgbInput<'_>, context: &EvaluationContext) -> Region {
+    image.region(context)
 }
 
 fn checked_pixel_count(region: Region) -> Result<usize, NodeError> {
@@ -244,23 +237,20 @@ fn checked_pixel_count(region: Region) -> Result<usize, NodeError> {
     usize::try_from(count).map_err(|_| NodeError::InvalidParameter("dimensions".to_owned()))
 }
 
-fn from_region(source: &Image, region: Region, pixels: Vec<[f32; 4]>) -> Result<Image, NodeError> {
+fn from_region(
+    source: &RgbInput<'_>,
+    region: Region,
+    pixels: Vec<[f32; 4]>,
+) -> Result<Value, NodeError> {
     checked_pixel_count(region)?;
-    Image::from_pixels_with_origin(
-        region.dimensions(),
-        (region.x, region.y),
-        pixels,
-        source.pixel_format(),
-        source.color_metadata(),
-    )
-    .map_err(|error| NodeError::Message(error.to_string()))
+    source.output(region, pixels)
 }
 
 fn map_region(
-    source: &Image,
+    source: &RgbInput<'_>,
     context: &EvaluationContext,
     mut map: impl FnMut(u32, u32, [f32; 4]) -> [f32; 4],
-) -> Result<Image, NodeError> {
+) -> Result<Value, NodeError> {
     let region = source_region(source, context);
     let mut pixels = Vec::with_capacity(checked_pixel_count(region)?);
     for y in 0..region.height {
@@ -276,7 +266,7 @@ fn map_region(
     from_region(source, region, pixels)
 }
 
-fn sample_nearest(image: &Image, x: i64, y: i64) -> [f32; 4] {
+fn sample_nearest(image: &RgbInput<'_>, x: i64, y: i64) -> [f32; 4] {
     let bounds = image.global_region();
     if bounds.width == 0 || bounds.height == 0 {
         return [0.0; 4];
@@ -288,7 +278,7 @@ fn sample_nearest(image: &Image, x: i64, y: i64) -> [f32; 4] {
     image.pixel_global(x, y).unwrap_or([0.0; 4])
 }
 
-fn sample_bilinear(image: &Image, x: f32, y: f32) -> [f32; 4] {
+fn sample_bilinear(image: &RgbInput<'_>, x: f32, y: f32) -> [f32; 4] {
     let bounds = image.global_region();
     if bounds.width == 0 || bounds.height == 0 || !x.is_finite() || !y.is_finite() {
         return [0.0; 4];
@@ -396,7 +386,7 @@ struct IntegralImage {
 }
 
 impl IntegralImage {
-    fn new(image: &Image) -> Result<Self, NodeError> {
+    fn new(image: &RgbInput<'_>) -> Result<Self, NodeError> {
         checked_pixel_count(image.global_region())?;
         let width = image.width();
         let height = image.height();
@@ -418,10 +408,6 @@ impl IntegralImage {
 
         for y in 0..usize::try_from(height).unwrap_or(0) {
             for x in 0..usize::try_from(width).unwrap_or(0) {
-                let source_index = y
-                    .checked_mul(usize::try_from(width).unwrap_or(0))
-                    .and_then(|row| row.checked_add(x))
-                    .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
                 let prefix_index = (y + 1)
                     .checked_mul(stride)
                     .and_then(|row| row.checked_add(x + 1))
@@ -438,7 +424,14 @@ impl IntegralImage {
                     .checked_mul(stride)
                     .and_then(|row| row.checked_add(x))
                     .ok_or_else(|| NodeError::InvalidParameter("dimensions".to_owned()))?;
-                let Some(&pixel) = image.pixels().get(source_index) else {
+                let Some(pixel) = image.pixel_global(
+                    image.origin().0
+                        + u32::try_from(x)
+                            .map_err(|_| NodeError::InvalidParameter("dimensions".into()))?,
+                    image.origin().1
+                        + u32::try_from(y)
+                            .map_err(|_| NodeError::InvalidParameter("dimensions".into()))?,
+                ) else {
                     return Err(NodeError::Message("image pixels are incomplete".to_owned()));
                 };
                 let Some(&above) = sums.get(above_index) else {
@@ -592,8 +585,11 @@ impl IntegralImage {
     }
 }
 
-fn luminance([red, green, blue, _]: [f32; 4]) -> f32 {
-    0.2126 * red + 0.7152 * green + 0.0722 * blue
+fn luminance_function(image: &RgbInput<'_>) -> Result<impl Fn([f32; 4]) -> f32, NodeError> {
+    let weights = image.luminance_coefficients()?;
+    Ok(move |[red, green, blue, _]: [f32; 4]| {
+        weights[0] * red + weights[1] * green + weights[2] * blue
+    })
 }
 
 fn smoothstep(value: f32) -> f32 {
@@ -679,16 +675,13 @@ impl NodeInstance for ImageNode {
 }
 
 fn evaluate_denoise(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
     let radius = integer_parameter_value(parameters, "radius", 1, MAX_RADIUS)?;
     if radius == 0 {
-        return Ok(NodeResult::single(
-            "image",
-            Value::Image(image_region(image, context)?),
-        ));
+        return Ok(image.result("image", image_region(image, context)?));
     }
     let strength = bounded_float(parameters, "strength", 0.5, 0.0, 1.0)?;
     let preserve_detail = bounded_float(parameters, "preserve_detail", 0.5, 0.0, 1.0)?;
@@ -711,11 +704,11 @@ fn evaluate_denoise(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_detail_separation(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -747,12 +740,12 @@ fn evaluate_detail_separation(
     Ok(NodeResult::new(
         [
             (
-                "base".to_owned(),
-                Value::Image(from_region(image, region, base_pixels)?),
+                scene_output_id("base", image.is_scene()),
+                from_region(image, region, base_pixels)?,
             ),
             (
-                "detail".to_owned(),
-                Value::Image(from_region(image, region, detail_pixels)?),
+                scene_output_id("detail", image.is_scene()),
+                from_region(image, region, detail_pixels)?,
             ),
         ]
         .into_iter()
@@ -761,7 +754,7 @@ fn evaluate_detail_separation(
 }
 
 fn evaluate_sharpen(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
     deconvolution: bool,
@@ -793,11 +786,11 @@ fn evaluate_sharpen(
         }
         current
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_local_contrast(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -813,11 +806,11 @@ fn evaluate_local_contrast(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_defringe(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -839,7 +832,7 @@ fn evaluate_defringe(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn normalized_coordinate(index: u32, origin: u32, size: u32) -> f32 {
@@ -851,7 +844,7 @@ fn normalized_coordinate(index: u32, origin: u32, size: u32) -> f32 {
 }
 
 fn evaluate_chromatic_aberration(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -884,11 +877,11 @@ fn evaluate_chromatic_aberration(
         )[2];
         [red, pixel[1], blue, pixel[3]]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_distortion(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -910,11 +903,11 @@ fn evaluate_distortion(
             + ((source_y + 1.0) * 0.5).clamp(0.0, 1.0) * bounds.height.saturating_sub(1) as f32;
         sample_bilinear(image, source_x, source_y)
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_vignetting(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -930,7 +923,7 @@ fn evaluate_vignetting(
         let gain = (1.0 + amount * falloff).max(0.0);
         [pixel[0] * gain, pixel[1] * gain, pixel[2] * gain, pixel[3]]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +931,7 @@ fn evaluate_vignetting(
 // ---------------------------------------------------------------------------
 
 fn evaluate_tone_map(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -953,6 +946,7 @@ fn evaluate_tone_map(
         for channel in &mut pixel[..3] {
             let value = *channel * multiplier;
             let mapped = match operator {
+                "filmic" | "aces" if image.is_scene() => signed_scene_filmic(value),
                 "filmic" => filmic_curve(value),
                 "aces" => aces_curve(value),
                 _ => signed_reinhard(value),
@@ -961,7 +955,7 @@ fn evaluate_tone_map(
         }
         pixel
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn signed_reinhard(value: f32) -> f32 {
@@ -970,6 +964,13 @@ fn signed_reinhard(value: f32) -> f32 {
     } else {
         -((-value) / (1.0 + -value))
     }
+}
+
+// Scene tone mapping compresses light without a hidden display clamp. f64 keeps
+// the rational curve stable for finite HDR inputs; preserve the sign of negatives.
+fn signed_scene_filmic(value: f32) -> f32 {
+    let x = f64::from(value).abs();
+    (value.signum() as f64 * ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14))) as f32
 }
 
 fn filmic_curve(value: f32) -> f32 {
@@ -1029,7 +1030,7 @@ fn hue_distance(a: f32, b: f32) -> f32 {
 }
 
 fn evaluate_color_zones(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1038,18 +1039,42 @@ fn evaluate_color_zones(
     let saturation = bounded_float(parameters, "saturation", 0.0, -4.0, 4.0)?;
     let lightness = bounded_float(parameters, "lightness", 0.0, -4.0, 4.0)?;
     let output = map_region(image, context, |_x, _y, pixel| {
-        let mut hsv = rgb_to_hsv([pixel[0], pixel[1], pixel[2]]);
+        // HSV assumes a nonnegative value axis. Lift only the achromatic offset
+        // for scene inputs, then restore it; neutral settings retain signed RGB.
+        let offset = if image.is_scene() {
+            pixel[..3].iter().copied().fold(0.0, f32::min)
+        } else {
+            0.0
+        };
+        let rgb = if image.is_scene() {
+            [pixel[0] - offset, pixel[1] - offset, pixel[2] - offset]
+        } else {
+            [pixel[0], pixel[1], pixel[2]]
+        };
+        let magnitude = rgb.iter().copied().fold(0.0, f32::max);
+        let mut hsv = if image.is_scene() && magnitude > 0.0 {
+            let mut hsv = rgb_to_hsv(rgb.map(|value| value / magnitude));
+            hsv[2] *= magnitude;
+            hsv
+        } else {
+            rgb_to_hsv(rgb)
+        };
         let weight = (1.0 - hue_distance(hsv[0], hue) / width).clamp(0.0, 1.0);
+        let gain = 1.0 + lightness * weight;
         hsv[1] = (hsv[1] * (1.0 + saturation * weight)).max(0.0);
-        hsv[2] *= 1.0 + lightness * weight;
-        let rgb = hsv_to_rgb(hsv);
+        hsv[2] *= gain;
+        let rgb = if image.is_scene() {
+            hsv_to_rgb(hsv).map(|value| value + offset * gain)
+        } else {
+            hsv_to_rgb(hsv)
+        };
         [rgb[0], rgb[1], rgb[2], pixel[3]]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_selective_color(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1077,7 +1102,7 @@ fn evaluate_selective_color(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn matrix_parameter(parameters: &Parameters, row: usize, column: usize) -> Result<f32, NodeError> {
@@ -1087,7 +1112,7 @@ fn matrix_parameter(parameters: &Parameters, row: usize, column: usize) -> Resul
 }
 
 fn evaluate_channel_mixer(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1112,14 +1137,15 @@ fn evaluate_channel_mixer(
         });
         [rgb[0], rgb[1], rgb[2], pixel[3]]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_perceptual_saturation(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let amount = bounded_float(parameters, "amount", 1.0, -4.0, 8.0)?;
     let output = map_region(image, context, |_x, _y, pixel| {
         let luma = luminance(pixel);
@@ -1130,11 +1156,11 @@ fn evaluate_perceptual_saturation(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_gamut_compression(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1149,7 +1175,7 @@ fn evaluate_gamut_compression(
         }
         pixel
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn parse_lut_points(value: &str) -> Result<Vec<(f32, f32)>, NodeError> {
@@ -1203,8 +1229,23 @@ fn evaluate_points(points: &[(f32, f32)], value: f32) -> f32 {
     points[points.len() - 1].1
 }
 
+fn scene_points(points: &[(f32, f32)], value: f32) -> f32 {
+    let ends = if value < points[0].0 {
+        Some((points[0], points[1]))
+    } else if value > points[points.len() - 1].0 {
+        Some((points[points.len() - 2], points[points.len() - 1]))
+    } else {
+        None
+    };
+    if let Some(((x0, y0), (x1, y1))) = ends {
+        y0 + (value - x0) * (y1 - y0) / (x1 - x0)
+    } else {
+        evaluate_points(points, value)
+    }
+}
+
 fn evaluate_lut(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1213,16 +1254,20 @@ fn evaluate_lut(
     let output = map_region(image, context, |_x, _y, pixel| {
         let mut output = pixel;
         for channel in &mut output[..3] {
-            let mapped = evaluate_points(&points, (*channel).clamp(0.0, 1.0));
+            let mapped = if image.is_scene() {
+                scene_points(&points, *channel)
+            } else {
+                evaluate_points(&points, (*channel).clamp(0.0, 1.0))
+            };
             *channel += (mapped - *channel) * amount;
         }
         output
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_film_curve(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1237,12 +1282,16 @@ fn evaluate_film_curve(
     let output = map_region(image, context, |_x, _y, pixel| {
         let mut output = pixel;
         for channel in &mut output[..3] {
-            let mapped = evaluate_points(&points, (*channel * multiplier).clamp(0.0, 1.0));
+            let mapped = if image.is_scene() {
+                scene_points(&points, *channel * multiplier)
+            } else {
+                evaluate_points(&points, (*channel * multiplier).clamp(0.0, 1.0))
+            };
             *channel += (mapped - *channel) * amount;
         }
         output
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn hash_noise(x: u32, y: u32, seed: u64, channel: u32) -> f32 {
@@ -1259,7 +1308,7 @@ fn hash_noise(x: u32, y: u32, seed: u64, channel: u32) -> f32 {
 }
 
 fn evaluate_grain(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1272,8 +1321,9 @@ fn evaluate_grain(
     };
     let monochrome = boolean_parameter_value(parameters, "monochrome", false)?;
     let output = map_region(image, context, |x, y, pixel| {
-        let cell_x = (x as f32 / size).floor().max(0.0) as u32;
-        let cell_y = (y as f32 / size).floor().max(0.0) as u32;
+        let scale = image.coordinate_scale();
+        let cell_x = (x as f32 * scale as f32 / size).floor().max(0.0) as u32;
+        let cell_y = (y as f32 * scale as f32 / size).floor().max(0.0) as u32;
         let shared = hash_noise(cell_x, cell_y, seed, 0);
         [
             pixel[0]
@@ -1300,14 +1350,15 @@ fn evaluate_grain(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_halation(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let amount = bounded_float(parameters, "amount", 0.2, 0.0, 4.0)?;
     let threshold = bounded_float(parameters, "threshold", 0.75, 0.0, 64.0)?;
     let radius = integer_parameter_value(parameters, "radius", 2, MAX_RADIUS)?;
@@ -1323,14 +1374,15 @@ fn evaluate_halation(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_bloom(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let amount = bounded_float(parameters, "amount", 0.25, 0.0, 4.0)?;
     let threshold = bounded_float(parameters, "threshold", 0.75, 0.0, 64.0)?;
     let radius = integer_parameter_value(parameters, "radius", 3, MAX_RADIUS)?;
@@ -1345,11 +1397,11 @@ fn evaluate_bloom(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_dye_layer(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
@@ -1365,14 +1417,15 @@ fn evaluate_dye_layer(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
 fn evaluate_split_toning(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let shadow_hue = bounded_float(parameters, "shadow_hue", 0.6, 0.0, 1.0)?;
     let highlight_hue = bounded_float(parameters, "highlight_hue", 0.1, 0.0, 1.0)?;
     let shadow_saturation = bounded_float(parameters, "shadow_saturation", 0.0, 0.0, 1.0)?;
@@ -1391,10 +1444,10 @@ fn evaluate_split_toning(
             pixel[3],
         ]
     })?;
-    Ok(NodeResult::single("image", Value::Image(output)))
+    Ok(image.result("image", output))
 }
 
-fn image_region(image: &Image, context: &EvaluationContext) -> Result<Image, NodeError> {
+fn image_region(image: &RgbInput<'_>, context: &EvaluationContext) -> Result<Value, NodeError> {
     let region = source_region(image, context);
     let mut pixels = Vec::with_capacity(checked_pixel_count(region)?);
     for y in 0..region.height {
@@ -1446,7 +1499,11 @@ impl NodeInstance for AnalysisNode {
     }
 }
 
-fn luminances(image: &Image, context: &EvaluationContext) -> Result<(Region, Vec<f32>), NodeError> {
+fn luminances(
+    image: &RgbInput<'_>,
+    context: &EvaluationContext,
+) -> Result<(Region, Vec<f32>), NodeError> {
+    let luminance = luminance_function(image)?;
     let region = source_region(image, context);
     let mut values = Vec::with_capacity(checked_pixel_count(region)?);
     for y in 0..region.height {
@@ -1462,7 +1519,10 @@ fn luminances(image: &Image, context: &EvaluationContext) -> Result<(Region, Vec
     Ok((region, values))
 }
 
-fn evaluate_histogram(image: &Image, context: &EvaluationContext) -> Result<NodeResult, NodeError> {
+fn evaluate_histogram(
+    image: &RgbInput<'_>,
+    context: &EvaluationContext,
+) -> Result<NodeResult, NodeError> {
     let (_region, mut values) = luminances(image, context)?;
     if values.is_empty() {
         return Err(NodeError::Message(
@@ -1497,17 +1557,24 @@ fn evaluate_histogram(image: &Image, context: &EvaluationContext) -> Result<Node
     ))
 }
 
-fn evaluate_clipping(image: &Image, context: &EvaluationContext) -> Result<NodeResult, NodeError> {
-    let region = source_region(image, context);
+fn evaluate_clipping(
+    image: &RgbInput<'_>,
+    context: &EvaluationContext,
+) -> Result<NodeResult, NodeError> {
+    let region = if image.is_scene() {
+        image.full_region()
+    } else {
+        source_region(image, context)
+    };
     let mut values = Vec::with_capacity(checked_pixel_count(region)?);
     let mut low = 0_u32;
     let mut high = 0_u32;
     for y in 0..region.height {
         for x in 0..region.width {
             let pixel = image
-                .pixel_global(region.x + x, region.y + y)
+                .pixel_full(region.x + x, region.y + y)
                 .ok_or_else(|| {
-                    NodeError::Message("requested region was outside the image".to_owned())
+                    NodeError::Message("requested clipping region was outside the image".to_owned())
                 })?;
             let is_low = pixel[..3].iter().any(|value| *value <= 0.0);
             let is_high = pixel[..3].iter().any(|value| *value >= 1.0);
@@ -1531,10 +1598,11 @@ fn evaluate_clipping(image: &Image, context: &EvaluationContext) -> Result<NodeR
 }
 
 fn evaluate_noise(
-    image: &Image,
+    image: &RgbInput<'_>,
     parameters: &Parameters,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let radius = integer_parameter_value(parameters, "radius", 1, MAX_RADIUS)?;
     let (region, values) = luminances(image, context)?;
     if values.is_empty() {
@@ -1562,7 +1630,11 @@ fn evaluate_noise(
     ))
 }
 
-fn evaluate_sharpness(image: &Image, context: &EvaluationContext) -> Result<NodeResult, NodeError> {
+fn evaluate_sharpness(
+    image: &RgbInput<'_>,
+    context: &EvaluationContext,
+) -> Result<NodeResult, NodeError> {
+    let luminance = luminance_function(image)?;
     let (region, values) = luminances(image, context)?;
     if values.is_empty() {
         return Err(NodeError::Message(
@@ -1587,7 +1659,7 @@ fn evaluate_sharpness(image: &Image, context: &EvaluationContext) -> Result<Node
 }
 
 fn evaluate_dynamic_range(
-    image: &Image,
+    image: &RgbInput<'_>,
     context: &EvaluationContext,
 ) -> Result<NodeResult, NodeError> {
     let (_region, values) = luminances(image, context)?;
@@ -2004,7 +2076,7 @@ pub fn descriptors() -> Vec<NodeDescriptor> {
         }
         let _ = operation;
     }
-    descriptors
+    descriptors.into_iter().map(with_scene_ports).collect()
 }
 
 fn factory_for_type(type_id: &str) -> Box<dyn NodeInstance> {
@@ -2135,14 +2207,18 @@ mod tests {
 
     fn naive_average_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
         if radius == 0 {
-            return sample_nearest(image, i64::from(x), i64::from(y));
+            return sample_nearest(&RgbInput::Image(image), i64::from(x), i64::from(y));
         }
         let radius = i64::from(radius);
         let mut total = [0.0; 4];
         let mut count = 0.0;
         for offset_y in -radius..=radius {
             for offset_x in -radius..=radius {
-                let pixel = sample_nearest(image, i64::from(x) + offset_x, i64::from(y) + offset_y);
+                let pixel = sample_nearest(
+                    &RgbInput::Image(image),
+                    i64::from(x) + offset_x,
+                    i64::from(y) + offset_y,
+                );
                 for channel in 0..4 {
                     total[channel] += pixel[channel];
                 }
@@ -2155,7 +2231,7 @@ mod tests {
     #[test]
     fn summed_area_averages_match_naive_reference_for_nonzero_origin() {
         let image = neighborhood_test_image(9, 7, (17, 23));
-        let summed_area = IntegralImage::new(&image).unwrap();
+        let summed_area = IntegralImage::new(&RgbInput::Image(&image)).unwrap();
 
         for radius in [1, 2, 4] {
             for y in 23..30 {
@@ -2178,7 +2254,7 @@ mod tests {
         let width = 64;
         let height = 64;
         let image = neighborhood_test_image(width, height, (31, 47));
-        let summed_area = IntegralImage::new(&image).unwrap();
+        let summed_area = IntegralImage::new(&RgbInput::Image(&image)).unwrap();
 
         for y in 47..(47 + height) {
             for x in 31..(31 + width) {

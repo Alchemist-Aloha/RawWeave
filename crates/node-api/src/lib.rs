@@ -11,6 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 mod imageset;
+mod rgb;
+pub use rgb::{RgbInput, scene_output_id, with_scene_ports};
 
 pub use imageset::{
     AlignmentProvenance, AlignmentState, AlignmentTransform, ImageSet, ImageSetError,

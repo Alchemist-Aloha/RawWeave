@@ -103,9 +103,9 @@ From the repository root, run:
 ./scripts/build-all-in-one.sh
 ```
 
-The script uses pnpm to build the frontend, builds the Tauri release binary with `custom-protocol`, and copies it to `./bin/rawweave-desktop`. The `bin/` directory is ignored by Git. Use this script when delivering a desktop executable so the binary embeds the current frontend assets.
+The script builds the native GPUI release binary and copies it to `./bin/rawweave-desktop`. The `bin/` directory is ignored by Git. It does not build Tauri or the web frontend. Use this script when delivering the default desktop executable.
 
-On Linux systems affected by WebKitGTK's DMABUF renderer, launch the built binary with `./scripts/run-rawweave.sh`. This sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` only for RawWeave and preserves an explicit value already set by the caller.
+Launch it with `./scripts/run-rawweave.sh [image-path]`; arguments and environment are forwarded unchanged. No WebKitGTK renderer setting is needed for GPUI. Run `python3 scripts/test_desktop_scripts.py` to check the default target and launcher without compiling or opening a window.
 
 ### Root Rust workspace
 
@@ -152,7 +152,7 @@ pnpm run test:e2e:native
 
 ### Native GPUI migration
 
-The native frontend is not yet feature-equivalent to Tauri. See `apps/desktop-gpui/README.md` for implemented surfaces and remaining parity gates. GPUI uses native GPU composition with direct BGRA image uploads; RAW processing remains CPU-based. Preserve the Tauri application until migration coverage is complete.
+GPUI is the default desktop target, but is not yet feature-equivalent to Tauri. See `apps/desktop-gpui/README.md` for implemented surfaces and remaining parity gates. GPUI uses native GPU composition with direct BGRA image uploads; RAW processing remains CPU-based. Preserve the Tauri application until migration coverage is complete.
 
 ```sh
 cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml --workspace

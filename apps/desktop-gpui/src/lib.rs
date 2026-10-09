@@ -362,11 +362,7 @@ impl Session {
                 } else {
                     image.sample_mip(mip).map_err(|e| e.to_string())?
                 };
-                PreviewFrame::from_pixels(
-                    selected.dimensions(),
-                    full,
-                    selected.pixels().iter().copied(),
-                )
+                image_display_frame(&selected, full)
             }
             Value::SceneLinearRGB(scene) => {
                 let display = SrgbDisplayTransform
@@ -379,6 +375,34 @@ impl Session {
         }
     }
 }
+fn image_display_frame(image: &Image, full: Dimensions) -> Result<PreviewFrame, String> {
+    if image.color_metadata().domain != ColorDomain::LinearSrgb {
+        return PreviewFrame::from_pixels(image.dimensions(), full, image.pixels().iter().copied());
+    }
+    let scene = rawweave_color::SceneLinearRGB::new(
+        image.dimensions(),
+        image
+            .pixels()
+            .iter()
+            .map(|[r, g, b, _]| [*r, *g, *b])
+            .collect(),
+        rawweave_color::WorkingSpace::Srgb,
+    )
+    .map_err(|error| error.to_string())?;
+    let display = SrgbDisplayTransform
+        .transform(&scene)
+        .map_err(|error| error.to_string())?;
+    PreviewFrame::from_pixels(
+        image.dimensions(),
+        full,
+        display
+            .pixels()
+            .iter()
+            .zip(image.pixels())
+            .map(|([r, g, b], source)| [*r, *g, *b, source[3]]),
+    )
+}
+
 fn rgb_image(
     dimensions: Dimensions,
     pixels: &[[f32; 3]],
@@ -811,7 +835,14 @@ mod tests {
         let mut session = Session::default();
         session
             .attach(Source::Ordinary(
-                Image::from_pixels(3, 1, vec![[1.0, 0.0, 0.25, 0.5]; 3]).unwrap(),
+                Image::from_pixels_with_metadata(
+                    3,
+                    1,
+                    vec![[1.0, 0.0, 0.25, 0.5]; 3],
+                    PixelFormat::Rgba32Float,
+                    ColorDomain::Srgb,
+                )
+                .unwrap(),
             ))
             .unwrap();
         let frame = session.preview(1, &CancellationToken::new()).unwrap();
@@ -823,6 +854,14 @@ mod tests {
         assert!(session.preview(0, &cancelled).is_err());
         assert!(session.preview(13, &CancellationToken::new()).is_err());
     }
+    #[test]
+    fn linear_image_preview_encodes_rgb_once_and_keeps_alpha() {
+        let source = Image::from_pixels(1, 1, vec![[0.25, 0.5, 0.75, 0.5]]).unwrap();
+        let frame = image_display_frame(&source, source.dimensions()).unwrap();
+        assert_eq!(frame.bgra, [225, 188, 137, 128]);
+        assert_eq!(source.pixels(), &[[0.25, 0.5, 0.75, 0.5]]);
+    }
+
     #[test]
     fn workflow_load_clears_runtime_source_and_reattaches_without_rebuilding() {
         let mut session = Session::default();
@@ -871,6 +910,51 @@ mod tests {
         );
         assert!(session.source.is_none());
     }
+    #[test]
+    fn native_raw_scene_nodes_and_image_conversion_preserve_preview_bounds() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-data/images/raw/nikon-d70s-12bit-lossy.nef");
+        let mut session = Session::default();
+        session.attach(Source::open(&path).unwrap()).unwrap();
+        session.editor.add_node("bright", "core.exposure").unwrap();
+        session
+            .editor
+            .set_node_parameter("bright", "exposure", 1.0_f32.into())
+            .unwrap();
+        session
+            .editor
+            .connect("camera-transform", "scene", "bright", "scene")
+            .unwrap();
+        session.select_target("bright", "scene").unwrap();
+        let scene = session.preview(2, &CancellationToken::new()).unwrap();
+        assert_eq!(scene.full_dimensions, Dimensions::new(3040, 2014));
+        assert_eq!(scene.dimensions, Dimensions::new(760, 504));
+        session
+            .editor
+            .add_node("convert", "core.scene-linear-to-image")
+            .unwrap();
+        session
+            .editor
+            .connect("bright", "scene", "convert", "scene")
+            .unwrap();
+        session.select_target("convert", "image").unwrap();
+        let converted = session.preview(2, &CancellationToken::new()).unwrap();
+        assert_eq!(converted.full_dimensions, scene.full_dimensions);
+        assert_eq!(converted.dimensions, scene.dimensions);
+        // The Image preview uses mip filtering; RAW scene previews sample the sensor grid.
+        // Compare full-resolution displays, not these different preview reduction policies.
+        let image_full = session.preview(0, &CancellationToken::new()).unwrap();
+        session.select_target("bright", "scene").unwrap();
+        let scene_full = session.preview(0, &CancellationToken::new()).unwrap();
+        assert!(
+            image_full
+                .bgra
+                .iter()
+                .zip(&scene_full.bgra)
+                .all(|(a, b)| a.abs_diff(*b) <= 1)
+        );
+    }
+
     #[test]
     fn licensed_raw_export_matches_display_without_double_encoding() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))

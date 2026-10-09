@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 exif = { package = "kamadak-exif", version = "0.6.1" }
-rawloader = "0.37.2"
+rawler = "0.8.0"
+rawloader = "0.37.2" # Legacy rotated Fuji sensors: rawler 0.8 dummy decoding panics.
 rawweave-image.workspace = true
 serde.workspace = true
 thiserror.workspace = true

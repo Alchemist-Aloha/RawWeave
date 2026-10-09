@@ -414,6 +414,7 @@ fn round_trip_display(value: f32, factor: f64, min_precision: usize) -> String {
 pub fn transfer_points(
     kind: &str,
     values: &std::collections::BTreeMap<String, ParameterValue>,
+    scene: bool,
 ) -> Result<Vec<(f32, f32)>, String> {
     let number = |key: &str, fallback: f32| match values.get(key) {
         Some(ParameterValue::Float(value)) => *value,
@@ -439,9 +440,12 @@ pub fn transfer_points(
         for i in 0..=64 {
             let x = f64::from(black.min(0.0))
                 + f64::from(white.max(1.0) - black.min(0.0)) * f64::from(i) / 64.0;
-            let y = ((x - f64::from(black)) / (f64::from(white) - f64::from(black)))
-                .clamp(0.0, 1.0)
-                .powf(1.0 / f64::from(gamma));
+            let normalized = (x - f64::from(black)) / (f64::from(white) - f64::from(black));
+            let y = if scene {
+                normalized.signum() * normalized.abs().powf(1.0 / f64::from(gamma))
+            } else {
+                normalized.clamp(0.0, 1.0).powf(1.0 / f64::from(gamma))
+            };
             points.push((x as f32, y as f32));
         }
     } else if matches!(kind, "core.map-range" | "core.clamp") {
@@ -740,21 +744,37 @@ mod tests {
     }
 
     #[test]
+    fn scene_levels_reference_uses_signed_unclipped_gamma() {
+        let values = [
+            ("black_point".into(), ParameterValue::Float(0.25)),
+            ("white_point".into(), ParameterValue::Float(0.75)),
+            ("gamma".into(), ParameterValue::Float(2.0)),
+        ]
+        .into();
+        let scene = transfer_points("core.levels", &values, true).unwrap();
+        assert!(scene.first().unwrap().1 < 0.0);
+        assert!(scene.last().unwrap().1 > 1.0);
+        let image = transfer_points("core.levels", &values, false).unwrap();
+        assert_eq!(image.first().unwrap().1, 0.0);
+        assert_eq!(image.last().unwrap().1, 1.0);
+    }
+
+    #[test]
     fn curve_list_tools_preserve_hdr_and_locked_endpoints() {
-        let levels = transfer_points("core.levels", &Default::default()).unwrap();
+        let levels = transfer_points("core.levels", &Default::default(), false).unwrap();
         assert_eq!(levels[32], (0.5, 0.5));
         let values = [
             ("in_min".into(), ParameterValue::Float(1.0)),
             ("in_max".into(), ParameterValue::Float(0.0)),
         ]
         .into();
-        let mapped = transfer_points("core.map-range", &values).unwrap();
+        let mapped = transfer_points("core.map-range", &values, false).unwrap();
         assert!(
             mapped.first().unwrap().1 > 1.0 && mapped.last().unwrap().1 < 0.0,
             "reversed ranges must extrapolate, not clip"
         );
         let values = [("black_point".into(), ParameterValue::Float(2.0))].into();
-        assert!(transfer_points("core.levels", &values).is_err());
+        assert!(transfer_points("core.levels", &values, false).is_err());
         assert_eq!(
             move_curve_point("0,0;0.5,0.7;1,1", false, 1, 0.6, 2.0).unwrap(),
             "0,0;0.6,2;1,1"

@@ -857,8 +857,19 @@ impl Editor {
             node.type_id.as_str(),
             "core.levels" | "core.map-range" | "core.clamp"
         ) {
-            view = view.child("Parameter transfer · input to output");
-            view = match rawweave_gpui::parameters::transfer_points(&node.type_id, &values) {
+            let scene = self
+                .session
+                .editor
+                .graph()
+                .edges()
+                .iter()
+                .any(|edge| edge.to_node == node.id && edge.to_port == "scene");
+            view = view.child(if scene {
+                "Scene transfer · signed, unclipped"
+            } else {
+                "Parameter transfer · input to output"
+            });
+            view = match rawweave_gpui::parameters::transfer_points(&node.type_id, &values, scene) {
                 Ok(points) => view.child(reference_diagram(points)),
                 Err(error) => view.child(div().text_color(rgb(t::WAX_RED_INK)).child(error)),
             };

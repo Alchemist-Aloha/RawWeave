@@ -6,13 +6,15 @@ byte size, SHA-256 digest, and intended coverage.
 
 ## Contents
 
-- `raw/`: three CC0 camera files from [raw.pixls.us](https://raw.pixls.us/):
-  Nikon NEF (12-bit compressed Bayer), Sony ARW (14-bit compressed Bayer), and Fuji RAF.
+- `raw/`: seven CC0 camera files from [raw.pixls.us](https://raw.pixls.us/):
+  Nikon NEF, Sony ARW, legacy Fuji RAF, X-T4 lossless-compressed X-Trans RAF,
+  Canon EOS Kiss F CR2, and EOS-1D X Mark III CR3 RAW/C-RAW.
 - `common/`: two public-domain JPEG photographs from Wikimedia Commons and six small
   [PngSuite](https://github.com/lunapaint/pngsuite) format fixtures covering RGB, RGBA,
   16-bit grayscale+alpha, indexed transparency, interlacing, odd dimensions, and 1×1 input.
 
-The selected RAW files are verified against RawWeave's production `RawloaderDecoder`.
+The selected RAW files are verified against RawWeave's production `RawlerDecoder` (also exposed under the legacy
+`RawloaderDecoder` name).
 The common images are verified through the Tauri image loader. These integration tests ensure
 that the files are useful to this codebase rather than merely valid downloads.
 

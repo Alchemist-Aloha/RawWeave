@@ -140,7 +140,9 @@ impl crate::Session {
             .graph()
             .edges()
             .iter()
-            .find(|edge| edge.to_node.as_str() == id && edge.to_port == "image")
+            .find(|edge| {
+                edge.to_node.as_str() == id && matches!(edge.to_port.as_str(), "image" | "scene")
+            })
             .map(|edge| (edge.from_node.as_str().to_owned(), edge.from_port.clone()))
     }
     /// Read the connected input at mip 0 for accurate dimensions/origin, then upload only a bounded thumbnail.
@@ -199,6 +201,58 @@ impl crate::Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn input_helpers_follow_scene_wires_through_pro_nodes() {
+        use rawweave_raw::{DeterministicCorpus, DeterministicDecoder};
+        let mut session = crate::Session {
+            editor: rawweave_project::EditorCore::new_with_raw_decoder(DeterministicDecoder::new(
+                DeterministicCorpus::bayer_12_bit(),
+            )),
+            ..Default::default()
+        };
+        session
+            .attach(crate::Source::Raw {
+                bytes: std::sync::Arc::new(vec![0]),
+                path: "synthetic.nef".into(),
+                dimensions: Dimensions::new(4, 2),
+            })
+            .unwrap();
+        session
+            .editor
+            .add_node("detail", "pro.detail-separation")
+            .unwrap();
+        session
+            .editor
+            .add_node("gradient", "core.mask-linear-gradient")
+            .unwrap();
+        session
+            .editor
+            .connect("camera-transform", "scene", "detail", "scene")
+            .unwrap();
+        session
+            .editor
+            .connect("detail", "base_scene", "gradient", "scene")
+            .unwrap();
+        assert_eq!(
+            session.image_input_target("gradient"),
+            Some(("detail".into(), "base_scene".into()))
+        );
+        let preview = session
+            .image_input_preview("gradient", &rawweave_rendering::CancellationToken::new())
+            .unwrap();
+        assert_eq!(preview.origin, (0, 0));
+        assert_eq!(preview.frame.full_dimensions, Dimensions::new(4, 2));
+        assert!(preview.frame.bgra.iter().any(|byte| *byte > 0));
+        session.select_target("detail", "detail_scene").unwrap();
+        assert_eq!(
+            session
+                .preview(1, &rawweave_rendering::CancellationToken::new())
+                .unwrap()
+                .full_dimensions,
+            Dimensions::new(4, 2)
+        );
+    }
+
     #[test]
     fn input_helpers_read_upstream_dimensions_and_origins_not_the_source_or_crop_output() {
         let mut session = crate::Session::default();

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rawweave-color.workspace = true
 rawweave-image.workspace = true
 rawweave-node-api.workspace = true
 

@@ -79,7 +79,12 @@ describe('workflow backend in the real Tauri app', () => {
   it('exposes the workflow command bridge, descriptors, hash, and dependency report', async () => {
     const descriptors = await invoke('node_descriptors');
     const typeIds = descriptors.map((descriptor) => descriptor.type_id);
-    expect(typeIds).toEqual(expect.arrayContaining(['core.image-input', 'core.output', 'core.exposure', 'core.invert']));
+    expect(typeIds).toEqual(expect.arrayContaining(['core.image-input', 'core.output', 'core.exposure', 'core.invert', 'core.scene-linear-to-image']));
+    for (const id of ['core.exposure', 'core.local-exposure', 'core.blur', 'core.resize', 'core.color-matrix', 'core.output']) {
+      const descriptor = descriptors.find((node) => node.type_id === id);
+      expect(descriptor.inputs.find((port) => port.id === 'scene').data_type).toBe('color.SceneLinearRGB');
+      expect(descriptor.outputs.find((port) => port.id === 'image').data_type).toBe('core.Image');
+    }
 
     const hash = await invoke('workflow_hash');
     expect(hash).toMatch(/^[0-9a-f]{64}$/);

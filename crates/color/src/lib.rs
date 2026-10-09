@@ -28,6 +28,22 @@ pub enum WorkingSpace {
     Custom(String),
 }
 
+impl WorkingSpace {
+    /// Relative Y weights from the built-in working-space definition; unknown
+    /// camera/custom primaries require a supplied transform before luma analysis.
+    pub fn luminance_coefficients(&self) -> Result<[f32; 3], ColorError> {
+        if *self == Self::Srgb {
+            return Ok([0.2126, 0.7152, 0.0722]);
+        }
+        working_space_to_xyz(self)
+            .map(|matrix| matrix[1])
+            .ok_or_else(|| ColorError::UnsupportedWorkingSpace {
+                from: self.clone(),
+                to: WorkingSpace::Srgb,
+            })
+    }
+}
+
 /// Errors raised while constructing or transforming color buffers.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ColorError {

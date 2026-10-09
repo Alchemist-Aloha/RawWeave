@@ -12,6 +12,63 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+struct ImageBranch(Arc<AtomicUsize>);
+impl NodeInstance for ImageBranch {
+    fn evaluate(
+        &self,
+        _: &Inputs,
+        _: &Parameters,
+        _: &EvaluationContext,
+    ) -> Result<NodeResult, NodeError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(NodeResult::single(
+            "image",
+            Value::Image(rawweave_image::Image::from_pixels(1, 1, vec![[2.0; 4]]).unwrap()),
+        ))
+    }
+}
+
+#[test]
+fn singleton_image_results_cache_with_an_alternative_scene_output() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let mut registry = NodeRegistry::default();
+    let mut descriptor = NodeDescriptor::new("test.image-branch", "Image Branch");
+    descriptor.outputs = vec![
+        PortDescriptor::output("scene", "Scene", "color.SceneLinearRGB"),
+        PortDescriptor::output("image", "Image", "core.Image"),
+    ];
+    registry
+        .register_factory(descriptor, move || Box::new(ImageBranch(counter.clone())))
+        .unwrap();
+    let mut graph = Graph::new(registry);
+    graph
+        .add_node(NodeId::from("branch"), "test.image-branch")
+        .unwrap();
+    let Value::Image(first) = graph
+        .evaluate(
+            &NodeId::from("branch"),
+            "image",
+            &EvaluationContext::default(),
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    let Value::Image(second) = graph
+        .evaluate(
+            &NodeId::from("branch"),
+            "image",
+            &EvaluationContext::default(),
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(first.pixels().as_ptr(), second.pixels().as_ptr());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 struct TypedSource(Arc<AtomicUsize>);
 impl NodeInstance for TypedSource {
     fn evaluate(

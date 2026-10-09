@@ -23,6 +23,12 @@ and covered by tests, but nothing has been validated against a wide camera
 matrix or real user workflows. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the
 milestone definitions.
 
+**GPUI is the default desktop application.** Its native graph editor, RAW viewer,
+and export path do not use Tauri or a WebView. Desktop feature parity is incomplete;
+see [`apps/desktop-gpui/README.md`](apps/desktop-gpui/README.md) for remaining gates.
+The legacy Tauri application is retained for migration coverage, not built by the
+default desktop scripts.
+
 ## Architecture
 
 Processing lives in Rust nodes and reusable crates. The frontend edits graphs,
@@ -51,8 +57,9 @@ node-packs/pro-tools/    denoise, sharpen, deconvolution, defringe, LUT, grain, 
                          halation, vignetting, distortion, clipping, histogram
 node-packs/ai/           img2img, inpaint, upscale (via provider adapters)
 
-apps/desktop/src-tauri/  Tauri commands, source state, previews, URI protocol
-apps/desktop/frontend/   React 19 + TypeScript + React Flow editor frontend
+apps/desktop-gpui/       default native GPUI desktop (separate workspace)
+apps/desktop/src-tauri/  legacy Tauri boundary retained during migration
+apps/desktop/frontend/   legacy React editor and shared presentation assets
 ```
 
 The first-party node packs use the same node API intended for third parties. If a
@@ -61,22 +68,19 @@ application core.
 
 ## Getting started
 
-Prerequisites: a Rust toolchain (edition 2024 workspace), Node.js with pnpm, and
-the [Tauri 2 system dependencies](https://tauri.app/start/prerequisites/) for
-your platform (on Linux: WebKitGTK 4.1 and the usual GTK build packages).
+Prerequisites: Rust 1.89 or newer and the native GPUI platform dependencies.
+On Linux, use a working X11/Wayland session, Vulkan driver, fonts, and a desktop
+file-picker portal. Node.js, pnpm, WebKitGTK, and a Vite server are not needed for
+the default desktop build.
 
 ```sh
-# frontend dependencies
-cd apps/desktop/frontend && pnpm install --frozen-lockfile && cd -
-
-# development: Vite dev server on :5173, then the Tauri shell in dev mode
-cd apps/desktop/frontend && pnpm run dev
-cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo run --locked --manifest-path apps/desktop-gpui/Cargo.toml -p rawweave-gpui -- \
+  test-data/images/common/gracie-allen-portrait.jpg
 ```
 
-Without the `custom-protocol` feature the shell loads `devUrl`
-(`http://localhost:5173`), so the Vite server must be running first. With the
-Tauri CLI installed, `cargo tauri dev` in `apps/desktop/src-tauri` runs both.
+Without a path argument, use **Open Image**. See the
+[native desktop README](apps/desktop-gpui/README.md) for platform notes and
+implemented surfaces.
 
 ### Example workflows
 
@@ -88,12 +92,12 @@ Open a workflow JSON first, then choose a compatible image to attach to it.
 
 ```sh
 ./scripts/build-all-in-one.sh      # -> ./bin/rawweave-desktop
-./scripts/run-rawweave.sh          # launch (sets WEBKIT_DISABLE_DMABUF_RENDERER=1 on Linux)
+./scripts/run-rawweave.sh          # launch the native GPUI application
 ```
 
-The script builds the frontend with pnpm, builds the Tauri release binary with
-`custom-protocol` so the current frontend assets are embedded, and copies the
-binary to `bin/` (git-ignored).
+The script builds the GPUI release binary and copies it to the stable
+`bin/rawweave-desktop` path (git-ignored). No Tauri backend or web frontend is
+built. The launcher forwards image paths and caller environment unchanged.
 
 ## Testing
 
@@ -103,6 +107,13 @@ cargo fmt --all -- --check
 cargo test --locked --workspace --all-targets --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+# Default native desktop
+cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml --workspace
+cargo clippy --locked --manifest-path apps/desktop-gpui/Cargo.toml \
+  -p rawweave-gpui --all-targets --no-deps -- -D warnings
+python3 scripts/test_desktop_scripts.py
+
+# Legacy migration coverage (not the default app)
 # Tauri backend
 cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features
 

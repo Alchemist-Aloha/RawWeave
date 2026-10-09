@@ -4,10 +4,11 @@ use rawweave_image::{
 use rawweave_node_api::{
     EvaluationContext, ExecutionCapability, Inputs, NodeDescriptor, NodeError, NodeInstance,
     NodePack, NodeRegistry, NodeResult, ParameterDescriptor, ParameterValue, Parameters,
-    PortDescriptor, Value,
+    PortDescriptor, RgbInput, Value,
 };
 
 mod imageset;
+mod scene;
 
 /// Pixel budget for the region one node allocates in a single pass.
 ///
@@ -642,13 +643,14 @@ impl NodeInstance for LuminanceMask {
         _parameters: &Parameters,
         context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
-        let image = image_input(inputs, "image")?;
-        let region = requested_region(image.global_region(), context);
+        let image = RgbInput::from_inputs(inputs)?;
+        let weights = image.luminance_coefficients()?;
+        let region = raster_mask_region(image, context)?;
         let values = region_values(region, |x, y| {
             image
-                .pixel_global(x, y)
+                .pixel_full(x, y)
                 .map(|[red, green, blue, _]| {
-                    (0.2126 * red + 0.7152 * green + 0.0722 * blue).clamp(0.0, 1.0)
+                    (weights[0] * red + weights[1] * green + weights[2] * blue).clamp(0.0, 1.0)
                 })
                 .unwrap_or(0.0)
         });
@@ -668,8 +670,8 @@ impl NodeInstance for ColorQualifier {
         parameters: &Parameters,
         context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
-        let image = image_input(inputs, "image")?;
-        let region = requested_region(image.global_region(), context);
+        let image = RgbInput::from_inputs(inputs)?;
+        let region = raster_mask_region(image, context)?;
         let target = qualifier_color(parameters)?;
         let tolerance = float_parameter_alias(parameters, &["tolerance", "radius"], 0.1)?;
         let softness = float_parameter_alias(parameters, &["softness", "feather"], 0.0)?;
@@ -677,7 +679,7 @@ impl NodeInstance for ColorQualifier {
             return Err(NodeError::InvalidParameter("tolerance".to_owned()));
         }
         let values = region_values(region, |x, y| {
-            let Some([red, green, blue, _]) = image.pixel_global(x, y) else {
+            let Some([red, green, blue, _]) = image.pixel_full(x, y) else {
                 return 0.0;
             };
             let distance = ((red - target[0]).powi(2)
@@ -1078,19 +1080,7 @@ impl NodeInstance for ColorMatrix {
         context: &EvaluationContext,
     ) -> Result<NodeResult, NodeError> {
         let image = image_input(inputs, "image")?;
-        let mut matrix = [[0.0; 4]; 4];
-        for (row, values) in matrix.iter_mut().enumerate() {
-            for (column, value) in values.iter_mut().enumerate() {
-                let default = if row == column { 1.0 } else { 0.0 };
-                *value = matrix_parameter(parameters, row, column, default)?;
-            }
-        }
-        let offsets = [
-            optional_float_alias(parameters, &["offset_r", "offset_0"], 0.0)?,
-            optional_float_alias(parameters, &["offset_g", "offset_1"], 0.0)?,
-            optional_float_alias(parameters, &["offset_b", "offset_2"], 0.0)?,
-            optional_float_alias(parameters, &["offset_a", "offset_3"], 0.0)?,
-        ];
+        let (matrix, offsets) = matrix_parameters(parameters)?;
         let cpu_output = || {
             map_image_region(&image, context, |pixel| {
                 let mut output = [0.0; 4];
@@ -1140,11 +1130,14 @@ fn spatial_bounds(
     context: &EvaluationContext,
     parameters: &Parameters,
 ) -> Result<Region, NodeError> {
-    if let Some(value) = inputs.get("image") {
-        return match value {
-            Value::Image(image) => Ok(image.global_region()),
-            _ => Err(NodeError::InvalidParameter("image".to_owned())),
-        };
+    if inputs.contains_key("image") || inputs.contains_key("scene") {
+        let image = RgbInput::from_inputs(inputs)?;
+        let bounds = image.full_region();
+        if image.is_scene() && u64::from(bounds.width) * u64::from(bounds.height) > MAX_IMAGE_PIXELS
+        {
+            return Err(NodeError::InvalidParameter("dimensions".into()));
+        }
+        return Ok(bounds);
     }
     if let Some(image) = context.source_image.as_ref() {
         return Ok(image.global_region());
@@ -1528,6 +1521,17 @@ fn map_image_region(
     image_from_region(image, region, pixels)
 }
 
+fn raster_mask_region(
+    image: RgbInput<'_>,
+    context: &EvaluationContext,
+) -> Result<Region, NodeError> {
+    let region = requested_region(image.full_region(), context);
+    if u64::from(region.width) * u64::from(region.height) > MAX_IMAGE_PIXELS {
+        return Err(NodeError::InvalidParameter("dimensions".into()));
+    }
+    Ok(region)
+}
+
 fn requested_region(full: Region, context: &EvaluationContext) -> Region {
     match context.requested_region() {
         Some(region) => region
@@ -1553,10 +1557,21 @@ fn resample_nearest(image: &Image, target: Dimensions, x: u32, y: u32) -> [f32; 
 }
 
 fn blur_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
-    if image.width() == 0 || image.height() == 0 {
+    blur_pixel_with_bounds(image.global_region(), x, y, radius, |x, y| {
+        image.pixel_global(x, y).unwrap_or([0.0; 4])
+    })
+}
+
+fn blur_pixel_with_bounds(
+    bounds: Region,
+    x: u32,
+    y: u32,
+    radius: u32,
+    pixel_at: impl Fn(u32, u32) -> [f32; 4],
+) -> [f32; 4] {
+    if bounds.width == 0 || bounds.height == 0 {
         return [0.0; 4];
     }
-    let bounds = image.global_region();
     let min_x = bounds.x as i64;
     let min_y = bounds.y as i64;
     let max_x = bounds.end_x().unwrap_or(u32::MAX) as i64 - 1;
@@ -1568,7 +1583,7 @@ fn blur_pixel(image: &Image, x: u32, y: u32, radius: u32) -> [f32; 4] {
         for offset_x in -radius..=radius {
             let source_x = (x as i64 + offset_x).clamp(min_x, max_x) as u32;
             let source_y = (y as i64 + offset_y).clamp(min_y, max_y) as u32;
-            let pixel = image.pixel_global(source_x, source_y).unwrap_or([0.0; 4]);
+            let pixel = pixel_at(source_x, source_y);
             for channel in 0..4 {
                 total[channel] += pixel[channel];
             }
@@ -1637,16 +1652,33 @@ fn matrix_parameter(
     Ok(default)
 }
 
+fn matrix_parameters(parameters: &Parameters) -> Result<([[f32; 4]; 4], [f32; 4]), NodeError> {
+    let mut matrix = [[0.0; 4]; 4];
+    for (row, values) in matrix.iter_mut().enumerate() {
+        for (column, value) in values.iter_mut().enumerate() {
+            let default = if row == column { 1.0 } else { 0.0 };
+            *value = matrix_parameter(parameters, row, column, default)?;
+        }
+    }
+    let offsets = [
+        optional_float_alias(parameters, &["offset_r", "offset_0"], 0.0)?,
+        optional_float_alias(parameters, &["offset_g", "offset_1"], 0.0)?,
+        optional_float_alias(parameters, &["offset_b", "offset_2"], 0.0)?,
+        optional_float_alias(parameters, &["offset_a", "offset_3"], 0.0)?,
+    ];
+    Ok((matrix, offsets))
+}
+
 fn image_input_factory() -> Box<dyn NodeInstance> {
     Box::new(ImageInput)
 }
 
 fn exposure_factory() -> Box<dyn NodeInstance> {
-    Box::new(Exposure)
+    scene::compatible("core.exposure", Box::new(Exposure))
 }
 
 fn invert_factory() -> Box<dyn NodeInstance> {
-    Box::new(Invert)
+    scene::compatible("core.invert", Box::new(Invert))
 }
 
 fn painted_mask_factory() -> Box<dyn NodeInstance> {
@@ -1714,11 +1746,11 @@ fn mask_contract_factory() -> Box<dyn NodeInstance> {
 }
 
 fn local_exposure_factory() -> Box<dyn NodeInstance> {
-    Box::new(LocalExposure)
+    scene::compatible("core.local-exposure", Box::new(LocalExposure))
 }
 
 fn resize_factory() -> Box<dyn NodeInstance> {
-    Box::new(Resize)
+    scene::compatible("core.resize", Box::new(Resize))
 }
 
 fn crop_factory() -> Box<dyn NodeInstance> {
@@ -1726,37 +1758,52 @@ fn crop_factory() -> Box<dyn NodeInstance> {
 }
 
 fn blur_factory() -> Box<dyn NodeInstance> {
-    Box::new(Blur)
+    scene::compatible("core.blur", Box::new(Blur))
 }
 
 fn levels_factory() -> Box<dyn NodeInstance> {
-    Box::new(Levels)
+    scene::compatible("core.levels", Box::new(Levels))
 }
 
 fn curves_factory() -> Box<dyn NodeInstance> {
-    Box::new(Curves)
+    scene::compatible("core.curves", Box::new(Curves))
 }
 
 fn color_matrix_factory() -> Box<dyn NodeInstance> {
-    Box::new(ColorMatrix)
+    scene::compatible("core.color-matrix", Box::new(ColorMatrix))
 }
 
 fn output_factory() -> Box<dyn NodeInstance> {
-    Box::new(Output)
+    scene::compatible("core.output", Box::new(Output))
 }
 
 pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_api::RegistryError> {
     registry.register(image_input_descriptor(), image_input_factory)?;
-    registry.register(exposure_descriptor(), exposure_factory)?;
-    registry.register(invert_descriptor(), invert_factory)?;
-    registry.register(painted_mask_descriptor(), painted_mask_factory)?;
-    registry.register(linear_gradient_descriptor(), linear_gradient_factory)?;
-    registry.register(radial_gradient_descriptor(), radial_gradient_factory)?;
+    registry.register(scene::add_ports(exposure_descriptor()), exposure_factory)?;
+    registry.register(scene::add_ports(invert_descriptor()), invert_factory)?;
     registry.register(
-        mask_image_source_descriptor("core.mask-luminance", "Luminance Mask"),
+        scene::add_ports(painted_mask_descriptor()),
+        painted_mask_factory,
+    )?;
+    registry.register(
+        scene::add_ports(linear_gradient_descriptor()),
+        linear_gradient_factory,
+    )?;
+    registry.register(
+        scene::add_ports(radial_gradient_descriptor()),
+        radial_gradient_factory,
+    )?;
+    registry.register(
+        scene::add_ports(mask_image_source_descriptor(
+            "core.mask-luminance",
+            "Luminance Mask",
+        )),
         luminance_mask_factory,
     )?;
-    registry.register(color_qualifier_descriptor(), color_qualifier_factory)?;
+    registry.register(
+        scene::add_ports(color_qualifier_descriptor()),
+        color_qualifier_factory,
+    )?;
     registry.register(
         select_label_descriptor("core.select-label", "Select Label"),
         select_label_factory,
@@ -1802,14 +1849,21 @@ pub fn register_nodes(registry: &mut NodeRegistry) -> Result<(), rawweave_node_a
         radius_descriptor("core.mask-contract", "Mask Contract"),
         mask_contract_factory,
     )?;
-    registry.register(local_exposure_descriptor(), local_exposure_factory)?;
-    registry.register(resize_descriptor(), resize_factory)?;
+    registry.register(
+        scene::add_ports(local_exposure_descriptor()),
+        local_exposure_factory,
+    )?;
+    registry.register(scene::add_ports(resize_descriptor()), resize_factory)?;
     registry.register(crop_descriptor(), crop_factory)?;
-    registry.register(blur_descriptor(), blur_factory)?;
-    registry.register(levels_descriptor(), levels_factory)?;
-    registry.register(curves_descriptor(), curves_factory)?;
-    registry.register(color_matrix_descriptor(), color_matrix_factory)?;
-    registry.register(output_descriptor(), output_factory)?;
+    registry.register(scene::add_ports(blur_descriptor()), blur_factory)?;
+    registry.register(scene::add_ports(levels_descriptor()), levels_factory)?;
+    registry.register(scene::add_ports(curves_descriptor()), curves_factory)?;
+    registry.register(
+        scene::add_ports(color_matrix_descriptor()),
+        color_matrix_factory,
+    )?;
+    registry.register(scene::add_ports(output_descriptor()), output_factory)?;
+    registry.register(scene::conversion_descriptor(), scene::conversion_factory)?;
     imageset::register_nodes(registry)
 }
 

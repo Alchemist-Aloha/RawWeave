@@ -44,6 +44,72 @@
       "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
     },
     {
+      "path": "raw/fujifilm-x-t4-lossless.raf",
+      "kind": "raw",
+      "format": "RAF",
+      "camera": "Fujifilm X-T4",
+      "coverage": [
+        "X-Trans",
+        "lossless compressed"
+      ],
+      "byte_size": 27949104,
+      "sha256": "07ea642656074834ffe5c661870a612ffa2e80fc1218a05166ee966bbe5f6fae",
+      "download_url": "https://raw.pixls.us/getfile.php/3914/nice/Fujifilm%20-%20X-T4%20-%2014bit%2014bit%20lossless%20compressed%20(3:2).RAF",
+      "source_page": "https://raw.pixls.us/",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    {
+      "path": "raw/canon-eos-kiss-f.cr2",
+      "kind": "raw",
+      "format": "CR2",
+      "camera": "Canon EOS Kiss F",
+      "coverage": [
+        "Bayer",
+        "Canon CR2"
+      ],
+      "byte_size": 9436887,
+      "sha256": "12402b46f3cfaa66a671c7b6524c741dd17d6a2add3bc6cc41dcaf1570b0e722",
+      "download_url": "https://raw.pixls.us/getfile.php/6457/nice/Canon%20-%20EOS%20Kiss%20F%20-%20RAW%20(3:2).CR2",
+      "source_page": "https://raw.pixls.us/",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    {
+      "path": "raw/canon-eos-1dx-iii-craw.cr3",
+      "kind": "raw",
+      "format": "CR3",
+      "camera": "Canon EOS-1D X Mark III",
+      "coverage": [
+        "Bayer",
+        "Canon CR3",
+        "C-RAW"
+      ],
+      "byte_size": 10173528,
+      "sha256": "e5755d1414a2dd51fb0120b272058f00b0199861646070c00304d927eb119560",
+      "download_url": "https://raw.pixls.us/getfile.php/4654/nice/Canon%20-%20EOS-1D%20X%20Mark%20III%20-%203:2.CR3",
+      "source_page": "https://raw.pixls.us/",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    {
+      "path": "raw/canon-eos-1dx-iii-raw.cr3",
+      "kind": "raw",
+      "format": "CR3",
+      "camera": "Canon EOS-1D X Mark III",
+      "coverage": [
+        "Bayer",
+        "Canon CR3",
+        "RAW"
+      ],
+      "byte_size": 21288536,
+      "sha256": "8f38b9de90eaebefcd54022fcbfdf38e05fb86831c4c976c8ac05c599e63535b",
+      "download_url": "https://raw.pixls.us/getfile.php/4655/nice/Canon%20-%20EOS-1D%20X%20Mark%20III%20-%203:2.CR3",
+      "source_page": "https://raw.pixls.us/",
+      "license": "CC0-1.0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"
+    },
+    {
       "path": "common/beatles-press-conference.jpg",
       "kind": "common",
       "format": "JPEG",

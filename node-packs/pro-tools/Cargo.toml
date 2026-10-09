@@ -9,3 +9,4 @@ rawweave-image.workspace = true
 rawweave-node-api.workspace = true
 
 [dev-dependencies]
+rawweave-color.workspace = true

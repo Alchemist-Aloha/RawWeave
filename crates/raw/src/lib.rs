@@ -1,9 +1,8 @@
 //! RAW foundations and decoder adapters.
 //!
-//! The public decoder boundary deliberately does not expose `rawloader` types. This keeps
-//! graph nodes and projects independent of the vendor decoder selected for a build. The
-//! `RawloaderDecoder` below is an adapter and is compile-tested with invalid input; the
-//! deterministic corpus is the validation source for RAW algorithms in this crate.
+//! The public decoder boundary deliberately does not expose vendor types. `RawlerDecoder`
+//! extracts sensor data through dnglab's pure-Rust decoder; development stays in graph nodes.
+//! Real camera files cover decoder integration; deterministic fixtures validate algorithms.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -68,6 +67,22 @@ impl From<rawloader::Orientation> for Orientation {
             rawloader::Orientation::Transverse => Self::Transverse,
             rawloader::Orientation::Rotate270 => Self::Rotate270,
             rawloader::Orientation::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<rawler::Orientation> for Orientation {
+    fn from(value: rawler::Orientation) -> Self {
+        match value {
+            rawler::Orientation::Normal => Self::Normal,
+            rawler::Orientation::HorizontalFlip => Self::HorizontalFlip,
+            rawler::Orientation::Rotate180 => Self::Rotate180,
+            rawler::Orientation::VerticalFlip => Self::VerticalFlip,
+            rawler::Orientation::Transpose => Self::Transpose,
+            rawler::Orientation::Rotate90 => Self::Rotate90,
+            rawler::Orientation::Transverse => Self::Transverse,
+            rawler::Orientation::Rotate270 => Self::Rotate270,
+            rawler::Orientation::Unknown => Self::Unknown,
         }
     }
 }
@@ -496,7 +511,7 @@ impl CameraProfile {
         }
     }
 
-    /// Build a profile from rawloader's XYZ-to-camera matrix.
+    /// Build a profile from a decoder's XYZ-to-camera matrix.
     pub fn from_xyz_to_camera(
         make: impl Into<String>,
         model: impl Into<String>,
@@ -715,7 +730,7 @@ struct LensProfileKey {
     lens: String,
 }
 
-/// Small deterministic registry used by the production rawloader adapter.
+/// Small deterministic registry used by the production RAW adapter.
 #[derive(Clone, Debug, Default)]
 pub struct LensProfileRegistry {
     profiles: BTreeMap<LensProfileKey, LensProfile>,
@@ -1041,7 +1056,7 @@ pub enum RawError {
     Exif(String),
 }
 
-/// Conservative resource limits applied before and after rawloader decoding.
+/// Conservative resource limits applied before and after vendor decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RawDecodeLimits {
     /// Maximum encoded input size accepted by the adapter.
@@ -1316,21 +1331,20 @@ fn exif_slice(bytes: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
     bytes.get(start..end)
 }
 
-/// Adapter around the selected `rawloader` vendor decoder.
-///
-/// This is compile coverage for the vendor boundary. The deterministic corpus, rather than
-/// downloaded camera files, validates the RAW algorithms in this repository.
+/// Adapter around dnglab's `rawler` decoder, including compressed RAF and CR3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RawloaderDecoder {
+pub struct RawlerDecoder {
     limits: RawDecodeLimits,
 }
 
 /// Compatibility spelling for callers that use the library's capitalized name.
-pub type RawLoaderDecoder = RawloaderDecoder;
+pub type RawLoaderDecoder = RawlerDecoder;
+/// Legacy adapter name retained for source compatibility.
+pub type RawloaderDecoder = RawlerDecoder;
 /// Compatibility spelling for callers that refer to this type as an adapter.
-pub type RawloaderAdapter = RawloaderDecoder;
+pub type RawloaderAdapter = RawlerDecoder;
 
-impl RawloaderDecoder {
+impl RawlerDecoder {
     /// Construct a decoder with explicit resource limits.
     pub const fn with_limits(limits: RawDecodeLimits) -> Self {
         Self { limits }
@@ -1341,17 +1355,17 @@ impl RawloaderDecoder {
         self.limits
     }
 
-    /// Decode bytes with rawloader after applying encoded and declared-dimension limits.
+    /// Decode bytes with rawler after applying encoded and declared-dimension limits.
     pub fn decode_bytes(&self, input: &[u8]) -> Result<RawFrame, RawError> {
         <Self as RawDecoder>::decode(self, input)
     }
 
-    /// Decode bytes with rawloader.
+    /// Decode bytes with rawler.
     pub fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
         self.decode_bytes(input)
     }
 
-    /// Decode a file through rawloader after checking its filesystem size.
+    /// Decode a file through rawler after checking its filesystem size.
     pub fn decode_file(&self, path: impl AsRef<std::path::Path>) -> Result<RawFrame, RawError> {
         let path = path.as_ref();
         let metadata = std::fs::metadata(path)
@@ -1366,23 +1380,55 @@ impl RawloaderDecoder {
     }
 }
 
-impl RawDecoder for RawloaderDecoder {
+impl RawDecoder for RawlerDecoder {
     fn decode(&self, input: &[u8]) -> Result<RawFrame, RawError> {
         self.limits.validate_input_size(input.len())?;
         if let Some((dimensions, samples_per_pixel)) = predecode_dimensions(input)? {
             self.limits
                 .validate_predecode(dimensions, samples_per_pixel)?;
         }
-        let decoded = catch_unwind(AssertUnwindSafe(|| {
-            rawloader::decode(&mut Cursor::new(input))
+        catch_unwind(AssertUnwindSafe(|| {
+            let source = rawler::rawsource::RawSource::new_from_slice(input);
+            let params = rawler::decoders::RawDecodeParams::default();
+            let decoder = rawler::get_decoder(&source)
+                .map_err(|error| RawError::Decoder(error.to_string()))?;
+            // Dummy decoding reads the actual sensor layout without allocating pixel data.
+            // TIFF EXIF dimensions can describe only the embedded JPEG, not the sensor.
+            let header = match catch_unwind(AssertUnwindSafe(|| {
+                decoder.raw_image(&source, &params, true)
+            })) {
+                Ok(result) => result.map_err(|error| RawError::Decoder(error.to_string()))?,
+                Err(_) if has_prefix(input, b"FUJIFILM") => {
+                    // rawler 0.8 reads uninitialized pixels in rotated Super CCD dummy decoding.
+                    // Keep the established legacy adapter until upstream fixes this preflight.
+                    let decoded = rawloader::decode(&mut Cursor::new(input))
+                        .map_err(|error| RawError::Decoder(error.to_string()))?;
+                    return adapt_rawloader_image(decoded, input, self.limits);
+                }
+                Err(_) => {
+                    return Err(RawError::Decoder(
+                        "rawler panicked during sensor preflight".to_owned(),
+                    ));
+                }
+            };
+            self.limits.validate_predecode(
+                Dimensions::new(
+                    u32::try_from(header.width).map_err(|_| RawError::DimensionsOverflow)?,
+                    u32::try_from(header.height).map_err(|_| RawError::DimensionsOverflow)?,
+                ),
+                header.cpp,
+            )?;
+            let decoded = decoder
+                .raw_image(&source, &params, false)
+                .map_err(|error| RawError::Decoder(error.to_string()))?;
+            let metadata = decoder.raw_metadata(&source, &params).ok();
+            adapt_rawler_image(decoded, metadata, input, self.limits)
         }))
-        .map_err(|_| RawError::Decoder("rawloader panicked while parsing input".to_owned()))?
-        .map_err(|error| RawError::Decoder(error.to_string()))?;
-        adapt_rawloader_image(decoded, input, self.limits)
+        .map_err(|_| RawError::Decoder("rawler panicked while parsing input".to_owned()))?
     }
 
     fn decode_file(&self, path: &std::path::Path) -> Result<RawFrame, RawError> {
-        RawloaderDecoder::decode_file(self, path)
+        RawlerDecoder::decode_file(self, path)
     }
 }
 
@@ -1726,6 +1772,254 @@ fn adapt_rawloader_image(
         embedded_preview,
         exif,
     )
+}
+
+fn adapt_rawler_image(
+    image: rawler::RawImage,
+    metadata: Option<rawler::decoders::RawMetadata>,
+    input: &[u8],
+    limits: RawDecodeLimits,
+) -> Result<RawFrame, RawError> {
+    if image.cpp != 1 {
+        return Err(RawError::UnsupportedData(format!(
+            "rawler returned {} components per pixel",
+            image.cpp
+        )));
+    }
+    let dimensions = Dimensions::new(
+        u32::try_from(image.width).map_err(|_| RawError::DimensionsOverflow)?,
+        u32::try_from(image.height).map_err(|_| RawError::DimensionsOverflow)?,
+    );
+    let pixel_count = limits.validate_dimensions(dimensions)?;
+    let sample_count = match &image.data {
+        rawler::RawImageData::Integer(data) => data.len(),
+        rawler::RawImageData::Float(data) => data.len(),
+    };
+    limits.validate_sample_count(sample_count)?;
+    if sample_count != pixel_count {
+        return Err(RawError::SampleCountMismatch {
+            dimensions,
+            expected: pixel_count,
+            actual: sample_count,
+        });
+    }
+    let raw_cfa = match &image.photometric {
+        rawler::rawimage::RawPhotometricInterpretation::Cfa(config) => &config.cfa,
+        _ => {
+            return Err(RawError::UnsupportedData(
+                "expected a sensor CFA mosaic".to_owned(),
+            ));
+        }
+    };
+    let cfa_width = u32::try_from(raw_cfa.width).map_err(|_| RawError::DimensionsOverflow)?;
+    let cfa_height = u32::try_from(raw_cfa.height).map_err(|_| RawError::DimensionsOverflow)?;
+    if cfa_width == 0 || cfa_height == 0 {
+        return Err(RawError::UnsupportedData(
+            "rawler returned an invalid CFA".to_owned(),
+        ));
+    }
+    let cfa_colors: Vec<_> = (0..cfa_height)
+        .flat_map(|y| {
+            (0..cfa_width).map(move |x| match raw_cfa.color_at(y as usize, x as usize) {
+                0 => CfaColor::Red,
+                1 => CfaColor::Green,
+                2 => CfaColor::Blue,
+                3 => CfaColor::Extra,
+                _ => CfaColor::Unknown,
+            })
+        })
+        .collect();
+    if cfa_colors
+        .iter()
+        .any(|color| matches!(color, CfaColor::Extra | CfaColor::Unknown))
+    {
+        return Err(RawError::UnsupportedData(
+            "rawler returned a CFA with unsupported RGBE or unknown channels".to_owned(),
+        ));
+    }
+    let cfa = CfaPattern::new(cfa_width, cfa_height, cfa_colors)?;
+    let black_levels = adapt_black_levels(&image.blacklevel, &cfa)?;
+    let white_levels = match image.whitelevel.0.as_slice() {
+        [level] => [*level as f32; 4],
+        [r, g, b] | [r, g, b, _] => [*r as f32, *g as f32, *b as f32, *g as f32],
+        _ => return Err(RawError::UnsupportedData("invalid white levels".to_owned())),
+    };
+    // Prefer daylight calibration, with a deterministic fallback to another supplied illuminant.
+    let matrix = image
+        .color_matrix
+        .get(&rawler::imgop::xyz::Illuminant::D65)
+        .or_else(|| {
+            image
+                .color_matrix
+                .iter()
+                .min_by_key(|(illuminant, _)| **illuminant as u32)
+                .map(|(_, matrix)| matrix)
+        })
+        .ok_or_else(|| {
+            RawError::InvalidCameraMatrix("decoder supplied no color matrix".to_owned())
+        })?;
+    let matrix: [f32; 9] = matrix.as_slice().try_into().map_err(|_| {
+        RawError::UnsupportedData("expected a three-channel camera matrix".to_owned())
+    })?;
+    let xyz_to_camera = [
+        [matrix[0], matrix[1], matrix[2]],
+        [matrix[3], matrix[4], matrix[5]],
+        [matrix[6], matrix[7], matrix[8]],
+        [0.0; 3],
+    ];
+    let orientation = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.exif.orientation)
+        .and_then(|value| parse_orientation(u32::from(value)))
+        .unwrap_or_else(|| image.orientation.into());
+    let samples = match image.data {
+        rawler::RawImageData::Integer(data) => data.into_iter().map(f32::from).collect(),
+        rawler::RawImageData::Float(data) => data,
+    };
+    let bit_depth = infer_bit_depth(white_levels);
+    let mosaic = Mosaic::new(dimensions, samples, bit_depth, cfa, orientation)?;
+    let vendor_exif = metadata.map(|metadata| metadata.exif).unwrap_or_default();
+    let camera = CameraMetadata {
+        make: image.make.clone(),
+        model: image.model.clone(),
+        lens: vendor_exif.lens_model,
+        iso: vendor_exif
+            .iso_speed
+            .or(vendor_exif.iso_speed_ratings.map(u32::from)),
+        aperture: vendor_exif
+            .fnumber
+            .map(|value| value.as_f32())
+            .filter(|value| value.is_finite()),
+        shutter_seconds: vendor_exif
+            .exposure_time
+            .map(|value| value.as_f32())
+            .filter(|value| value.is_finite()),
+        focal_length_mm: vendor_exif
+            .focal_length
+            .map(|value| value.as_f32())
+            .filter(|value| value.is_finite()),
+        capture_time: vendor_exif.date_time_original.map(normalize_capture_time),
+        orientation,
+        dimensions: Some(dimensions),
+    };
+    let parsed = parse_exif_metadata(input).ok();
+    let camera = merge_camera_metadata(camera, parsed.as_ref().map(|metadata| &metadata.camera));
+    let mut tags = parsed
+        .as_ref()
+        .map(|metadata| metadata.exif.tags.clone())
+        .unwrap_or_default();
+    tags.insert("clean_make".to_owned(), image.clean_make.clone());
+    tags.insert("clean_model".to_owned(), image.clean_model.clone());
+    tags.insert("cpp".to_owned(), image.cpp.to_string());
+    let exif = ExifMetadata { tags };
+    let lens_profile = camera.lens.as_deref().map(|lens| {
+        LensProfileRegistry::built_in()
+            .profile_for(&camera)
+            .unwrap_or_else(|| LensProfile::unavailable(lens))
+    });
+    let embedded_preview =
+        EmbeddedPreview::from_bytes(parsed.and_then(|metadata| metadata.embedded_preview));
+    let profile = CameraProfile::from_xyz_to_camera(
+        camera.make.clone(),
+        camera.model.clone(),
+        xyz_to_camera,
+    )?;
+    RawFrame::new(
+        mosaic,
+        black_levels,
+        white_levels,
+        camera,
+        profile,
+        lens_profile,
+        embedded_preview,
+        exif,
+    )
+}
+
+// The frame schema stores RGB channel levels; rawler supplies a spatial repeat pattern.
+// ponytail: average the two green sites; use spatial black levels if per-site correction is needed.
+fn adapt_black_levels(
+    level: &rawler::rawimage::BlackLevel,
+    cfa: &CfaPattern,
+) -> Result<[f32; 4], RawError> {
+    let expected = level
+        .width
+        .checked_mul(level.height)
+        .ok_or(RawError::DimensionsOverflow)?;
+    if level.cpp != 1 || expected == 0 || level.levels.len() != expected {
+        return Err(RawError::UnsupportedData(
+            "invalid black level pattern".to_owned(),
+        ));
+    }
+    if expected == 1 {
+        return Ok([level.levels[0].as_f32(); 4]);
+    }
+    if level.width != cfa.width() as usize || level.height != cfa.height() as usize {
+        return Err(RawError::UnsupportedData(
+            "black level repeat differs from CFA".to_owned(),
+        ));
+    }
+    let mut sums = [0.0; 4];
+    let mut counts = [0_u32; 4];
+    for (value, color) in level.levels.iter().zip(cfa.colors()) {
+        let channel = match color {
+            CfaColor::Red => 0,
+            CfaColor::Green => 1,
+            CfaColor::Blue => 2,
+            _ => {
+                return Err(RawError::UnsupportedData(
+                    "unsupported black level channel".to_owned(),
+                ));
+            }
+        };
+        sums[channel] += value.as_f32();
+        counts[channel] += 1;
+    }
+    for channel in 0..3 {
+        if counts[channel] == 0 {
+            return Err(RawError::UnsupportedData(
+                "missing black level channel".to_owned(),
+            ));
+        }
+        sums[channel] /= counts[channel] as f32;
+    }
+    sums[3] = sums[1];
+    Ok(sums)
+}
+
+#[cfg(test)]
+mod decoder_adaptation_tests {
+    use super::*;
+
+    #[test]
+    fn spatial_black_levels_follow_cfa_colors_not_site_order() {
+        let cfa = CfaPattern::new(
+            2,
+            2,
+            vec![
+                CfaColor::Green,
+                CfaColor::Blue,
+                CfaColor::Red,
+                CfaColor::Green,
+            ],
+        )
+        .unwrap();
+        let level = rawler::rawimage::BlackLevel::new(&[20_u16, 30, 10, 24], 2, 2, 1);
+        assert_eq!(
+            adapt_black_levels(&level, &cfa).unwrap(),
+            [10.0, 22.0, 30.0, 22.0]
+        );
+        assert_eq!(
+            adapt_black_levels(&rawler::rawimage::BlackLevel::new(&[7_u16], 1, 1, 1), &cfa)
+                .unwrap(),
+            [7.0; 4]
+        );
+        let invalid = rawler::rawimage::BlackLevel {
+            levels: vec![],
+            ..level
+        };
+        assert!(adapt_black_levels(&invalid, &cfa).is_err());
+    }
 }
 
 fn merge_camera_metadata(

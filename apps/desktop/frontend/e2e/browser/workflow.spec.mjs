@@ -95,10 +95,12 @@ describe('workflow editing in browser mode', () => {
     await selectedNode('Exposure');
     await openNodeDetails('Exposure');
     const rows = await nodeElement('Exposure').$$('section[aria-label="Workflow ports"] .port-row');
-    expect(rows.length).toBe(3);
+    expect(rows.length).toBe(5);
     await expect(rows[0]).toHaveText(expect.stringContaining('In Image'));
     await expect(rows[1]).toHaveText(expect.stringContaining('In Exposure'));
-    await expect(rows[2]).toHaveText(expect.stringContaining('Out Image'));
+    await expect(rows[2]).toHaveText(expect.stringContaining('In Scene Linear RGB'));
+    await expect(rows[3]).toHaveText(expect.stringContaining('Out Image'));
+    await expect(rows[4]).toHaveText(expect.stringContaining('Out Scene Linear RGB'));
 
     const inputToggle = await rows[0].$('button');
     await inputToggle.click();
@@ -106,7 +108,7 @@ describe('workflow editing in browser mode', () => {
     await inputToggle.click();
     await expect(inputToggle).toHaveText('Expose');
 
-    const outputToggle = await rows[2].$('button');
+    const outputToggle = await rows[3].$('button');
     await outputToggle.click();
     await expect(outputToggle).toHaveText('Hide');
   });
