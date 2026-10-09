@@ -192,6 +192,14 @@ fn read_bounded_file(path: &Path) -> Result<Vec<u8>, OrdinaryDecodeError> {
     Ok(bytes)
 }
 
+/// Convert an already-validated decoded image into RawWeave's bounded RGBA32F image.
+///
+/// Exposed so callers that decode bytes from a container (an embedded RAW preview,
+/// for example) reuse the same dimension/colour rules as `decode_ordinary_bytes`.
+pub fn decode_ordinary_dynamic(decoded: image::DynamicImage) -> Result<Image, OrdinaryDecodeError> {
+    dynamic_image_to_rawweave(decoded)
+}
+
 fn dynamic_image_to_rawweave(decoded: image::DynamicImage) -> Result<Image, OrdinaryDecodeError> {
     let expected = (decoded.width(), decoded.height());
     let pixel_count = validate_dimensions(expected.0, expected.1)?;

@@ -25,8 +25,8 @@ pub use model::{
 };
 pub use ordinary::{
     MAX_ORDINARY_ENCODED_BYTES, MAX_ORDINARY_IMAGE_EDGE, MAX_ORDINARY_IMAGE_PIXELS,
-    MAX_ORDINARY_RGBA32F_BYTES, OrdinaryDecodeError, decode_ordinary_bytes, decode_ordinary_file,
-    validate_dimensions,
+    MAX_ORDINARY_RGBA32F_BYTES, OrdinaryDecodeError, decode_ordinary_bytes,
+    decode_ordinary_dynamic, decode_ordinary_file, validate_dimensions,
 };
 pub use persistence::JobStore;
 pub use preflight::{Diagnostic, DiagnosticSeverity, PreflightOptions, PreflightReport, preflight};

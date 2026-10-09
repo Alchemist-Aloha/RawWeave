@@ -21,21 +21,29 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use native_theme as t;
 use native_viewer::Viewers;
-use rawweave_batch::{Compression, OutputSharpening};
+use rawweave_batch::{
+    BatchEngine, BatchJob, Compression, Diagnostic, DiagnosticSeverity, ImageFileProcessor,
+    JobStore, OutputFormat, OutputSharpening, PreflightOptions,
+};
 use rawweave_core::NodeId as CoreNodeId;
+use rawweave_gpui::batchqueue::{self, BatchSettings};
+use rawweave_gpui::browse;
 use rawweave_gpui::export::ExportSettings;
 use rawweave_gpui::library::{drop_position, library_groups, node_category};
 use rawweave_gpui::parameters::{
     ParameterDraft, add_curve_point, curve_points, parameter_ux, remove_curve_point,
 };
-use rawweave_gpui::workspace::{Workspace, preferences_path};
+use rawweave_gpui::workspace::{Workspace, WorkspaceMode, preferences_path};
 use rawweave_gpui::{
     MoveHistory, Session, Shortcut, Source, bounded_read, save_workflow_atomic, shortcut,
 };
+use rawweave_image::Dimensions;
 use rawweave_node_api::{ParameterType, ParameterValue};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 #[derive(Clone)]
 struct LibraryDrag {
@@ -128,6 +136,23 @@ struct Editor {
     controls_open: bool,
     curve_gesture: Option<(usize, [f32; 4])>,
     geometry: Entity<native_nodes::GeometryHelper>,
+    mode: WorkspaceMode,
+    browse_dir: Option<PathBuf>,
+    browse_entries: Vec<browse::BrowseEntry>,
+    browse_truncated: bool,
+    browse_selected: Option<PathBuf>,
+    browse_thumbnails: BTreeMap<PathBuf, (Arc<RenderImage>, Dimensions)>,
+    browse_missing_thumbnails: BTreeSet<PathBuf>,
+    browse_generation: u64,
+    batch_counter: u64,
+    batch_items: Vec<rawweave_batch::BatchItem>,
+    batch_settings: BatchSettings,
+    batch_quality: Entity<InputState>,
+    batch_job: Option<Arc<BatchEngine>>,
+    batch_snapshot: Option<BatchJob>,
+    batch_diagnostics: Vec<Diagnostic>,
+    batch_status: String,
+    batch_polling: bool,
 }
 impl Editor {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -205,6 +230,7 @@ impl Editor {
             }
             None => "Native compositor · adapter unreported".into(),
         };
+        let mode = workspace.mode;
         let mut this = Self {
             session,
             flow_state,
@@ -236,6 +262,7 @@ impl Editor {
             layout: BTreeMap::new(),
             focus: cx.focus_handle(),
             workspace,
+            mode,
             preferences_file: preferences_path(),
             workspace_epoch: 0,
             canvas_size: (600.0, 500.0),
@@ -255,6 +282,22 @@ impl Editor {
             }),
             controls_open: true,
             curve_gesture: None,
+            browse_dir: None,
+            browse_entries: Vec::new(),
+            browse_truncated: false,
+            browse_selected: None,
+            browse_thumbnails: BTreeMap::new(),
+            browse_missing_thumbnails: BTreeSet::new(),
+            browse_generation: 0,
+            batch_counter: 0,
+            batch_items: Vec::new(),
+            batch_settings: BatchSettings::default(),
+            batch_quality: cx.new(|cx| InputState::new(window, cx).default_value("92")),
+            batch_job: None,
+            batch_snapshot: None,
+            batch_diagnostics: Vec::new(),
+            batch_status: String::new(),
+            batch_polling: false,
             geometry: cx.new(|_| native_nodes::GeometryHelper::new(owner.clone())),
         };
         this.rebuild_flow(cx);
@@ -1357,7 +1400,7 @@ impl Editor {
                 }
                 match result.and_then(|source| this.session.attach(source)) {
                     Ok(()) => {
-                        this.source_path = Some(source_path);
+                        this.source_path = Some(source_path.clone());
                         this.undo.clear();
                         this.redo.clear();
                         this.selected = None;
@@ -1366,6 +1409,18 @@ impl Editor {
                         this.pending_canvas_fit = true;
                         this.rebuild_flow(cx);
                         this.reset_viewers(window, cx);
+                        // The folder you opened a frame from is the folder Browse shows.
+                        if let Some(parent) = source_path
+                            .parent()
+                            .filter(|parent| !parent.as_os_str().is_empty())
+                        {
+                            this.list_folder(
+                                parent.to_path_buf(),
+                                Some(source_path.clone()),
+                                window,
+                                cx,
+                            );
+                        }
                         this.status = "Source image loaded".into();
                         cx.notify();
                     }
@@ -1949,6 +2004,983 @@ impl Editor {
         };
         cx.notify();
     }
+    fn mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .h_flex()
+            .gap_1()
+            .child(
+                div()
+                    .font_family(t::Face::Label.family())
+                    .font_weight(t::Face::Label.weight())
+                    .text_size(t::Face::Label.size())
+                    .text_color(rgb(t::ROOM_INK_FAINT))
+                    .mr_1()
+                    .child(t::code("view")),
+            )
+            .children(
+                [
+                    (WorkspaceMode::Browse, "Browse", "Frames in a folder"),
+                    (WorkspaceMode::Workflow, "Workflow", "The node graph"),
+                    (
+                        WorkspaceMode::Batch,
+                        "Batch",
+                        "Run this workflow over a queue",
+                    ),
+                ]
+                .into_iter()
+                .map(|(mode, label, tooltip)| {
+                    let active = self.mode == mode;
+                    // The live surface carries the wax mark on its own edge, so a
+                    // hovered neighbour can never read as the current one.
+                    div()
+                        .border_b_1()
+                        .border_color(if active {
+                            rgb(t::WAX_WHITE)
+                        } else {
+                            rgb(t::ROOM_GROUND)
+                        })
+                        .child(
+                            Button::new(SharedString::from(format!("mode-{label}")))
+                                .small()
+                                .label(label)
+                                .tooltip(tooltip)
+                                .toggled(active)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_mode(mode, window, cx)
+                                })),
+                        )
+                }),
+            )
+            .into_any_element()
+    }
+    fn set_mode(&mut self, mode: WorkspaceMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.mode = mode;
+        self.workspace.mode = mode;
+        self.persist_workspace();
+        // A surface never leaves keyboard focus in a pane that has just gone.
+        if mode != WorkspaceMode::Workflow {
+            self.finish_canvas_move(window, cx);
+        }
+        self.status = match mode {
+            WorkspaceMode::Browse => "Browse · open a folder, then develop a frame".into(),
+            WorkspaceMode::Workflow => "Workflow · the graph is the document".into(),
+            WorkspaceMode::Batch => "Batch · the current workflow runs over the queue".into(),
+        };
+        cx.notify();
+    }
+    fn choose_folder(
+        &mut self,
+        prompt: &str,
+        then: fn(&mut Self, PathBuf, &mut Window, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(prompt.into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = request.await
+                && let Some(dir) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |this, window, cx| then(this, dir, window, cx));
+            }
+        })
+        .detach();
+    }
+    /// List a folder and select its first frame, then decode bounded thumbnails.
+    fn open_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_folder(dir, None, window, cx);
+    }
+    fn list_folder(
+        &mut self,
+        dir: PathBuf,
+        select: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browse_generation += 1;
+        let generation = self.browse_generation;
+        self.browse_dir = Some(dir.clone());
+        self.browse_entries.clear();
+        self.browse_thumbnails.clear();
+        self.browse_missing_thumbnails.clear();
+        self.browse_selected = None;
+        self.status = format!("Reading {}…", dir.display());
+        let scan_dir = dir.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { browse::scan_folder(&scan_dir) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let select = select;
+            let paths = this
+                .update_in(cx, |this, _, cx| {
+                    if generation != this.browse_generation {
+                        return Vec::new();
+                    }
+                    let paths = match result {
+                        Ok(scan) => {
+                            this.browse_truncated = scan.truncated;
+                            this.browse_entries = scan.entries;
+                            this.browse_selected = select
+                                .filter(|selected| {
+                                    this.browse_entries
+                                        .iter()
+                                        .any(|entry| &entry.path == selected)
+                                })
+                                .or_else(|| {
+                                    this.browse_entries.first().map(|entry| entry.path.clone())
+                                });
+                            this.status = format!(
+                                "{} {} in {}{}",
+                                this.browse_entries.len(),
+                                if this.browse_entries.len() == 1 {
+                                    "image"
+                                } else {
+                                    "images"
+                                },
+                                dir.display(),
+                                if scan.truncated {
+                                    format!(" · listing the first {}", browse::MAX_BROWSE_ENTRIES)
+                                } else {
+                                    String::new()
+                                }
+                            );
+                            this.browse_entries
+                                .iter()
+                                .map(|entry| entry.path.clone())
+                                .collect()
+                        }
+                        Err(error) => {
+                            this.status = error;
+                            Vec::new()
+                        }
+                    };
+                    cx.notify();
+                    paths
+                })
+                .unwrap_or_default();
+            for path in paths {
+                let queued = path.clone();
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { browse::thumbnail(&queued) });
+                let result = task.await;
+                let keep = this
+                    .update_in(cx, |this, _, cx| {
+                        if generation != this.browse_generation {
+                            return false;
+                        }
+                        match result.and_then(|frame| {
+                            let dimensions = frame.full_dimensions;
+                            native_viewer::upload(&frame).map(|image| (image, dimensions))
+                        }) {
+                            Ok((image, dimensions)) => {
+                                this.browse_thumbnails
+                                    .insert(path.clone(), (image, dimensions));
+                            }
+                            Err(_) => {
+                                this.browse_missing_thumbnails.insert(path.clone());
+                            }
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn develop_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.browse_selected.clone() else {
+            self.status = "Select a frame to develop".into();
+            cx.notify();
+            return;
+        };
+        self.mode = WorkspaceMode::Workflow;
+        self.open_path(path, window, cx);
+    }
+    /// Append a folder's images to the queue, once each.
+    fn queue_folder(&mut self, dir: PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
+        match batchqueue::directory_items(self.batch_counter, &dir) {
+            Ok((items, truncated)) => {
+                let added = self.extend_queue(items);
+                self.batch_status = format!(
+                    "Queued {added} {}{}",
+                    if added == 1 { "image" } else { "images" },
+                    if truncated {
+                        " · folder listing was truncated"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Err(error) => self.batch_status = error,
+        }
+        cx.notify();
+    }
+    fn queue_browse_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.browse_dir.clone() else {
+            self.batch_status = "Open a folder before queueing it".into();
+            cx.notify();
+            return;
+        };
+        self.queue_folder(dir, window, cx);
+    }
+    fn queue_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.browse_selected.clone() else {
+            self.batch_status = "Select a frame to queue".into();
+            cx.notify();
+            return;
+        };
+        let item = batchqueue::queued_item(self.batch_counter, &path);
+        let added = self.extend_queue(vec![item]);
+        self.batch_status = if added == 1 {
+            format!("Queued {}", path.display())
+        } else {
+            format!("{} is already queued", path.display())
+        };
+        cx.notify();
+    }
+    /// Append items once each; re-reading a folder must not duplicate its files.
+    fn extend_queue(&mut self, items: Vec<rawweave_batch::BatchItem>) -> usize {
+        let mut added = 0;
+        for item in items {
+            if self
+                .batch_items
+                .iter()
+                .any(|queued| queued.source_path == item.source_path)
+            {
+                continue;
+            }
+            self.batch_counter += 1;
+            self.batch_items.push(item);
+            added += 1;
+        }
+        added
+    }
+    fn choose_output_dir(&mut self, dir: PathBuf, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.batch_settings.output_dir = dir;
+    }
+    fn batch_quality_value(&self, cx: &Context<Self>) -> Result<u8, String> {
+        self.batch_quality
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|quality| (1..=100).contains(quality))
+            .ok_or_else(|| "Enter a quality between 1 and 100".to_owned())
+    }
+    fn batch_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(engine) = self.batch_job.clone()
+            && !self.batch_finished()
+        {
+            self.batch_status = match engine.resume_run() {
+                Ok(()) => "Running…".into(),
+                Err(error) => error.to_string(),
+            };
+            self.refresh_batch();
+            self.poll_batch(window, cx);
+            return;
+        }
+        let quality = match self.batch_quality_value(cx) {
+            Ok(quality) => quality,
+            Err(error) => {
+                self.batch_status = error;
+                cx.notify();
+                return;
+            }
+        };
+        self.batch_settings.quality = quality;
+        let job = match batchqueue::build_job(
+            &self.session.editor,
+            self.batch_counter + 1,
+            &self.batch_settings,
+            self.batch_items.clone(),
+        ) {
+            Ok(job) => job,
+            Err(error) => {
+                self.batch_status = error;
+                cx.notify();
+                return;
+            }
+        };
+        if let Err(error) = batchqueue::validate_job(&job) {
+            self.batch_status = error;
+            cx.notify();
+            return;
+        }
+        let engine = match BatchEngine::new(
+            job,
+            JobStore::memory(),
+            Arc::new(ImageFileProcessor),
+            batchqueue::BATCH_WORKERS,
+        ) {
+            Ok(engine) => engine,
+            Err(error) => {
+                self.batch_status = error.to_string();
+                cx.notify();
+                return;
+            }
+        };
+        match engine.preflight(&PreflightOptions::default()) {
+            Ok(report) => {
+                self.batch_diagnostics = report.diagnostics.clone();
+                if report.has_errors() {
+                    self.batch_status = "Preflight found errors; fix them before running".into();
+                    self.batch_snapshot = engine.snapshot().ok();
+                    self.batch_job = Some(Arc::new(engine));
+                    cx.notify();
+                    return;
+                }
+            }
+            Err(error) => {
+                self.batch_status = error.to_string();
+                cx.notify();
+                return;
+            }
+        }
+        if let Err(error) = engine.start() {
+            self.batch_status = error.to_string();
+            cx.notify();
+            return;
+        }
+        self.batch_snapshot = engine.snapshot().ok();
+        self.batch_job = Some(Arc::new(engine));
+        self.batch_status = "Running…".into();
+        self.poll_batch(window, cx);
+    }
+    fn batch_finished(&self) -> bool {
+        self.batch_snapshot
+            .as_ref()
+            .is_some_and(|job| batchqueue::progress(job).is_finished())
+    }
+    fn refresh_batch(&mut self) {
+        let Some(engine) = &self.batch_job else {
+            return;
+        };
+        match engine.snapshot() {
+            Ok(job) => {
+                self.batch_status = batchqueue::progress(&job).summary();
+                self.batch_snapshot = Some(job);
+            }
+            Err(error) => self.batch_status = error.to_string(),
+        }
+    }
+    /// Poll the engine's own state; the workers own all execution.
+    fn poll_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch_polling {
+            return;
+        }
+        self.batch_polling = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let keep = this
+                    .update_in(cx, |this, _, cx| {
+                        this.refresh_batch();
+                        cx.notify();
+                        let running = !this.batch_finished();
+                        if !running {
+                            this.batch_polling = false;
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    fn batch_pause(&mut self, cx: &mut Context<Self>) {
+        if let Some(engine) = &self.batch_job
+            && let Err(error) = engine.pause()
+        {
+            self.batch_status = error.to_string();
+        }
+        self.refresh_batch();
+        cx.notify();
+    }
+    fn batch_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(engine) = &self.batch_job
+            && let Err(error) = engine.cancel()
+        {
+            self.batch_status = error.to_string();
+        }
+        self.refresh_batch();
+        cx.notify();
+    }
+    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        self.batch_items.clear();
+        self.batch_job = None;
+        self.batch_snapshot = None;
+        self.batch_diagnostics.clear();
+        self.batch_status.clear();
+        cx.notify();
+    }
+    /// The contact sheet on the bench: frames butted on the plane, read by the
+    /// code printed beneath each one.
+    fn browse_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dir) = self.browse_dir.clone() else {
+            return div()
+                .size_full()
+                .bg(rgb(t::BENCH_GROUND))
+                .h_flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .v_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_family(t::Face::Display.family())
+                                .font_weight(t::Face::Display.weight())
+                                .text_size(t::Face::Display.size())
+                                .text_color(rgb(t::BENCH_INK))
+                                .child("No folder open"),
+                        )
+                        .child(
+                            div()
+                                .font_family(t::Face::Body.family())
+                                .text_size(t::Face::Body.size())
+                                .text_color(rgb(t::BENCH_INK_DIM))
+                                .child("Open a folder to lay its frames out on the bench."),
+                        )
+                        .child(
+                            Button::new("browse-open-empty")
+                                .label("Open folder…")
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_folder(
+                                        "Choose a folder of images",
+                                        Self::open_folder,
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                )
+                .into_any_element();
+        };
+        let tiles = self
+            .browse_entries
+            .iter()
+            .map(|entry| {
+                let selected = self.browse_selected.as_deref() == Some(entry.path.as_path());
+                let thumbnail = self.browse_thumbnails.get(&entry.path).cloned();
+                let missing = self.browse_missing_thumbnails.contains(&entry.path);
+                let has_thumbnail = thumbnail.is_some();
+                let path = entry.path.clone();
+                // Dimensions when they are known; the encoded size otherwise, so a
+                // frame with no preview still prints a measured fact about itself.
+                let caption = match &thumbnail {
+                    Some((_, dimensions)) => format!(
+                        "{} · {}×{}",
+                        entry.code, dimensions.width, dimensions.height
+                    ),
+                    None => format!("{} · {}", entry.code, browse::byte_label(entry.bytes)),
+                };
+                div()
+                    .id(SharedString::from(format!(
+                        "frame-{}",
+                        entry.path.display()
+                    )))
+                    .test_support()
+                    .w(px(148.0))
+                    .v_flex()
+                    .gap_1()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(t::BENCH_HOVER)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.browse_selected = Some(path.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(96.0))
+                            .bg(rgb(t::BENCH_SUNK))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                t::WAX_WHITE
+                            } else {
+                                t::BENCH_LINE
+                            }))
+                            .overflow_hidden()
+                            .when_some(thumbnail.map(|(image, _)| image), |view, image| {
+                                view.child(img(image).size_full())
+                            })
+                            .when(!has_thumbnail, |view| {
+                                view.h_flex().items_center().justify_center().child(
+                                    div()
+                                        .font_family(t::Face::EdgeCode.family())
+                                        .font_weight(t::Face::EdgeCode.weight())
+                                        .text_size(t::Face::EdgeCode.size())
+                                        .text_color(rgb(t::BENCH_INK_DIM))
+                                        .text_center()
+                                        .child(t::code(if missing {
+                                            "no embedded preview"
+                                        } else {
+                                            "reading"
+                                        })),
+                                )
+                            }),
+                    )
+                    .child(
+                        // A fixed two-line ledger row keeps every frame on the same
+                        // baseline, however long the file name is.
+                        div()
+                            .w_full()
+                            .h(px(32.0))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .font_family(t::Face::Title.family())
+                            .font_weight(t::Face::Title.weight())
+                            .text_size(t::Face::Title.size())
+                            .text_color(rgb(t::BENCH_INK))
+                            .child(entry.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(t::Face::Readout.family())
+                            .text_size(t::Face::Readout.size())
+                            .text_color(rgb(t::BENCH_INK_DIM))
+                            .child(t::code(&caption)),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let selected = self
+            .browse_selected
+            .as_ref()
+            .map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            })
+            .unwrap_or_else(|| "Select a frame".to_owned());
+        div()
+            .size_full()
+            .v_flex()
+            .bg(rgb(t::BENCH_GROUND))
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(rgb(t::BENCH_LINE))
+                    .child(
+                        div()
+                            .font_family(t::Face::Heading.family())
+                            .font_weight(t::Face::Heading.weight())
+                            .text_size(t::Face::Heading.size())
+                            .text_color(rgb(t::BENCH_INK))
+                            .child("Browse"),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .font_family(t::Face::Readout.family())
+                            .text_size(t::Face::Readout.size())
+                            .text_color(rgb(t::BENCH_INK_DIM))
+                            .child(dir.display().to_string()),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("browse-open")
+                            .small()
+                            .label("Open folder…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_folder(
+                                    "Choose a folder of images",
+                                    Self::open_folder,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("browse-queue")
+                            .small()
+                            .label("Queue folder")
+                            .tooltip("Add every image in this folder to the batch queue")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.queue_browse_folder(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("browse-queue-one")
+                            .small()
+                            .label("Queue frame")
+                            .disabled(self.browse_selected.is_none())
+                            .tooltip("Add the selected frame to the batch queue")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.queue_selected(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("browse-develop")
+                            .small()
+                            .label("Develop")
+                            .primary()
+                            .disabled(self.browse_selected.is_none())
+                            .tooltip(format!("Open {selected} in the workflow"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.develop_selected(window, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("browse-sheet")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .when(tiles.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .font_family(t::Face::Body.family())
+                                .text_size(t::Face::Body.size())
+                                .text_color(rgb(t::BENCH_INK_DIM))
+                                .child("No supported images in this folder."),
+                        )
+                    })
+                    .child(div().h_flex().flex_wrap().gap_3().children(tiles)),
+            )
+            .into_any_element()
+    }
+    /// The queue is a room surface: no plane, just ruled sections.
+    fn batch_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let progress = self.batch_snapshot.as_ref().map(batchqueue::progress);
+        let job = self.batch_job.clone();
+        let output_dir = self.batch_settings.output_dir.display().to_string();
+        let rows = self
+            .batch_snapshot
+            .as_ref()
+            .map(|job| job.items.clone())
+            .unwrap_or_else(|| self.batch_items.clone());
+        let mut list = div().v_flex();
+        for (index, item) in rows.iter().enumerate() {
+            let (ground, ink) = t::stamp(batchqueue::tone(item.state));
+            let label = batchqueue::state_label(item.state);
+            list = list
+                .child(div().h(px(1.0)).w_full().bg(rgb(t::ROOM_LINE)))
+                .child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .w(px(28.0))
+                                .font_family(t::Face::Readout.family())
+                                .text_size(t::Face::Readout.size())
+                                .text_color(rgb(t::ROOM_INK_FAINT))
+                                .child(format!("{:02}", index + 1)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .v_flex()
+                                .child(
+                                    div()
+                                        .font_family(t::Face::Title.family())
+                                        .font_weight(t::Face::Title.weight())
+                                        .text_size(t::Face::Title.size())
+                                        .text_color(rgb(t::ROOM_INK))
+                                        .child(item.display_name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(t::Face::Readout.family())
+                                        .text_size(t::Face::Readout.size())
+                                        .text_color(rgb(t::ROOM_INK_FAINT))
+                                        .child(item.source_path.display().to_string()),
+                                )
+                                .when_some(item.failure.clone(), |view, failure| {
+                                    view.child(
+                                        div()
+                                            .font_family(t::Face::Body.family())
+                                            .text_size(t::Face::Body.size())
+                                            .text_color(rgb(t::WAX_RED_INK_SOFT))
+                                            .child(failure),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .bg(rgb(ground))
+                                .px_1()
+                                .py(px(3.0))
+                                .rounded(t::RADIUS)
+                                .font_family(t::Face::EdgeCode.family())
+                                .font_weight(t::Face::EdgeCode.weight())
+                                .text_size(t::Face::EdgeCode.size())
+                                .text_color(rgb(ink))
+                                .child(t::code(label)),
+                        ),
+                );
+        }
+        let mut diagnostics = div().v_flex();
+        for diagnostic in &self.batch_diagnostics {
+            let ink = match diagnostic.severity {
+                DiagnosticSeverity::Error => t::WAX_RED_INK_SOFT,
+                DiagnosticSeverity::Warning => t::WAX_AMBER,
+                DiagnosticSeverity::Info => t::ROOM_INK_DIM,
+            };
+            diagnostics = diagnostics.child(
+                div()
+                    .font_family(t::Face::Body.family())
+                    .text_size(t::Face::Body.size())
+                    .text_color(rgb(ink))
+                    .child(format!(
+                        "{}: {}",
+                        t::code(&diagnostic.code),
+                        diagnostic.message
+                    )),
+            );
+        }
+        div()
+            .size_full()
+            .v_flex()
+            .bg(rgb(t::ROOM_GROUND))
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(rgb(t::ROOM_LINE))
+                    .child(
+                        div()
+                            .font_family(t::Face::Heading.family())
+                            .font_weight(t::Face::Heading.weight())
+                            .text_size(t::Face::Heading.size())
+                            .child("Batch"),
+                    )
+                    .child(
+                        div()
+                            .font_family(t::Face::Label.family())
+                            .font_weight(t::Face::Label.weight())
+                            .text_size(t::Face::Label.size())
+                            .text_color(rgb(t::ROOM_INK_FAINT))
+                            .child(t::code("current workflow")),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("batch-queue-folder")
+                            .small()
+                            .label("Queue folder…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_folder(
+                                    "Choose a folder to queue",
+                                    Self::queue_folder,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("batch-output-dir")
+                            .small()
+                            .label("Output folder…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_folder(
+                                    "Choose an output folder",
+                                    Self::choose_output_dir,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("batch-format")
+                            .small()
+                            .label(batchqueue::format_label(self.batch_settings.format))
+                            .dropdown_menu({
+                                let weak = cx.entity().downgrade();
+                                move |menu, _, _| {
+                                    let mut menu = menu;
+                                    for format in [
+                                        OutputFormat::Jpeg,
+                                        OutputFormat::Png,
+                                        OutputFormat::Tiff,
+                                        OutputFormat::OpenExr,
+                                    ] {
+                                        let weak = weak.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(batchqueue::format_label(format))
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = weak.update(cx, |this, _| {
+                                                        this.batch_settings.format = format
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("batch-clear")
+                            .small()
+                            .label("Clear")
+                            .disabled(self.batch_items.is_empty() || job.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(t::ROOM_LINE))
+                    .child(
+                        div()
+                            .font_family(t::Face::Label.family())
+                            .font_weight(t::Face::Label.weight())
+                            .text_size(t::Face::Label.size())
+                            .text_color(rgb(t::ROOM_INK_FAINT))
+                            .child(t::code("output")),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .font_family(t::Face::Readout.family())
+                            .text_size(t::Face::Readout.size())
+                            .text_color(rgb(t::ROOM_INK_BODY))
+                            .child(if output_dir.is_empty() {
+                                "Choose an output folder".to_owned()
+                            } else {
+                                output_dir
+                            }),
+                    )
+                    .child(
+                        div()
+                            .font_family(t::Face::Label.family())
+                            .font_weight(t::Face::Label.weight())
+                            .text_size(t::Face::Label.size())
+                            .text_color(rgb(t::ROOM_INK_FAINT))
+                            .child(t::code("quality")),
+                    )
+                    .child(div().w(px(72.0)).child(Input::new(&self.batch_quality)))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("batch-run")
+                            .small()
+                            .label(if self.batch_polling { "Running…" } else { "Run queue" })
+                            .primary()
+                            .disabled(self.batch_items.is_empty() || self.batch_polling)
+                            .on_click(cx.listener(|this, _, window, cx| this.batch_run(window, cx))),
+                    )
+                    .child(
+                        Button::new("batch-pause")
+                            .small()
+                            .label("Pause")
+                            .disabled(!self.batch_polling)
+                            .on_click(cx.listener(|this, _, _, cx| this.batch_pause(cx))),
+                    )
+                    .child(
+                        Button::new("batch-cancel")
+                            .small()
+                            .label("Cancel")
+                            .disabled(job.is_none() || self.batch_finished())
+                            .on_click(cx.listener(|this, _, _, cx| this.batch_cancel(cx))),
+                    ),
+            )
+            .when(!self.batch_diagnostics.is_empty(), |view| {
+                view.child(
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .p_2()
+                        .bg(rgb(t::ROOM_SUNK))
+                        .border_b_1()
+                        .border_color(rgb(t::ROOM_LINE))
+                        .child(
+                            div()
+                                .font_family(t::Face::Label.family())
+                                .font_weight(t::Face::Label.weight())
+                                .text_size(t::Face::Label.size())
+                                .text_color(rgb(t::ROOM_INK_FAINT))
+                                .child(t::code("preflight")),
+                        )
+                        .child(diagnostics),
+                )
+            })
+            .child(
+                div()
+                    .id("batch-list")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(rows.is_empty(), |view| {
+                        view.p_3().child(
+                            div()
+                                .font_family(t::Face::Body.family())
+                                .text_size(t::Face::Body.size())
+                                .text_color(rgb(t::ROOM_INK_DIM))
+                                .child("Queue a folder or a single frame. The queue runs the workflow that is open in the Workflow view."),
+                        )
+                    })
+                    .child(list),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(t::ROOM_LINE))
+                    .bg(rgb(t::ROOM_STRIP))
+                    .font_family(t::Face::Readout.family())
+                    .text_size(t::Face::Readout.size())
+                    .text_color(rgb(t::ROOM_INK_DIM))
+                    .child(match progress {
+                        Some(progress) => progress.summary(),
+                        None => format!(
+                            "{} queued · not started",
+                            self.batch_items.len()
+                        ),
+                    })
+                    .when(!self.batch_status.is_empty(), |view| {
+                        view.child(div().child(self.batch_status.clone()))
+                    }),
+            )
+            .into_any_element()
+    }
 }
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2156,12 +3188,20 @@ impl Render for Editor {
                         .on_click(cx.listener(|this, _, window, cx| this.history(false, window, cx))))
                     .child(Button::new("redo").label("Redo").tooltip("Ctrl/Cmd+Shift+Z").disabled(self.redo.is_empty())
                         .on_click(cx.listener(|this, _, window, cx| this.history(true, window, cx))))
+                    .child(div().flex_1())
+                    .child(self.mode_switch(cx))
             )
             .when(self.show_export_settings, |view| view.child(export_controls))
             .when(self.show_shortcuts, |view| view.child(div().p_2().text_sm()
                 .child("Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · A select all (outside text fields) · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo.")))
-            .child(
-                div().id("workbench-scroll").flex_1().min_h_0().overflow_x_scroll()
+            .when(self.mode == WorkspaceMode::Browse, |view| {
+                view.child(div().flex_1().min_h_0().child(self.browse_panel(cx)))
+            })
+            .when(self.mode == WorkspaceMode::Batch, |view| {
+                view.child(div().flex_1().min_h_0().child(self.batch_panel(cx)))
+            })
+            .when(self.mode == WorkspaceMode::Workflow, |view| view.child(
+                div().id("workbench-scroll").test_support().flex_1().min_h_0().overflow_x_scroll()
                     .child(div().h_full().w_full().min_w(px(
                         280.0 + if self.workspace.library_open { self.workspace.library_width } else { 0.0 }
                             + if self.workspace.viewer_open { self.workspace.viewer_width } else { 0.0 }
@@ -2237,7 +3277,7 @@ impl Render for Editor {
                                 resizable_panel().size(px(self.workspace.viewer_width)).size_range(px(280.0)..px(720.0)).flex_none().child(self.viewers.clone())
                             ))
                     ))
-            )
+            ))
             .child(
                 div()
                     .px_3()

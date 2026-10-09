@@ -2,6 +2,43 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Which working surface the window shows. Presentation state, never graph state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkspaceMode {
+    Browse,
+    #[default]
+    Workflow,
+    Batch,
+}
+
+impl WorkspaceMode {
+    /// The persisted name, also the one the surface is called in the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Browse => "Browse",
+            Self::Workflow => "Workflow",
+            Self::Batch => "Batch",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "browse" => Some(Self::Browse),
+            "workflow" => Some(Self::Workflow),
+            "batch" => Some(Self::Batch),
+            _ => None,
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Browse => "browse",
+            Self::Workflow => "workflow",
+            Self::Batch => "batch",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
     pub library_width: f32,
@@ -10,6 +47,7 @@ pub struct Workspace {
     pub library_open: bool,
     pub viewer_open: bool,
     pub inspector_open: bool,
+    pub mode: WorkspaceMode,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -20,6 +58,7 @@ impl Default for Workspace {
             library_open: true,
             viewer_open: true,
             inspector_open: true,
+            mode: WorkspaceMode::default(),
         }
     }
 }
@@ -48,12 +87,17 @@ impl Workspace {
             library_open: open("library_open", true),
             viewer_open: open("viewer_open", true),
             inspector_open: open("inspector_open", true),
+            mode: doc
+                .get("mode")
+                .and_then(Value::as_str)
+                .and_then(WorkspaceMode::parse)
+                .unwrap_or(defaults.mode),
         })
     }
     pub fn to_json(&self) -> String {
         serde_json::json!({"version":1, "library_width":self.library_width, "viewer_width":self.viewer_width,
             "inspector_height":self.inspector_height, "library_open":self.library_open, "viewer_open":self.viewer_open,
-            "inspector_open":self.inspector_open}).to_string()
+            "inspector_open":self.inspector_open, "mode":self.mode.wire()}).to_string()
     }
     pub fn load(path: &Path) -> Result<Self, String> {
         match std::fs::metadata(path) {
@@ -102,6 +146,7 @@ mod tests {
             inspector_height: 280.0,
             library_open: false,
             inspector_open: false,
+            mode: WorkspaceMode::Batch,
             ..Default::default()
         };
         assert_eq!(Workspace::from_json(&prefs.to_json()).unwrap(), prefs);
@@ -116,6 +161,11 @@ mod tests {
             (180.0, 720.0, 100.0)
         );
         assert!(bounded.inspector_open);
+        assert_eq!(bounded.mode, WorkspaceMode::Workflow);
+        assert_eq!(
+            Workspace::from_json(r#"{"mode":"batch"}"#).unwrap().mode,
+            WorkspaceMode::Batch
+        );
         assert!(Workspace::from_json("[]").is_err());
         assert!(Workspace::from_json("{bad}").is_err());
         assert!(Workspace::from_json(r#"{"version":2}"#).is_err());

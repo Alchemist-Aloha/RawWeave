@@ -25,6 +25,9 @@ fn editor_window(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_ki
                     let mut editor = Editor::new(window, cx);
                     editor.preferences_file = None;
                     editor.workspace = Workspace::default();
+                    // Start from the same surface every run, never the developer's
+                    // own persisted preferences.
+                    editor.set_mode(super::WorkspaceMode::Workflow, window, cx);
                     editor
                 })
             },
@@ -804,4 +807,205 @@ fn library_groups_collapse_and_search_reveals_matches(cx: &mut TestAppContext) {
         assert!(editor.read(cx).collapsed_categories.is_empty());
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_mode_switcher_replaces_the_workbench_with_the_browse_and_batch_surfaces(
+    cx: &mut TestAppContext,
+) {
+    let (handle, editor) = editor_window(cx);
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        // The workflow is the arrival surface, and the switch sits in the toolbar.
+        assert!(window.find("workbench-scroll").visible());
+        let right_edge = window.viewport_size().width;
+        for mode in ["Browse", "Workflow", "Batch"] {
+            let bounds = window.find(format!("mode-{mode}")).bounds();
+            assert!(
+                bounds.size.width > px(0.0),
+                "{mode} switch must be laid out"
+            );
+            assert!(
+                bounds.right() <= right_edge,
+                "{mode} switch must stay inside the window"
+            );
+            assert!(
+                bounds.left() > right_edge / 2.0,
+                "{mode} switch belongs at the trailing edge, clear of the file actions"
+            );
+        }
+        assert!(window.try_find("browse-open-empty").is_none());
+        window.click("mode-Browse", cx);
+        window.render_frame(cx);
+        assert!(editor.read(cx).mode == super::WorkspaceMode::Browse);
+        assert!(
+            window.try_find("workbench-scroll").is_none(),
+            "the bench leaves the tree in Browse"
+        );
+        // No folder yet: the surface offers the one action that fills it.
+        assert!(window.find("browse-open-empty").visible());
+        assert!(editor.read(cx).session.source.is_none());
+        window.click("mode-Batch", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("browse-open-empty").is_none());
+        assert!(window.find("batch-list").visible());
+        assert!(window.find("batch-output-dir").visible());
+        // Run is inert while the queue is empty: there is nothing to refuse.
+        window.click("batch-run", cx);
+        window.render_frame(cx);
+        assert!(editor.read(cx).batch_snapshot.is_none());
+        assert!(editor.read(cx).batch_status.is_empty());
+        window.click("mode-Workflow", cx);
+        window.render_frame(cx);
+        assert!(window.find("workbench-scroll").visible());
+        assert!(
+            editor.read(cx).session.editor.graph().nodes().is_empty(),
+            "switching surfaces must not touch the document"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn browsing_lists_only_supported_images_and_a_bad_frame_is_reported(cx: &mut TestAppContext) {
+    let (handle, editor) = editor_window(cx);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+    let frame = dir.path().join("frame.nef");
+    std::fs::write(&frame, b"not a real raw").unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_mode(super::WorkspaceMode::Browse, window, cx);
+            editor.open_folder(dir.path().to_path_buf(), window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        let editor = editor.read(cx);
+        assert_eq!(
+            editor.browse_entries.len(),
+            1,
+            "only supported files are listed"
+        );
+        assert_eq!(editor.browse_entries[0].name, "frame.nef");
+        assert_eq!(editor.browse_selected.as_deref(), Some(frame.as_path()));
+        assert!(
+            editor.browse_missing_thumbnails.contains(&frame),
+            "an unde codable frame is marked, not left as a blank tile"
+        );
+        assert!(window.find("browse-sheet").visible());
+    })
+    .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        window.click("browse-develop", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, _, cx| {
+        let editor = editor.read(cx);
+        assert_eq!(editor.mode, super::WorkspaceMode::Workflow);
+        assert!(editor.session.source.is_none());
+        assert!(!editor.status.is_empty(), "a failed open is reported");
+    })
+    .unwrap();
+    // Queue the frame from the sheet, then run the queue with no output folder yet.
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_mode(super::WorkspaceMode::Browse, window, cx)
+        });
+        window.render_frame(cx);
+        window.click("browse-queue-one", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        assert_eq!(editor.read(cx).batch_items.len(), 1);
+        window.click("mode-Batch", cx);
+        window.render_frame(cx);
+        window.click("batch-run", cx);
+        window.render_frame(cx);
+        let editor = editor.read(cx);
+        assert!(editor.batch_snapshot.is_none());
+        assert!(
+            editor.batch_status.contains("output folder"),
+            "the refusal names the missing piece: {}",
+            editor.batch_status
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_queued_frame_runs_through_the_ui_and_writes_its_output_file(cx: &mut TestAppContext) {
+    let (handle, editor) = editor_window(cx);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test-data/images/common/pngsuite-rgb8.png");
+    let out = tempfile::tempdir().unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            // The queue runs whatever graph is open, so use the ordinary workflow
+            // for an ordinary source.
+            editor.session.editor.reset_ordinary_image_graph().unwrap();
+            editor.batch_settings.output_dir = out.path().to_path_buf();
+            editor.batch_settings.format = rawweave_batch::OutputFormat::Png;
+            editor.open_folder(source.parent().unwrap().to_path_buf(), window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.browse_selected = Some(source.clone());
+            editor.queue_selected(window, cx);
+        });
+        window.render_frame(cx);
+        window.click("mode-Batch", cx);
+        window.render_frame(cx);
+        window.click("batch-run", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // The engine's own workers are OS threads; wait for their file, then read the
+    // state the poll path publishes.
+    let written = |path: &std::path::Path| {
+        std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|entry| entry.extension().is_some_and(|ext| ext == "png"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while written(out.path()).is_empty() && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let files = written(out.path());
+    cx.update_window(handle, |_, _, cx| {
+        editor.update(cx, |editor, _| editor.refresh_batch());
+    })
+    .unwrap();
+    let (progress, status) = cx.update(|cx| {
+        let editor = editor.read(cx);
+        (
+            editor
+                .batch_snapshot
+                .as_ref()
+                .map(super::batchqueue::progress),
+            editor.batch_status.clone(),
+        )
+    });
+    assert_eq!(files.len(), 1, "the run must write its encoded output");
+    let progress = progress.expect("the queue keeps a snapshot");
+    assert_eq!(progress.failed, 0, "status: {status}");
+    assert_eq!(progress.completed, 1, "status: {status}");
+    assert!(progress.is_finished(), "status: {status}");
 }

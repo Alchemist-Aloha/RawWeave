@@ -115,3 +115,26 @@ UI actions:
 ## Exit Deliverable
 
 A coherent Browse → Queue → Workflow loop suitable for daily photographic use.
+
+## Implemented in the native GPUI shell
+
+The **Browse** surface (`apps/desktop-gpui`, `src/browse.rs`) is the first slice of
+this step, reached from the toolbar's view switch:
+
+- open a folder from a native directory prompt, or follow the folder of an opened image;
+- a contact sheet of the supported files directly inside that folder, sorted by name
+  and bounded to 2000 entries (a truncation is reported in the status line);
+- one bounded display thumbnail per frame (long edge 320 px), decoded on a worker and
+  uploaded directly as BGRA. Ordinary images decode through the shared bounded loader;
+  RAW frames use the container's embedded JPEG preview when it has one. A RAW frame
+  without an embedded preview shows **NO EMBEDDED PREVIEW** and its encoded size
+  rather than a fabricated image;
+- click to select a frame, then **Develop** (open it in the workflow) or
+  **Queue frame** / **Queue folder** (add it to the batch queue);
+- the browsed folder, the current surface and the queue survive switching surfaces and
+  a restart (folder and surface are persisted presentation state; the queue lives in
+  the session).
+
+Not implemented yet: breadcrumbs, incremental EXIF/summary panels, ratings and flags,
+sort/filter controls, multi-selection, rename/move/copy/reveal/trash, XMP metadata
+persistence, Working Queue reordering and Test Set navigation.

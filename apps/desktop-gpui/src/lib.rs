@@ -1,4 +1,6 @@
 //! Native desktop session. Graph execution stays in the existing Rust engine.
+pub mod batchqueue;
+pub mod browse;
 pub mod export;
 pub mod geometry;
 pub mod library;
@@ -375,7 +377,8 @@ impl Session {
         }
     }
 }
-fn image_display_frame(image: &Image, full: Dimensions) -> Result<PreviewFrame, String> {
+/// The bounded BGRA display raster for an ordinary or linear-sRGB image.
+pub fn image_display_frame(image: &Image, full: Dimensions) -> Result<PreviewFrame, String> {
     if image.color_metadata().domain != ColorDomain::LinearSrgb {
         return PreviewFrame::from_pixels(image.dimensions(), full, image.pixels().iter().copied());
     }
@@ -480,7 +483,8 @@ pub struct PreviewFrame {
     pub bgra: Vec<u8>,
 }
 impl PreviewFrame {
-    fn from_pixels(
+    /// Bounded BGRA display raster for a native upload.
+    pub fn from_pixels(
         dimensions: Dimensions,
         full_dimensions: Dimensions,
         pixels: impl Iterator<Item = [f32; 4]>,

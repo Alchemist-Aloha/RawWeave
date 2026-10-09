@@ -1196,7 +1196,8 @@ fn comparison_frame(
         bgra: raster.bgra,
     }))
 }
-fn upload(frame: &PreviewFrame) -> Result<Arc<RenderImage>, String> {
+/// Upload one bounded BGRA frame as a native texture.
+pub(crate) fn upload(frame: &PreviewFrame) -> Result<Arc<RenderImage>, String> {
     let image = image::RgbaImage::from_raw(
         frame.dimensions.width,
         frame.dimensions.height,

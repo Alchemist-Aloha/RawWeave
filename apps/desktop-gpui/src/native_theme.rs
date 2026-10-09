@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use gpui::{App, FontWeight, Pixels, SharedString, TextSystem, px};
+use rawweave_gpui::batchqueue::Tone;
 
 // --- room: warm near-black handling chrome ---------------------------------
 pub const ROOM_GROUND: u32 = 0x14110d;
@@ -159,6 +160,18 @@ pub fn data_type_color(data_type: Option<&str>) -> u32 {
     }
 }
 
+/// A state stamp's ground and ink: one treatment, so a state is never decoded
+/// twice, and the ink role rather than the dark mark value carries the text.
+pub fn stamp(tone: Tone) -> (u32, u32) {
+    match tone {
+        Tone::Idle => (ROOM_RAISE, ROOM_INK_DIM),
+        Tone::Fresh => (WAX_WHITE_TINT, WAX_WHITE),
+        Tone::Held => (WAX_AMBER_TINT, WAX_AMBER),
+        Tone::Failed => (WAX_RED_TINT, WAX_RED_INK),
+        Tone::Working => (WAX_BLUE_TINT, WAX_BLUE),
+    }
+}
+
 /// Register the two shipped faces. A failure is reported, never hidden: an
 /// unresolved family silently falls back to a system face and the world is lost.
 pub fn install_fonts(text_system: &TextSystem, cx: &App) -> Result<(), String> {
@@ -263,6 +276,24 @@ mod tests {
         assert!(ratio(WAX_WHITE_INK, WAX_WHITE) >= 4.5);
         // The dark mark values are not text colours.
         assert!(ratio(WAX_RED, ROOM_PANEL) < 4.5);
+    }
+
+    #[test]
+    fn state_stamps_pair_an_ink_role_with_its_own_tint() {
+        for (tone, ground, ink) in [
+            (Tone::Idle, ROOM_RAISE, ROOM_INK_DIM),
+            (Tone::Fresh, WAX_WHITE_TINT, WAX_WHITE),
+            (Tone::Held, WAX_AMBER_TINT, WAX_AMBER),
+            (Tone::Failed, WAX_RED_TINT, WAX_RED_INK),
+            (Tone::Working, WAX_BLUE_TINT, WAX_BLUE),
+        ] {
+            assert_eq!(stamp(tone), (ground, ink));
+            assert!(
+                ratio(ink, ground) >= 4.5,
+                "{tone:?}: {:.2}",
+                ratio(ink, ground)
+            );
+        }
     }
 
     #[test]

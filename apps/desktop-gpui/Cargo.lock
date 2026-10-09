@@ -5986,6 +5986,7 @@ dependencies = [
  "rawweave-batch",
  "rawweave-color",
  "rawweave-core",
+ "rawweave-graph",
  "rawweave-image",
  "rawweave-node-api",
  "rawweave-project",

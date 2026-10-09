@@ -19,6 +19,7 @@ gpui-flow = { path = "vendor/gpui-flow", optional = true }
 image = { version = "0.25", default-features = false, optional = true }
 smallvec = { version = "1", optional = true }
 rawweave-project = { path = "../../crates/project" }
+rawweave-graph = { path = "../../crates/graph" }
 rawweave-core = { path = "../../crates/core" }
 rawweave-image = { path = "../../crates/image" }
 rawweave-node-api = { path = "../../crates/node-api" }

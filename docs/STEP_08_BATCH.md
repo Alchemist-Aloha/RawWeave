@@ -123,3 +123,25 @@ Pin:
 ## Exit Deliverable
 
 A production-oriented batch engine suitable for real photographer workloads.
+
+## Implemented in the native GPUI shell
+
+The **Batch** surface runs the queue through the existing engine
+(`rawweave_batch::BatchEngine` with `ImageFileProcessor`); the shell only builds and
+reports the job (`apps/desktop-gpui/src/batchqueue.rs`):
+
+- queue a folder or a single frame from Browse; duplicates by source path are refused;
+- output folder, format (JPEG/PNG/TIFF/OpenEXR) and quality (1–100);
+- the job pins the open workflow's revision and hash, so later graph edits cannot
+  change a running job;
+- preflight runs before any worker starts, and its diagnostics are listed with the
+  queue; a job the processor cannot run is refused with the reason;
+- Run / Pause / Cancel, per-item state stamps (Waiting, Running, Completed, Failed,
+  Skipped, Cancelled) and a progress readout, polled from the engine's own snapshot;
+- the queue keeps paths, not decoded images.
+
+Not implemented yet: dry-run subsets, retry/skip actions, per-image overrides,
+resume after restart (the job store is in memory, so the queue is rebuilt by
+re-queueing), a persisted queue, and the remaining recipe fields (resolution,
+bit depth, colour space, ICC/OCIO, metadata policy, sharpening, filename template,
+collision policy) which stay at their engine defaults.

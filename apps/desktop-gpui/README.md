@@ -47,6 +47,24 @@ The optional command-line argument opens an image. Otherwise use **Open Image**.
 - Direct BGRA preview upload to GPUI's native GPU image atlas. GPUI performs textured image scaling/composition; there is **no PNG encoding, JSON pixel IPC, preview URI fetch or GPU readback** in this display path. Old atlas entries are explicitly released.
 - Actual adapter/software status is reported, not simulated. Local Linux verification selected NVIDIA GeForce GTX 1070, NVIDIA driver, `software=false`; a real JPEG was visibly displayed. RAW sampling/bounds are regression-tested. No native frame-time benchmark or camera-wide color claim.
 
+## Working surfaces
+
+The toolbar's trailing switch selects one of three surfaces; the graph, the source and
+the queue are the same objects in each.
+
+- **Browse** lays the images of one folder out as a contact sheet on the bench. Each
+  frame shows a bounded real thumbnail and a ledger row with its file code and either
+  its pixel dimensions or, when the file carries no preview, its encoded size. A RAW
+  file whose container has no embedded preview says so instead of inventing an image.
+  Nothing is fabricated: the sheet is a contact sheet, not a development.
+- **Batch** queues those frames and runs them through the existing engine. The job
+  pins the open workflow's revision and hash, so editing the graph afterwards cannot
+  change a running job; preflight runs before any worker starts.
+- **Workflow** is the graph editor, as before.
+
+Decoding stays in the Rust image/RAW boundaries: this shell lists a folder, asks for
+one bounded thumbnail per file, uploads it, and hands the queue to `rawweave_batch`.
+
 Exposure, Local Exposure, Blur, Resize, Color Matrix, Levels, Curves, Invert and
 Output offer explicit `scene` sockets alongside unchanged `image` sockets. All
 pro-tools filters/analysis and image-derived/gradient/painted masks accept scenes;
@@ -74,9 +92,9 @@ RAW development and color processing remain in Rust nodes on CPU. This is native
 | Resizable/collapsible handling and judging docks | Native divider dragging and View-menu keyboard size adjustments for Nodes and Viewer; collapse/reopen, reset and bounded absolute-size restoration, including initial window-manager tiling. Parameters now scroll inside the selected node; the former inspector is an optional short Node help rail. Old inspector-height preferences remain compatible but do not determine inline controls. |
 | Compact windows without overlapping controls | Viewer contents scroll within their own dock when short. All six comparison layouts keep controls, image surfaces and scopes separate. Very narrow workspaces scroll horizontally rather than dropping controls. This is not Tauri's portrait dock reflow. |
 | Canvas navigation and creation feedback | The plane draws a 24px line grid, carries a bordered zoom-in/zoom-out/fit-workflow control stack in its lower-left corner and a pannable overview (minimap with a viewport mask) in its lower-right. Node/link counts and the zoom readout sit in the scope header. Scaled node contents/chrome keep stable world-space edge/hit-test dimensions; initial fit runs on source/workflow load; click/Enter insertion reveals the new node at a readable zoom after control layout and Focus node restores readable controls after a wider workflow Fit; Workflow Fit supports a 25% minimum zoom; explicit drops preserve the viewport. Selecting a node recedes the unselected frames, as Tauri does. Canvas navigation, overview panning and layout actions stay out of graph history and do not request processing; viewer resizing can request a different preview mip when fit scale changes. Canvas/nodes/wires still have no right-click menus and no wire-endpoint reconnect handles. |
-| Clear command hierarchy | Primary Open Image; grouped Workflow files and View menus; separate export/history actions. Image Fit/100% stay in their own panes, distinct from Fit workflow. Source filename appears in status. |
+| Clear command hierarchy | Primary Open Image; grouped Workflow files and View menus; separate export/history actions. Image Fit/100% stay in their own panes, distinct from Fit workflow. Source filename appears in status. The trailing **VIEW** switch moves between the Browse, Workflow and Batch surfaces; the live one carries a wax-white rule under it, and the chosen surface is persisted. |
 | Parameters beside their graph context | In-node exact/draft/reset/advanced/port controls, sliders and bounded scrolling. Point-curve plots support dragging, add/delete, selection, exact x,y pair text and one-entry commits; gamma has a live draft plot and existing field/slider editing. Applied levels/map-range/clamp transfer diagrams, RGB qualifier swatches and circular hue references are presentation-only, not evaluated/color-managed results. Native curve coordinate fields/plot-based gamma manipulation and full integration automation still differ. |
-| Persistent workspace and session | Dock dimensions/visibility restore from `gpui-workspace.json` in RawWeave's platform config directory (`XDG_CONFIG_HOME/rawweave` or `~/.config/rawweave` on Linux). Invalid/unreadable files fall back to defaults with a startup diagnostic; an unavailable config location disables persistence. Graph documents, history, sources and viewer sessions are separate; A/B/session restoration and source-metadata docks remain open. The bench is drawn dark by default; the lamp switch that lights the plane is not ported. |
+| Persistent workspace and session | Dock dimensions/visibility and the last surface restore from `gpui-workspace.json` in RawWeave's platform config directory (`XDG_CONFIG_HOME/rawweave` or `~/.config/rawweave` on Linux). Invalid/unreadable files fall back to defaults with a startup diagnostic; an unavailable config location disables persistence. Graph documents, history, sources and viewer sessions are separate; A/B/session restoration and source-metadata docks remain open. The bench is drawn dark by default; the lamp switch that lights the plane is not ported. |
 
 ## Still to port
 
@@ -88,8 +106,8 @@ RAW development and color processing remain in Rust nodes on CPU. This is native
 | Viewer B / comparison | Independent targets, horizontal/stacked A/B, wipe, blink and display-space difference implemented; persistent viewer-session restoration and automated native integration coverage remain. |
 | Scopes and overlays | All eight scope views, scoped pixel readouts, hide/show, bounded sampling and clipping overlays implemented; native automated coverage remains. |
 | Crop and masks | Connected upstream image thumbnails and dimensions are available in image-input nodes. Crop rectangle drawing/centered full/square/3:2/4:3/16:9 presets, resize presets and linear/radial gradient drawing update existing Rust parameters atomically. Thumbnails evaluate input metadata at mip 0 on workers, then use bounded direct BGRA uploads; gestures account for letterboxing and global mask origins. Exposed geometry ports disable direct drawing/presets. Freehand masks, persistent editable overlay handles and a full native GPU/portal automation suite remain. |
-| Browser and image sets | Not ported: thumbnails, folders, selections and source metadata. |
-| Export and batch | Single-image export with JPEG quality, long-edge sizing, PNG depth/compression and Off/Low sharpening implemented; remaining recipe/profile controls, batch queue, progress/cancel/resume and preflight UI remain. |
+| Browser and image sets | **Browse** surface: folder prompt (or the folder of an opened image), a contact sheet of the supported files in that folder with bounded real thumbnails (ordinary decode or the RAW container's embedded preview), click-to-select, Develop, and Queue frame/folder. Image-set (HDR/focus/panorama) composition, breadcrumbs, ratings/flags, sort/filter, multi-selection, file operations and EXIF/summary panels are not ported. |
+| Export and batch | Single-image export with JPEG quality, long-edge sizing, PNG depth/compression and Off/Low sharpening implemented. **Batch** surface: a queue built from a folder or a single frame, pinned to the open workflow's revision/hash, with output folder, format (JPEG/PNG/TIFF/OpenEXR), quality, preflight diagnostics, Run/Pause/Cancel, per-item state stamps and a progress readout. Dry-run subsets, retry/skip, per-image overrides, a persisted queue, resume after restart and the remaining recipe fields remain. |
 | Checkpoints and subgraphs | Selection-blueprint export and graph instantiation implemented; checkpoint management, blueprint authoring/bindings and nested-subgraph navigation remain unported. |
 | External hosts / providers | Engine available; connection/provider UI not ported. |
 | Workspace and menus | Workflow command grouping, canvas controls, collapsible/resizable docks, keyboard size alternatives and layout persistence implemented; compact controls no longer overlap. The room/bench/judge casts, the four waxes, the 4px lattice, 3px corners and both shipped faces are implemented through a token table, and the bench defaults to dark. The lamp switch, portrait reflow, viewer/session restoration, source metadata, workspace switching and OS application menus remain. |
