@@ -119,6 +119,9 @@ pub struct Viewers {
     wipe: f32,
     wipe_slider: Entity<SliderState>,
     _wipe_subscription: Subscription,
+    wipe_drag: bool,
+    /// The wipe surface's rectangle, so a dragged edge can become a fraction of it.
+    stage_bounds: Option<Bounds<Pixels>>,
     blink_b: bool,
     blink_epoch: u64,
     difference: Option<Arc<RenderImage>>,
@@ -138,7 +141,10 @@ impl Viewers {
         });
         let subscription = cx.subscribe(&wipe_slider, |this, _, event: &SliderEvent, cx| {
             let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
-            this.wipe = value.start().clamp(0.0, 1.0);
+            let fraction = value.start().clamp(0.0, 1.0);
+            if (fraction - this.wipe).abs() > f32::EPSILON {
+                this.wipe = fraction;
+            }
             cx.notify();
         });
         Self {
@@ -152,6 +158,8 @@ impl Viewers {
             wipe: 0.5,
             wipe_slider,
             _wipe_subscription: subscription,
+            wipe_drag: false,
+            stage_bounds: None,
             blink_b: false,
             blink_epoch: 0,
             difference: None,
@@ -179,6 +187,8 @@ impl Viewers {
             self.model = ViewerModel::default();
             self.model.mode = mode;
             self.clear_difference(window);
+            // A new source under an overlay starts registered, not as two fits.
+            self.link_view(self.active, window, cx);
         }
         self.model.reconcile(&self.session);
         self.request_all(window, cx);
@@ -436,6 +446,8 @@ impl Viewers {
         if mode == Comparison::Single {
             self.active = 0;
         }
+        // Entering an overlay registers both sources on the active pane's view.
+        self.link_view(self.active, window, cx);
         self.request_all(window, cx);
         if mode == Comparison::Blink && self.enabled {
             self.start_blink(window, cx);
@@ -732,6 +744,38 @@ impl Viewers {
             )
             .into_any_element()
     }
+    /// An overlay draws both sources into one viewport, so they must share one
+    /// view: otherwise a wipe cuts two differently framed images and a blink
+    /// jumps. The moved pane is the source of truth, and its implicit fit zoom
+    /// becomes explicit for both.
+    fn link_view(&mut self, from: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.model.mode.overlay() {
+            return;
+        }
+        let source = self.session.source.as_ref().map(Source::dimensions);
+        let Some(moved) = self.panes.get(from) else {
+            return;
+        };
+        let (zoom, pan) = (Some(moved.zoom(source)), moved.pan);
+        let mut request = None;
+        for index in 0..2 {
+            if index == from {
+                continue;
+            }
+            let Some(pane) = self.panes.get_mut(index) else {
+                continue;
+            };
+            pane.zoom = zoom;
+            pane.pan = pan;
+            let mip = pane.mip(source);
+            if pane.loaded_mip != Some(mip) && pane.requested_mip != Some(mip) {
+                request = Some(index);
+            }
+        }
+        if let Some(index) = request {
+            self.request(index, window, cx);
+        }
+    }
     fn fit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = self.panes.get_mut(index) {
             pane.pan = point(px(0.0), px(0.0));
@@ -765,6 +809,7 @@ impl Viewers {
                 self.request(index, window, cx);
             }
         }
+        self.link_view(index, window, cx);
         self.refresh_difference(window, cx);
         cx.notify();
     }
@@ -833,6 +878,11 @@ impl Viewers {
                         index
                     };
                     this.active = index;
+                    if this.grab_wipe_edge(event.position) {
+                        this.sync_scopes(window, cx);
+                        cx.notify();
+                        return;
+                    }
                     if let Some(pane) = this.panes.get_mut(index) {
                         pane.drag = Some(event.position);
                     }
@@ -842,6 +892,9 @@ impl Viewers {
             )
             .on_mouse_move(
                 cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                    if this.drag_wipe_edge(event.position, window, cx) {
+                        return;
+                    }
                     let index = if this.model.mode.overlay() {
                         this.active
                     } else {
@@ -852,6 +905,7 @@ impl Viewers {
                     {
                         pane.pan += event.position - previous;
                         pane.drag = Some(event.position);
+                        this.link_view(index, window, cx);
                         this.refresh_difference(window, cx);
                         cx.notify();
                     }
@@ -863,6 +917,7 @@ impl Viewers {
                     for pane in &mut this.panes {
                         pane.drag = None;
                     }
+                    this.wipe_drag = false;
                 }),
             )
             .on_mouse_up_out(
@@ -871,6 +926,7 @@ impl Viewers {
                     for pane in &mut this.panes {
                         pane.drag = None;
                     }
+                    this.wipe_drag = false;
                 }),
             )
             .on_scroll_wheel(
@@ -888,6 +944,62 @@ impl Viewers {
                     );
                 }),
             )
+    }
+    /// How close to the wipe edge a press counts as grabbing it, in pixels.
+    const WIPE_GRAB: f32 = 12.0;
+
+    /// Whether this press starts a wipe-edge drag instead of a pan.
+    fn grab_wipe_edge(&mut self, position: Point<Pixels>) -> bool {
+        if self.model.mode != Comparison::Wipe {
+            return false;
+        }
+        let Some(bounds) = self.stage_bounds else {
+            return false;
+        };
+        let edge = bounds.left() + bounds.size.width * self.wipe;
+        if bounds.size.width <= px(0.0)
+            || (position.x - edge).abs() > px(Self::WIPE_GRAB)
+            || position.y < bounds.top()
+            || position.y > bounds.bottom()
+        {
+            return false;
+        }
+        self.wipe_drag = true;
+        true
+    }
+
+    /// Move the wipe edge while it is held. Returns whether the event was consumed.
+    fn drag_wipe_edge(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.wipe_drag {
+            return false;
+        }
+        let Some(bounds) = self.stage_bounds else {
+            return false;
+        };
+        if bounds.size.width <= px(0.0) {
+            return false;
+        }
+        let fraction =
+            (f32::from(position.x - bounds.left()) / f32::from(bounds.size.width)).clamp(0.0, 1.0);
+        self.set_wipe(fraction, window, cx);
+        true
+    }
+
+    /// One write path for the wipe, so the edge and the slider never disagree.
+    fn set_wipe(&mut self, fraction: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let fraction = fraction.clamp(0.0, 1.0);
+        if (fraction - self.wipe).abs() <= f32::EPSILON {
+            return;
+        }
+        self.wipe = fraction;
+        self.wipe_slider
+            .update(cx, |state, cx| state.set_value(fraction, window, cx));
+        cx.notify();
     }
     fn stage(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
@@ -945,10 +1057,11 @@ impl Viewers {
             .into_any_element()
     }
     fn overlay(&self, cx: &mut Context<Self>) -> AnyElement {
-        let weak = cx.entity().downgrade();
+        let weak_for_bounds = cx.entity().downgrade();
         let measure = canvas(
             move |bounds, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
+                let _ = weak_for_bounds.update(cx, |this, cx| {
+                    this.stage_bounds = Some(bounds);
                     for index in 0..2 {
                         this.resize(index, bounds.size, window.scale_factor(), window, cx);
                     }
@@ -984,14 +1097,28 @@ impl Viewers {
                                     .child(self.image(0)),
                             ),
                     )
+                    // One edge for both sides: the same 1px mark is the grab handle,
+                    // widened only for the pointer, never for the eye.
                     .child(
                         div()
+                            .id("wipe-edge")
+                            .test_support()
                             .absolute()
                             .left(relative(self.wipe))
                             .top_0()
                             .h_full()
-                            .w(px(1.0))
-                            .bg(rgb(t::JUDGE_INK)),
+                            .w(px(Self::WIPE_GRAB))
+                            .ml(px(-Self::WIPE_GRAB / 2.0))
+                            .cursor(gpui_kit::CursorStyle::ResizeColumn)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(Self::WIPE_GRAB / 2.0))
+                                    .top_0()
+                                    .h_full()
+                                    .w(px(1.0))
+                                    .bg(rgb(t::JUDGE_INK)),
+                            ),
                     );
             }
             Comparison::Blink => {
@@ -1214,8 +1341,29 @@ mod ui_tests {
     use super::{Comparison, Viewers};
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
-        AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions, px, size,
+        AppContext, Bounds, Point, TestAppContext, WindowBounds, WindowOptions, point, px, size,
     };
+
+    fn viewer_window(
+        cx: &mut TestAppContext,
+    ) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Viewers>) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::configure_theme);
+        cx.update(|cx| {
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Point::default(),
+                        size: size(px(380.0), px(340.0)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(Viewers::new),
+            )
+            .unwrap()
+        })
+    }
 
     #[gpui_kit::test]
     fn compact_comparison_modes_keep_images_controls_and_scopes_separate(cx: &mut TestAppContext) {
@@ -1271,5 +1419,129 @@ mod ui_tests {
             });
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn an_overlay_compares_one_shared_view_and_side_by_side_keeps_two(cx: &mut TestAppContext) {
+        let (handle, viewers) = viewer_window(cx);
+        let transforms = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                viewers
+                    .read(cx)
+                    .panes
+                    .each_ref()
+                    .map(|pane| (pane.zoom, pane.pan))
+            })
+        };
+        cx.update_window(handle, |_, window, cx| {
+            viewers.update(cx, |viewers, cx| {
+                viewers.set_mode(Comparison::Wipe, window, cx)
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let before = transforms(cx);
+        cx.update_window(handle, |_, window, cx| {
+            viewers.update(cx, |viewers, cx| viewers.adjust_zoom(0, 2.0, window, cx));
+        })
+        .unwrap();
+        let [moved, linked] = transforms(cx);
+        assert_eq!(moved.0, linked.0, "zooming one side must zoom the other");
+        assert_eq!(moved.1, linked.1, "the wipe shares one view");
+        assert_ne!(moved.0, before[0].0);
+
+        // Dragging the surface pans both sides of the wipe.
+        let stage = cx
+            .update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.find("viewer-0-interaction").bounds()
+            })
+            .unwrap();
+        let start = stage.center() + point(px(80.0), px(0.0));
+        cx.update_window(handle, |_, window, cx| {
+            window.drag(start, start + point(px(-32.0), px(18.0)), cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let [moved, linked] = transforms(cx);
+        assert_eq!(
+            moved, linked,
+            "a wipe compares one registration, not two framings"
+        );
+        assert_ne!(linked.1, before[0].1, "the drag must move that shared view");
+
+        // Blink alternates sources in one viewport, so it shares the view too.
+        cx.update_window(handle, |_, window, cx| {
+            viewers.update(cx, |viewers, cx| {
+                viewers.set_mode(Comparison::Blink, window, cx);
+                viewers.adjust_zoom(1, 1.5, window, cx);
+            });
+        })
+        .unwrap();
+        let [a, b] = transforms(cx);
+        assert_eq!(a, b, "blink must not jump between two framings");
+
+        // Side-by-side A/B keeps an independent view per pane on purpose.
+        cx.update_window(handle, |_, window, cx| {
+            viewers.update(cx, |viewers, cx| {
+                viewers.set_mode(Comparison::Horizontal, window, cx);
+                viewers.adjust_zoom(0, 2.0, window, cx);
+            });
+        })
+        .unwrap();
+        let [a, b] = transforms(cx);
+        assert_ne!(a.0, b.0, "stacked panes stay independently framed");
+    }
+
+    #[gpui_kit::test]
+    fn the_wipe_edge_is_draggable_and_agrees_with_its_slider(cx: &mut TestAppContext) {
+        let (handle, viewers) = viewer_window(cx);
+        cx.update_window(handle, |_, window, cx| {
+            viewers.update(cx, |viewers, cx| {
+                viewers.set_mode(Comparison::Wipe, window, cx)
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("wipe-edge").is_some(),
+                "the edge is a handle"
+            );
+        })
+        .unwrap();
+        let stage = cx
+            .update_window(handle, |_, window, _| {
+                window.find("viewer-0-interaction").bounds()
+            })
+            .unwrap();
+        assert_eq!(cx.update(|cx| viewers.read(cx).wipe), 0.5);
+        let edge = stage.left() + stage.size.width * 0.5;
+        cx.update_window(handle, |_, window, cx| {
+            window.drag(
+                point(edge, stage.center().y),
+                point(stage.left() + stage.size.width * 0.25, stage.center().y),
+                cx,
+            );
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let (wiped, slider) = cx.update(|cx| {
+            let viewers = viewers.read(cx);
+            (viewers.wipe, viewers.wipe_slider.read(cx).value().start())
+        });
+        assert!(
+            (wiped - 0.25).abs() < 0.05,
+            "the dragged edge landed at {wiped}"
+        );
+        assert_eq!(wiped, slider, "the edge and the slider agree");
+        // Dragging the image itself stays a pan; only the edge moves the wipe.
+        let pan_before = cx.update(|cx| viewers.read(cx).panes[0].pan);
+        cx.update_window(handle, |_, window, cx| {
+            let away = point(stage.left() + stage.size.width * 0.8, stage.center().y);
+            window.drag(away, away + point(px(10.0), px(0.0)), cx);
+        })
+        .unwrap();
+        assert_eq!(cx.update(|cx| viewers.read(cx).wipe), wiped);
+        assert_ne!(cx.update(|cx| viewers.read(cx).panes[0].pan), pan_before);
     }
 }
