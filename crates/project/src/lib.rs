@@ -82,7 +82,7 @@ pub fn built_in_node_pack_manifests() -> Vec<NodePackManifest> {
     ]
 }
 
-/// Application-facing backend API. Tauri commands and other frontends call this
+/// Application-facing backend API. Desktop frontends call this
 /// interface instead of reaching into the graph implementation directly.
 #[derive(Clone, Debug)]
 pub struct EditorCore {

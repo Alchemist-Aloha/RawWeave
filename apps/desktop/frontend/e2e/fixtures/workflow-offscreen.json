@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "graph": "{\"nodes\":[{\"id\":\"exposure\",\"typeId\":\"core.exposure\",\"parameters\":{\"exposure\":2},\"exposedParameters\":[]}],\"edges\":[],\"revision\":0}",
-  "positions": {
-    "exposure": { "x": 10000, "y": 10000 }
-  }
-}

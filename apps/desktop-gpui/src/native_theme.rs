@@ -139,8 +139,7 @@ pub fn code(text: &str) -> String {
 }
 
 /// Handles and wires are marked in wax by the *kind* of data they carry, so a
-/// wire says what it is before its label is read. Mirrors
-/// `apps/desktop/frontend/src/ui/data-type-colors.ts`.
+/// wire says what it is before its label is read.
 pub fn data_type_color(data_type: Option<&str>) -> u32 {
     match data_type.unwrap_or_default() {
         "core.Image" => WAX_WHITE,

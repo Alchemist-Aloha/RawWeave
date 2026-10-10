@@ -15,8 +15,8 @@ byte size, SHA-256 digest, and intended coverage.
 
 The selected RAW files are verified against RawWeave's production `RawlerDecoder` (also exposed under the legacy
 `RawloaderDecoder` name).
-The common images are verified through the Tauri image loader. These integration tests ensure
-that the files are useful to this codebase rather than merely valid downloads.
+The former Tauri image-loader integration tests were removed with the legacy application.
+Common-image checksums remain validated; equivalent GPUI corpus coverage is still needed.
 
 ## Validation
 
@@ -25,7 +25,6 @@ From the repository root:
 ```sh
 python3 scripts/validate_image_dataset.py
 cargo test -p rawweave-raw --test online_dataset
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml downloaded_common_image_dataset_decodes
 ```
 
 The checksum validator also rejects unmanifested files. When replacing or adding a file, update

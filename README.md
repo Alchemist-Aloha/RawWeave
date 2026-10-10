@@ -26,8 +26,8 @@ milestone definitions.
 **GPUI is the default desktop application.** Its native graph editor, RAW viewer,
 and export path do not use Tauri or a WebView. Desktop feature parity is incomplete;
 see [`apps/desktop-gpui/README.md`](apps/desktop-gpui/README.md) for remaining gates.
-The legacy Tauri application is retained for migration coverage, not built by the
-default desktop scripts.
+The legacy Tauri/React application has been removed. GPUI owns the bundled node
+taxonomy and parameter presentation metadata in `assets/editor/`.
 
 ## Architecture
 
@@ -58,8 +58,7 @@ node-packs/pro-tools/    denoise, sharpen, deconvolution, defringe, LUT, grain, 
 node-packs/ai/           img2img, inpaint, upscale (via provider adapters)
 
 apps/desktop-gpui/       default native GPUI desktop (separate workspace)
-apps/desktop/src-tauri/  legacy Tauri boundary retained during migration
-apps/desktop/frontend/   legacy React editor and shared presentation assets
+apps/desktop-gpui/assets/editor/  bundled node taxonomy and parameter metadata
 ```
 
 The first-party node packs use the same node API intended for third parties. If a
@@ -113,17 +112,6 @@ cargo clippy --locked --manifest-path apps/desktop-gpui/Cargo.toml \
   -p rawweave-gpui --all-targets --no-deps -- -D warnings
 python3 scripts/test_desktop_scripts.py
 
-# Legacy migration coverage (not the default app)
-# Tauri backend
-cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features
-
-# Frontend
-cd apps/desktop/frontend && pnpm test && pnpm run build
-
-# Desktop end-to-end (browser mode is fast; native proves real WebView/backend paths)
-cd apps/desktop/frontend
-pnpm run test:e2e:browser
-pnpm run build:e2e:native && pnpm run test:e2e:native
 ```
 
 The image corpus under `test-data/images/` is deliberately small and

@@ -4,7 +4,7 @@
 
 ## Platform
 
-web
+desktop
 
 ## Users
 
@@ -30,7 +30,7 @@ Mechanistically, one workflow serves single images, image sets, and batch jobs; 
 
 ## Operating Context
 
-Desktop application, Linux / Windows / macOS — desktop only, no browser or mobile target. Tauri 2 shell with a system WebView; desktop-class mouse and keyboard input, with tablet/touch and high-DPI as quality requirements, not as a touch-first design target.
+Desktop application, Linux / Windows / macOS — desktop only, no browser or mobile target. Native GPUI application without a WebView; desktop-class mouse and keyboard input, with tablet/touch and high-DPI as quality requirements, not as a touch-first design target.
 
 The product is a **file- and workflow-based editor**: it works without a catalog or import step. Photography work runs through Browse → Working Queue / Test Set → Workflow → Batch export. The Rust backend is authoritative for graph state, evaluation, color, rendering, caching, and serialization; the frontend owns presentation-only state. Large RAW files are handled with tiled, resolution-aware processing; the application must stay responsive with large workflows and large queues.
 
@@ -51,7 +51,7 @@ Confirmed functionality direction (see `docs/SPEC.MD`, `docs/ROADMAP.md` for the
 
 Constraints that future work must preserve:
 
-- Processing belongs in Rust nodes and reusable crates, never in React components or viewer-only code.
+- Processing belongs in Rust nodes and reusable crates, never in UI components or viewer-only code.
 - The frontend presents; it does not compute. RAW bytes and float buffers never travel over JSON IPC.
 - Scene-linear values are preserved until an explicit display transform; highlights are not clamped in intermediate stages.
 - Ordinary JPEG/PNG and RAW input paths stay distinct where their graph values differ.
@@ -72,7 +72,7 @@ The name **RawWeave** is fixed. No logo, voice guide, tagline, or brand asset sy
 - `docs/ROADMAP.md` — 15-step staged plan and public milestone definitions (Prototype → Technical Preview → Public Alpha → Beta).
 - `docs/STEP_01`–`STEP_15` — per-step deliverables, including `STEP_15_UI_UX.md` for the product-quality UI pass.
 - `AGENTS.md` — engineering invariants for agents working in the repo.
-- Working implementation: Rust workspace (core, image, rendering, node-api, graph, project, raw, color), first-party node packs, Tauri backend, React frontend with browse/queue, viewer, inspector, masks, batch, checkpoints, hosts, and AI provider surfaces.
+- Working implementation: Rust workspace (core, image, rendering, node-api, graph, project, raw, color), first-party node packs, and native GPUI frontend. The legacy Tauri/React application has been removed; see `apps/desktop-gpui/README.md` for implemented surfaces and remaining gaps.
 - `test-data/images/` — a deliberately small, permissively licensed RAW and common-image corpus with a provenance/licensing manifest.
 
 Absent — future work must not fabricate these: user research or testimonials, benchmarks or performance claims, a camera/lens compatibility matrix, a pricing or distribution model, screenshots or a public website, and any third-party endorsement.

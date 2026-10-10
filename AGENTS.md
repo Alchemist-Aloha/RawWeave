@@ -8,10 +8,12 @@ RawWeave is a graph-first, non-destructive RAW photo editor. The desktop applica
 
 - a Rust workspace for graph execution, image processing, rendering, RAW decoding, and color;
 - first-party node packs built on a common node API;
-- a Tauri 2 desktop boundary;
-- a React 19, TypeScript, Vite, and React Flow frontend.
+- a native GPUI Kit/gpui-flow frontend.
 
-Preserve the graph-first architecture. Processing belongs in Rust nodes and reusable crates, not in React components or viewer-only code.
+The legacy Tauri/React application has been removed at the user's request despite
+incomplete GPUI feature parity. See `apps/desktop-gpui/README.md` for remaining gaps.
+
+Preserve the graph-first architecture. Processing belongs in Rust nodes and reusable crates, not in UI components or viewer-only code.
 
 ## Repository map
 
@@ -27,10 +29,9 @@ crates/color/            scene-linear/display color and transform boundaries
 node-packs/core-values/  scalar/value nodes
 node-packs/core-image/   ordinary image-processing nodes
 node-packs/raw/          RAW development nodes
-apps/desktop/src-tauri/  Tauri commands, source state, previews, URI protocol
-apps/desktop/frontend/   React editor, viewer, controllers, platform adapters
-apps/desktop-gpui/       in-progress native GPUI Kit/gpui-flow frontend (separate workspace)
-scripts/build-all-in-one.sh  release desktop binary with embedded frontend
+apps/desktop-gpui/       native GPUI Kit/gpui-flow frontend (separate workspace)
+apps/desktop-gpui/assets/editor/  bundled taxonomy and parameter presentation metadata
+scripts/build-all-in-one.sh  release native desktop binary
 docs/                    staged development plans
 test-data/images/        licensed image integration-test corpus
 scripts/                 repository validation scripts
@@ -57,17 +58,12 @@ scripts/                 repository validation scripts
 - Record build mode, source dimensions, region/mip/quality, cache state, sample counts, and timing boundaries. Separate open/decode, first preview, unchanged repeats, parameter edits, and end-to-end display latency. Backend benchmarks and browser adapters do not establish native UI performance.
 - Keep benchmark commands reproducible and fixtures deterministic or licensed. Do not turn host-specific timings into CI thresholds, product guarantees, or claims of camera-wide compatibility. Report blocked or failing gates honestly.
 
-Run the current optimized large-image benchmark from the repository root:
-
-```sh
-RAWWEAVE_PREVIEW_DIAGNOSTICS=1 cargo test --release --locked \
-  --manifest-path apps/desktop/src-tauri/Cargo.toml --all-features \
-  large_image_loading_benchmark -- --ignored --nocapture --test-threads=1
-```
+The former Tauri large-image benchmark was removed with the legacy app. Historical
+measurements in `docs/LARGE_IMAGE_PERFORMANCE.md` do not establish GPUI performance.
 
 ## Rust conventions
 
-- The root workspace uses Rust edition 2024; the Tauri crate currently uses edition 2021.
+- The root workspace and native GPUI crate use Rust edition 2024.
 - Prefer workspace dependencies in the root `Cargo.toml` for workspace members.
 - Avoid `unwrap`, `expect`, unchecked indexing, and unchecked numeric casts in production paths handling files, dimensions, regions, or user data.
 - Validate finite floating-point parameters and resource limits before allocating or processing.
@@ -78,18 +74,16 @@ RAWWEAVE_PREVIEW_DIAGNOSTICS=1 cargo test --release --locked \
 - Serialize graph configuration, not runtime image buffers, decoder state, GPU resources, preview bytes, or source-file contents.
 - New graph values require stable type IDs plus updates to hashing, matching, serialization behavior, and tests.
 
-## Frontend and Tauri conventions
+## Native frontend conventions
 
-- Keep native calls behind `EditorPlatform` and `PreviewTransport` adapters so controllers remain testable in memory.
-- Controllers own editor/viewer state transitions; React components should remain presentation-focused.
-- Filter asynchronous preview events by request ID and graph revision.
+- Keep UI components presentation-focused; session and engine logic must stay testable without a window.
+- Filter asynchronous preview results by request ID and graph revision.
 - Register preview jobs before spawning workers. Cancellation before worker start must remain cancelled.
-- Release preview URLs/bytes and bound preview storage by count and total bytes.
+- Release obsolete preview textures/bytes and bound preview storage by count and total bytes.
 - Loading a workflow clears runtime source state. The next compatible source selection attaches to the loaded graph without rebuilding it.
 - A normal Open Image action may construct the appropriate default ordinary or RAW graph.
-- Use the official Tauri dialog plugin for filesystem path selection. Keep capabilities least-privileged.
-- Do not rely on browser-only `File.path` behavior in the Tauri application.
-- Keep `apps/desktop/src-tauri/gen/schemas/` synchronized when plugin capabilities change.
+- Use native file dialogs and preserve validation at filesystem boundaries.
+- Bundle presentation-only metadata in `apps/desktop-gpui/assets/editor/`; Rust node constraints remain authoritative.
 
 ## Testing
 
@@ -115,44 +109,13 @@ cargo test --locked --workspace --all-targets --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 ```
 
-### Tauri desktop backend
+### Native GPUI desktop
 
-```sh
-cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features
-cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features
-cargo clippy --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-```
-
-### Frontend
-
-```sh
-cd apps/desktop/frontend
-pnpm install --frozen-lockfile
-pnpm test
-pnpm run build
-```
-
-Do not force dependency upgrades through an audit fix; breaking changes require deliberate review.
-
-### Desktop end-to-end tests
-
-Run these from `apps/desktop/frontend` after relevant frontend or desktop changes:
-
-```sh
-pnpm run test:e2e:browser
-pnpm run build:e2e:native
-pnpm run test:e2e:native
-```
-
-- Browser mode starts Vite and uses in-memory platform adapters in headless Chrome. Cover each workspace surface and its relevant controls here for fast UI regression checks.
-- The native suite runs the debug Tauri binary through `@wdio/tauri-service`. Use it for Rust command bridge, file/source restoration, preview protocol, image display, scopes, and other behavior that depends on the real WebView or backend.
-- Rebuild the native E2E binary after changing Rust, Tauri configuration, or frontend code that the binary embeds. Keep the `wdio-e2e` plugins and permissions gated to E2E builds.
-- Browser mode does not prove native integration, and component tests do not prove the actual display path. Add a native regression when fixing a native-only bug.
-- See `apps/desktop/frontend/e2e/README.md` for setup, coverage, and runner notes.
-
-### Native GPUI migration
-
-GPUI is the default desktop target, but is not yet feature-equivalent to Tauri. See `apps/desktop-gpui/README.md` for implemented surfaces and remaining parity gates. GPUI uses native GPU composition with direct BGRA image uploads; RAW processing remains CPU-based. Preserve the Tauri application until migration coverage is complete.
+GPUI is the only desktop target, but is not yet feature-equivalent to the removed
+Tauri app. See `apps/desktop-gpui/README.md` for implemented surfaces and remaining
+parity gates. GPUI uses native GPU composition with direct BGRA image uploads;
+RAW processing remains CPU-based. The legacy backend and WebdriverIO suites were
+removed; session/headless tests do not prove native GPU pixels or OS file portals.
 
 ```sh
 cargo test --locked --manifest-path apps/desktop-gpui/Cargo.toml --workspace
@@ -165,7 +128,6 @@ cargo fmt --manifest-path apps/desktop-gpui/Cargo.toml --all -- --check
 ```sh
 python3 scripts/validate_image_dataset.py
 cargo test -p rawweave-raw --test online_dataset
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml downloaded_common_image_dataset_decodes
 ```
 
 Every file under `test-data/images/raw/` or `test-data/images/common/` must have a matching entry in `test-data/images/manifest.json` containing provenance, licensing, byte size, and SHA-256. Only add files whose redistribution terms are compatible with this repository.
@@ -181,8 +143,8 @@ Add regression coverage for every bug fix. Important areas include:
 - Bayer/X-Trans borders, black/white levels, highlights, color transforms;
 - cancellation before/during preview work and stale-result rejection;
 - RAW-to-ordinary transitions and workflow source reattachment;
-- frontend controller behavior independently of React rendering.
-- visible frontend workspace behavior in WebdriverIO browser mode and backend-dependent preview behavior in the native Tauri suite.
+- frontend session behavior independently of GPUI rendering;
+- visible frontend workspace behavior in headless GPUI tests and running-app verification for native GPU/portal behavior.
 
 Use deterministic synthetic fixtures for precise algorithm assertions. Use the licensed online-derived dataset only for decoder/loader integration smoke tests.
 

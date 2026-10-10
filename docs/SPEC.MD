@@ -1,5 +1,10 @@
 # SPEC.md
 
+Implementation note: the legacy Tauri/React app has been removed. Shell-specific
+sections below describe the original plan, not the current desktop architecture.
+The Rust/core and product requirements remain applicable; see
+`../apps/desktop-gpui/README.md` for the native implementation and remaining gaps.
+
 # Open-Source Node-Based RAW Photo Editor
 
 ## 1. Project Overview

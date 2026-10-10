@@ -3,7 +3,7 @@ use rawweave_node_api::{ParameterDescriptor, ParameterType, ParameterValue};
 use serde_json::Value;
 use std::sync::OnceLock;
 
-const UX_JSON: &str = include_str!("../../desktop/frontend/src/editor/parameter-ux.json");
+const UX_JSON: &str = include_str!("../assets/editor/parameter-ux.json");
 static UX_DATA: OnceLock<Result<Value, serde_json::Error>> = OnceLock::new();
 
 #[derive(Clone, Debug)]

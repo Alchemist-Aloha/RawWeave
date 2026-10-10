@@ -1,5 +1,21 @@
 # Editor improvement log
 
+## Legacy desktop removal
+
+The user requested removal of the Tauri/React app despite incomplete GPUI parity.
+Moved node taxonomy and parameter UX JSON unchanged into
+`apps/desktop-gpui/assets/editor/` and updated both compile-time includes. Removed
+legacy application source, browser/native WebdriverIO suites and the Tauri build
+validator. GPUI fonts and their licenses are already bundled locally. Processing,
+node schemas and persisted workflow formats are unchanged. Earlier Tauri entries
+remain historical records, not runnable gates; GPUI's README lists remaining gaps.
+Verification: metadata files match their original Git bytes; 49 no-default-feature
+GPUI tests and 74 all-feature tests (including 22 native/headless tests) pass.
+All-target/all-feature compile check, scoped Clippy, both workspace formatting
+checks, desktop-script tests and `git diff --check` pass. No running-window/GPU
+pixel or OS-portal verification was performed; no visual or performance gain is
+claimed. Ignored legacy build/dependency caches are retained.
+
 ## Priorities
 
 Ranked by impact × frequency × confidence / cost:

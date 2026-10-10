@@ -5,11 +5,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 static TAXONOMY: OnceLock<Result<Value, serde_json::Error>> = OnceLock::new();
 fn taxonomy() -> Option<&'static Value> {
     TAXONOMY
-        .get_or_init(|| {
-            serde_json::from_str(include_str!(
-                "../../desktop/frontend/src/editor/node-categories.json"
-            ))
-        })
+        .get_or_init(|| serde_json::from_str(include_str!("../assets/editor/node-categories.json")))
         .as_ref()
         .ok()
 }

@@ -1,5 +1,10 @@
 # Step 01 — Backbone: Core Engine, Frontend Shell, and Minimal Plugin System
 
+Implementation note: the legacy Tauri/React app has been removed. Shell-specific
+sections below describe the original plan, not the current desktop architecture.
+The Rust/core and product requirements remain applicable; see
+`../apps/desktop-gpui/README.md` for the native implementation and remaining gaps.
+
 ## Objective
 
 Build the smallest complete application that proves the architecture from UI to Rust graph execution to plugin-defined image processing.

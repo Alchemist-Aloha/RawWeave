@@ -1,5 +1,9 @@
 # Large-image loading and preview performance
 
+Historical Tauri measurements below refer to the removed legacy application; its
+benchmark command is no longer runnable. Retained GPUI sections describe the native
+path, but the old PNG/IPC measurements are not evidence of GPUI performance.
+
 ## Reproduce
 
 From the repository root:
