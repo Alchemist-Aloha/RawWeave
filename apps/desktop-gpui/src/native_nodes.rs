@@ -1,5 +1,6 @@
 //! Controls live in the node graph; all edits use the authoritative editor/history paths.
 use super::*;
+use rawweave_gpui::i18n::tr;
 
 impl Editor {
     fn parameter_controls(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -15,15 +16,15 @@ impl Editor {
                                     .p_3()
                                     .gap_2()
                                     .child(div().h_flex().flex_wrap().gap_2()
-                                        .child(div().font_weight(FontWeight::BOLD).child("Parameters"))
-                                        .child(Button::new("collapse-node-controls").small().label("Collapse controls")
+                                        .child(div().font_weight(FontWeight::BOLD).child(tr(self.workspace.locale, "Parameters")))
+                                        .child(Button::new("collapse-node-controls").small().label(tr(self.workspace.locale, "Collapse controls"))
                                             .on_click(cx.listener(|this, _, window, cx| { window.focus(&this.focus, cx); this.controls_open = false; this.flow.update(cx, |_, cx| cx.notify()); cx.notify(); }))))
-                                    .when(self.fields.iter().any(|field|field.draft.ux.advanced),|view|view.child(Button::new("advanced-parameters").label(if self.show_advanced {"Hide Advanced"} else {"Show Advanced"}).on_click(cx.listener(|this,_,window,cx|{window.focus(&this.focus,cx);this.show_advanced = !this.show_advanced;cx.notify();}))))
+                                    .when(self.fields.iter().any(|field|field.draft.ux.advanced),|view|view.child(Button::new("advanced-parameters").label(if self.show_advanced {tr(self.workspace.locale, "Hide Advanced")} else {tr(self.workspace.locale, "Show Advanced")}).on_click(cx.listener(|this,_,window,cx|{window.focus(&this.focus,cx);this.show_advanced = !this.show_advanced;cx.notify();}))))
                                     .children(self.fields.iter().enumerate().filter(|(_,field)| !field.draft.ux.advanced || self.show_advanced).map(|(index,field)| {
                                         let ux=&field.draft.ux;
                                         let points=if ux.point_curve {curve_points(field.draft.text(),ux.scalar_curve).ok()} else {None};
                                         let control=if field.draft.descriptor.parameter_type==ParameterType::Boolean {
-                                            Checkbox::new(("boolean",index)).label(ux.name.clone()).checked(matches!(field.draft.committed(),ParameterValue::Boolean(true)))
+                                            Checkbox::new(("boolean",index)).label(tr(self.workspace.locale, &ux.name)).checked(matches!(field.draft.committed(),ParameterValue::Boolean(true)))
                                                 .on_click(cx.listener(move |this,value,window,cx|this.choose_field(index,ParameterValue::Boolean(*value),window,cx))).into_any_element()
                                         } else if !ux.options.is_empty() {
                                             let options=ux.options.clone();let current=field.draft.text().to_owned();let weak=cx.entity().downgrade();
@@ -52,7 +53,7 @@ impl Editor {
                                                             .font_family(t::Face::Control.family())
                                                             .font_weight(t::Face::Control.weight())
                                                             .text_size(t::Face::Control.size())
-                                                            .child(ux.name.clone()),
+                                                            .child(tr(self.workspace.locale, &ux.name).to_owned()),
                                                     )
                                                     .when_some(ux.unit.as_ref(), |view, unit| view.child(
                                                         div()
@@ -61,8 +62,8 @@ impl Editor {
                                                             .text_color(rgb(t::ROOM_INK_DIM))
                                                             .child(format!("({unit})")),
                                                     ))
-                                                .child(div().capture_any_mouse_down(cx.listener(move |this,_,window,cx|this.cancel_field(index,window,cx))).child(Button::new(("reset",index)).label("Reset").disabled(!field.draft.modified()).on_click(cx.listener(move |this,_,window,cx|this.reset_field(index,window,cx)))))
-                                                .child(Button::new(("port",index)).label(if field.exposed {"Hide input"} else {"As input"}).on_click(cx.listener(move |this,_,window,cx|this.toggle_parameter_port(index,window,cx)))))
+                                                .child(div().capture_any_mouse_down(cx.listener(move |this,_,window,cx|this.cancel_field(index,window,cx))).child(Button::new(("reset",index)).label(tr(self.workspace.locale, "Reset")).disabled(!field.draft.modified()).on_click(cx.listener(move |this,_,window,cx|this.reset_field(index,window,cx)))))
+                                                .child(Button::new(("port",index)).label(if field.exposed {tr(self.workspace.locale, "Hide input")} else {tr(self.workspace.locale, "As input")}).on_click(cx.listener(move |this,_,window,cx|this.toggle_parameter_port(index,window,cx)))))
                                             .when_some(points.as_ref(),|view,points| {
                                                 let selected=field.curve_index.min(points.len().saturating_sub(1));
                                                 view.child(div().v_flex().gap_1()
@@ -72,18 +73,18 @@ impl Editor {
                                                             .text_color(rgb(t::ROOM_INK))
                                                             .child(format!("point {} of {selected_hint}: input {x}, output {y}", selected + 1, selected_hint = points.len()))))
                                                     .child(div().h_flex().flex_wrap().gap_1()
-                                                        .child(Button::new(("curve-previous",index)).label("Previous point").disabled(selected==0).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,false,cx))))
-                                                        .child(Button::new(("curve-next",index)).label("Next point").disabled(selected+1>=points.len()).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,true,cx))))
-                                                        .child(Button::new(("curve-add",index)).label("Add point").disabled(points.len()>=4096).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,false,window,cx))))
-                                                        .child(Button::new(("curve-remove",index)).label("Delete point").disabled(selected==0||selected+1>=points.len()).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,true,window,cx)))))
-                                                    .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child("Add inserts the midpoint of the widest input interval. Endpoints cannot be deleted with these controls; edit exact x,y pairs below.")))
+                                                        .child(Button::new(("curve-previous",index)).label(tr(self.workspace.locale, "Previous point")).disabled(selected==0).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,false,cx))))
+                                                        .child(Button::new(("curve-next",index)).label(tr(self.workspace.locale, "Next point")).disabled(selected+1>=points.len()).on_click(cx.listener(move |this,_,_,cx|this.select_curve_point(index,true,cx))))
+                                                        .child(Button::new(("curve-add",index)).label(tr(self.workspace.locale, "Add point")).disabled(points.len()>=4096).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,false,window,cx))))
+                                                        .child(Button::new(("curve-remove",index)).label(tr(self.workspace.locale, "Delete point")).disabled(selected==0||selected+1>=points.len()).on_click(cx.listener(move |this,_,window,cx|this.edit_curve_points(index,true,window,cx)))))
+                                                    .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child(tr(self.workspace.locale, "Add inserts the midpoint of the widest input interval. Endpoints cannot be deleted with these controls; edit exact x,y pairs below."))))
                                             })
                                             .when(ux.point_curve || (self.selected.as_ref().is_some_and(|id| self.session.editor.graph().node(&CoreNodeId::from(id.as_str())).is_some_and(|node| node.type_id == "core.curves")) && field.draft.descriptor.id == "gamma"), |view| view.child(self.curve_plot(index, cx)))
                                             .child(control)
-                                            .when(ux.multiline,|view|view.child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child("Shift+Enter inserts a line; Enter applies; Escape cancels.")))
+                                            .when(ux.multiline,|view|view.child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child(tr(self.workspace.locale, "Shift+Enter inserts a line; Enter applies; Escape cancels."))))
                                             .when_some(field.slider.as_ref(),|view,slider|view.child(Slider::new(slider).w_full()))
-                                            .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child(ux.description.clone()))
-                                            .when(field.draft.outside_recommended(),|view|view.child(div().text_xs().child("Outside recommended slider range; exact value is preserved.")))
+                                            .child(div().font_family(t::Face::Label.family()).font_weight(t::Face::Label.weight()).text_size(t::Face::Label.size()).text_color(rgb(t::ROOM_INK_DIM)).child(tr(self.workspace.locale, &ux.description).to_owned()))
+                                            .when(field.draft.outside_recommended(),|view|view.child(div().text_xs().child(tr(self.workspace.locale, "Outside recommended slider range; exact value is preserved."))))
                                             .when_some(self.selected.as_ref().and_then(|id| self.session.editor.graph().edges().iter().find(|edge| edge.to_node.as_str()==id && edge.to_port==field.draft.descriptor.id)), |view, edge| view.child(div().text_xs().child(format!("Driven by {} · {}",self.session.node_label(edge.from_node.as_str()),edge.from_port))))
                                             .when_some(field.error.as_ref(),|view,error|view.child(div().text_xs().text_color(rgb(t::WAX_RED_INK)).child(error.clone())))
                                     })).into_any_element()
@@ -132,7 +133,10 @@ impl Editor {
                     .font_family(t::Face::Title.family())
                     .font_weight(t::Face::Title.weight())
                     .text_size(px(12.0 * zoom))
-                    .child(node.label.clone()),
+                    .child(
+                        self.session
+                            .localized_node_label(node.id.as_ref(), self.workspace.locale),
+                    ),
             )
             .child(
                 div()
@@ -147,7 +151,7 @@ impl Editor {
                 view.child(
                     Button::new("focus-node-controls")
                         .small()
-                        .label("Focus node")
+                        .label(tr(self.workspace.locale, "Focus node"))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.reveal_canvas_node(&focus_id, cx)
@@ -165,7 +169,11 @@ impl Editor {
                             source
                                 .map(|name| format!("Input image from {name}"))
                                 .unwrap_or_else(|| {
-                                    "Input image: connect an image output socket".into()
+                                    tr(
+                                        self.workspace.locale,
+                                        "Input image: connect an image output socket",
+                                    )
+                                    .into()
                                 }),
                         ),
                 )
@@ -174,7 +182,7 @@ impl Editor {
                 view.child(
                     Button::new("open-node-controls")
                         .small()
-                        .label("Edit controls")
+                        .label(tr(self.workspace.locale, "Edit controls"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.controls_open = true;
                             this.flow.update(cx, |_, cx| cx.notify());
@@ -493,6 +501,11 @@ impl GeometryHelper {
 }
 impl Render for GeometryHelper {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self
+            .owner
+            .upgrade()
+            .map(|owner| owner.read(cx).workspace.locale)
+            .unwrap_or_default();
         let drawable = matches!(
             self.kind.as_str(),
             "core.crop" | "core.mask-linear-gradient" | "core.mask-radial-gradient"
@@ -578,7 +591,7 @@ impl Render for GeometryHelper {
                     .text_color(rgb(t::BENCH_INK_DIM))
                     .child(self.status.clone()),
             )
-            .when(self.driven(), |view| view.child("Geometry is driven by parameter ports. Hide those ports to draw or use presets."))
+            .when(self.driven(), |view| view.child(tr(locale, "Geometry is driven by parameter ports. Hide those ports to draw or use presets.")))
             .when_some(self.image.clone(), |view,image| view.child(div().id("node-image-helper").test_support().relative().w_full().h(px(180.0*self.zoom)).overflow_hidden().bg(rgb(t::BENCH_SUNK))
                 .when_some(thumbnail, |view,(width,height)| view.child(div().id("node-input-thumbnail").test_support().absolute()
                     .left(px((300.0*self.zoom-width)/2.0)).top(px((180.0*self.zoom-height)/2.0)).w(px(width)).h(px(height))
@@ -591,19 +604,20 @@ impl Render for GeometryHelper {
                     .on_mouse_up_out(MouseButton::Left,cx.listener(|this,event: &MouseUpEvent,window,cx| this.finish(event.position,window,cx)))
                     .on_key_down(cx.listener(|this,event: &KeyDownEvent,_,cx| { if event.keystroke.key=="escape" {this.start=None;this.end=None;cx.notify();} }))
                 )))
-            .when(drawable, |view| view.child(if self.kind == "core.crop" { "Drag a crop rectangle; release to apply. Escape cancels." } else { "Drag a gradient; release to apply. Escape cancels." }))
+            .when(drawable, |view| view.child(if self.kind == "core.crop" { tr(locale, "Drag a crop rectangle; release to apply. Escape cancels.") } else { tr(locale, "Drag a gradient; release to apply. Escape cancels.") }))
             .when(self.kind=="core.crop", |view| view.child(div().h_flex().flex_wrap().gap_1()
                 .children([("Full image",None),("Square",Some(1.0)),("3:2",Some(1.5)),("4:3",Some(4.0/3.0)),("16:9",Some(16.0/9.0))].into_iter().enumerate().map(|(i,(label,ratio))|
-                    Button::new(("crop-preset",i)).small().label(label).disabled(!ready || self.dimensions.and_then(|dims| rawweave_gpui::geometry::crop_preset(dims,ratio)).is_none())
+                    Button::new(("crop-preset",i)).small().label(tr(locale, label)).disabled(!ready || self.dimensions.and_then(|dims| rawweave_gpui::geometry::crop_preset(dims,ratio)).is_none())
                         .on_click(cx.listener(move |this,_,window,cx| this.preset(ratio,window,cx)))))))
             .when(self.kind=="core.resize", |view| view.child(div().h_flex().flex_wrap().gap_1()
                 .children([("Original",1.0),("Half",0.5),("Quarter",0.25),("Three-quarter",0.75)].into_iter().enumerate().map(|(i,(label,scale))|
-                    Button::new(("resize-preset",i)).small().label(label).disabled(!ready).on_click(cx.listener(move |this,_,window,cx| this.resize_to(scale,window,cx)))))))
+                    Button::new(("resize-preset",i)).small().label(tr(locale, label)).disabled(!ready).on_click(cx.listener(move |this,_,window,cx| this.resize_to(scale,window,cx)))))))
     }
 }
 
 impl Editor {
     fn curve_plot(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         let field = &self.fields[index];
         let scalar = field.draft.ux.scalar_curve;
         let editable = field.draft.ux.point_curve;
@@ -616,7 +630,10 @@ impl Editor {
             let gamma = field.draft.shown_number().unwrap_or(0.0);
             if !gamma.is_finite() || gamma <= 0.0 {
                 return div()
-                    .child("Enter a gamma greater than zero to show its curve.")
+                    .child(tr(
+                        locale,
+                        "Enter a gamma greater than zero to show its curve.",
+                    ))
                     .into_any_element();
             }
             (0..=64)
@@ -700,7 +717,12 @@ impl Editor {
             .v_flex()
             .gap_1()
             .w_full()
-            .child(format!("Output {}…{}", domain[2], domain[3]))
+            .child(format!(
+                "{} {}…{}",
+                tr(locale, "Output"),
+                domain[2],
+                domain[3]
+            ))
             .child(
                 div()
                     .id(("curve-plot", index))
@@ -771,11 +793,12 @@ impl Editor {
                     }),
             )
             .child(format!(
-                "Input {}…{}{}",
+                "{} {}…{}{}",
+                tr(locale, "Input"),
                 domain[0],
                 domain[1],
                 if editable {
-                    " · Drag points; release to apply"
+                    tr(locale, " · Drag points; release to apply")
                 } else {
                     ""
                 }
@@ -880,7 +903,10 @@ impl Editor {
                 number("target_b", 1.0),
             ];
             if node.parameters.contains_key("color") {
-                view = view.child("Legacy color overrides RGB; no swatch is shown.");
+                view = view.child(tr(
+                    self.workspace.locale,
+                    "Legacy color overrides RGB; no swatch is shown.",
+                ));
             } else if channels
                 .iter()
                 .all(|channel| channel.is_finite() && (0.0..=1.0).contains(channel))
@@ -901,11 +927,18 @@ impl Editor {
                         )),
                 );
             } else {
-                view = view.child("Reference requires finite RGB channels from 0 to 1.");
+                view = view.child(tr(
+                    self.workspace.locale,
+                    "Reference requires finite RGB channels from 0 to 1.",
+                ));
             }
-            view = view.child("Reference sRGB swatch only, not a working-space transform.");
+            view = view.child(tr(
+                self.workspace.locale,
+                "Reference sRGB swatch only, not a working-space transform.",
+            ));
         } else if node.type_id == "pro.color-zones" {
             view = view.child(hue_reference(
+                self.workspace.locale,
                 "Target hue",
                 number("hue", 0.0),
                 Some(number("width", 0.2)),
@@ -914,12 +947,14 @@ impl Editor {
         } else if node.type_id == "pro.split-toning" {
             view = view
                 .child(hue_reference(
+                    self.workspace.locale,
                     "Shadow hue",
                     number("shadow_hue", 0.6),
                     None,
                     Some(number("shadow_saturation", 0.0)),
                 ))
                 .child(hue_reference(
+                    self.workspace.locale,
                     "Highlight hue",
                     number("highlight_hue", 0.1),
                     None,
@@ -928,8 +963,11 @@ impl Editor {
         } else {
             return div().into_any_element();
         }
-        view.child("Applied parameter reference; exposed inputs may override these values.")
-            .into_any_element()
+        view.child(tr(
+            self.workspace.locale,
+            "Applied parameter reference; exposed inputs may override these values.",
+        ))
+        .into_any_element()
     }
 }
 fn curve_fraction(value: f32, low: f32, high: f32) -> f32 {
@@ -992,6 +1030,7 @@ fn reference_diagram(points: Vec<(f32, f32)>) -> AnyElement {
         .into_any_element()
 }
 fn hue_reference(
+    locale: rawweave_gpui::i18n::Locale,
     label: &str,
     hue: f32,
     radius: Option<f32>,
@@ -1004,7 +1043,10 @@ fn hue_reference(
             .is_some_and(|saturation| !saturation.is_finite() || !(0.0..=1.0).contains(&saturation))
     {
         return div()
-            .child("Enter finite hue (0–360°), radius (0.36–180°), and saturation (0–100%).")
+            .child(tr(
+                locale,
+                "Enter finite hue (0–360°), radius (0.36–180°), and saturation (0–100%).",
+            ))
             .into_any_element();
     }
     div()
@@ -1012,7 +1054,8 @@ fn hue_reference(
         .gap_1()
         .w_full()
         .child(format!(
-            "{label}: {:.1}°{}",
+            "{}: {:.1}°{}",
+            tr(locale, label),
             hue * 360.0,
             radius
                 .map(|radius| format!(" · radius {:.1}°", radius * 360.0))
@@ -1061,6 +1104,9 @@ fn hue_reference(
                 .size_full(),
             ),
         )
-        .child("0° · 180° · 360° · saturated hue reference, not a color-managed result.")
+        .child(tr(
+            locale,
+            "0° · 180° · 360° · saturated hue reference, not a color-managed result.",
+        ))
         .into_any_element()
 }

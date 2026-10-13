@@ -1,4 +1,5 @@
 //! Workflow presentation preferences, separate from graph documents/history.
+use crate::i18n::Locale;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,7 @@ impl WorkspaceMode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
+    pub locale: Locale,
     pub library_width: f32,
     pub viewer_width: f32,
     pub inspector_height: f32,
@@ -52,6 +54,7 @@ pub struct Workspace {
 impl Default for Workspace {
     fn default() -> Self {
         Self {
+            locale: Locale::default(),
             library_width: 220.0,
             viewer_width: 380.0,
             inspector_height: 220.0,
@@ -81,6 +84,11 @@ impl Workspace {
         };
         let open = |key: &str, fallback| doc.get(key).and_then(Value::as_bool).unwrap_or(fallback);
         Ok(Self {
+            locale: doc
+                .get("locale")
+                .and_then(Value::as_str)
+                .and_then(Locale::parse)
+                .unwrap_or_default(),
             library_width: size("library_width", defaults.library_width, 180.0, 400.0),
             viewer_width: size("viewer_width", defaults.viewer_width, 280.0, 720.0),
             inspector_height: size("inspector_height", defaults.inspector_height, 100.0, 600.0),
@@ -97,7 +105,7 @@ impl Workspace {
     pub fn to_json(&self) -> String {
         serde_json::json!({"version":1, "library_width":self.library_width, "viewer_width":self.viewer_width,
             "inspector_height":self.inspector_height, "library_open":self.library_open, "viewer_open":self.viewer_open,
-            "inspector_open":self.inspector_open, "mode":self.mode.wire()}).to_string()
+            "inspector_open":self.inspector_open, "mode":self.mode.wire(), "locale":self.locale.code()}).to_string()
     }
     pub fn load(path: &Path) -> Result<Self, String> {
         match std::fs::metadata(path) {
@@ -138,6 +146,30 @@ pub fn preferences_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn language_preference_roundtrips_and_old_or_unknown_locales_use_english() {
+        for locale in Locale::ALL {
+            let workspace = Workspace {
+                locale,
+                ..Default::default()
+            };
+            assert_eq!(
+                Workspace::from_json(&workspace.to_json()).unwrap(),
+                workspace
+            );
+        }
+        assert_eq!(Workspace::from_json("{}").unwrap().locale, Locale::English);
+        assert_eq!(
+            Workspace::from_json(r#"{"locale":"unknown"}"#)
+                .unwrap()
+                .locale,
+            Locale::English
+        );
+        assert_eq!(
+            Workspace::from_json(r#"{"locale":null}"#).unwrap().locale,
+            Locale::English
+        );
+    }
     #[test]
     fn presentation_preferences_roundtrip_and_validate_untrusted_sizes() {
         let prefs = Workspace {

@@ -21,6 +21,23 @@ Release build and launch:
 
 These scripts require neither pnpm nor a Tauri/WebKitGTK runtime.
 
+## Languages
+
+The toolbar language menu switches immediately between English, Simplified Chinese,
+Traditional Chinese, Spanish, French, German, Portuguese, Japanese, Korean and Russian.
+The menu shows each language in its own script. English is the default; the chosen
+language is saved in the workspace preferences and survives layout resets.
+
+Shell controls, node categories and registered names, parameter labels/help, viewer
+controls and scopes use the bundled catalogs in `assets/i18n/`. Graph type/port IDs,
+parameter keys, filenames, user data and engine diagnostics retain their original
+values. The language setting is not part of a workflow or its undo history.
+Unknown extension labels fall back to their source text. Catalog tests check static
+UI keys, registered node names, parameter metadata and named placeholders.
+
+The bundled design fonts rely on the operating system for CJK glyph fallback.
+Install CJK fonts on minimal Linux desktops (for example Noto Sans CJK).
+
 The optional command-line argument opens an image. Otherwise use **Open Image**. On Linux this requires a working X11/Wayland session, Vulkan driver, fonts and a desktop file-picker portal. For the local display used during verification: `DISPLAY=:0 GPUI_FORCE_X11=1`.
 
 ## Implemented

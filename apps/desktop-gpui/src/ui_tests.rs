@@ -6,6 +6,7 @@ use gpui_kit::{
     AppContext, Bounds, Focusable, Point, SharedString, TestAppContext, WindowBounds,
     WindowOptions, px, size,
 };
+use rawweave_gpui::i18n::Locale;
 
 fn editor_window(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<Editor>) {
     cx.update(gpui_kit::init);
@@ -34,6 +35,36 @@ fn editor_window(cx: &mut TestAppContext) -> (gpui_kit::AnyWindowHandle, gpui_ki
         )
         .unwrap()
     })
+}
+
+#[gpui_kit::test]
+fn language_switch_updates_panels_and_preserves_document_and_stable_controls(
+    cx: &mut TestAppContext,
+) {
+    let (handle, editor) = editor_window(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let preferences = directory.path().join("workspace.json");
+    cx.update_window(handle, |_, window, cx| {
+        editor.update(cx, |editor, _| {
+            editor.preferences_file = Some(preferences.clone())
+        });
+        let graph = editor.read(cx).session.editor.save_workflow().unwrap();
+        for locale in Locale::ALL {
+            editor.update(cx, |editor, cx| {
+                editor.set_locale(locale, window, cx);
+                assert_eq!(editor.workspace.locale, locale);
+                assert_eq!(editor.viewers.read(cx).locale, locale);
+                assert_eq!(editor.session.editor.save_workflow().unwrap(), graph);
+                assert!(editor.undo.is_empty());
+                assert_eq!(Workspace::load(&preferences).unwrap().locale, locale);
+            });
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(window.find("language-menu").bounds().size.width > px(0.0));
+            assert!(window.find("mode-Workflow").bounds().size.width > px(0.0));
+        }
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

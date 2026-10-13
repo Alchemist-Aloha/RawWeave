@@ -29,7 +29,8 @@ use rawweave_core::NodeId as CoreNodeId;
 use rawweave_gpui::batchqueue::{self, BatchSettings};
 use rawweave_gpui::browse;
 use rawweave_gpui::export::ExportSettings;
-use rawweave_gpui::library::{drop_position, library_groups, node_category};
+use rawweave_gpui::i18n::{Locale, message, tr};
+use rawweave_gpui::library::{drop_position, library_groups_localized, node_category};
 use rawweave_gpui::parameters::{
     ParameterDraft, add_curve_point, curve_points, parameter_ux, remove_curve_point,
 };
@@ -157,7 +158,7 @@ struct Editor {
 impl Editor {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = Session::default();
-        let status = "Open an image or add nodes to start weaving".into();
+
         let workspace = preferences_path()
             .and_then(|path| {
                 Workspace::load(&path)
@@ -165,6 +166,8 @@ impl Editor {
                     .ok()
             })
             .unwrap_or_default();
+        let locale = workspace.locale;
+        let status = tr(locale, "Open an image or add nodes to start weaving").into();
         let flow_state = cx.new(|_| FlowState::new(vec![], vec![]));
         let flow_state_for_minimap = flow_state.clone();
         let renderer_state = flow_state.clone();
@@ -199,7 +202,8 @@ impl Editor {
         let subscription = cx.observe_in(&flow, window, |this, _, window, cx| {
             this.sync_flow(window, cx)
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search nodes"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr(locale, "Search nodes")));
         let search_subscription = cx.subscribe_in(
             &search,
             window,
@@ -243,7 +247,8 @@ impl Editor {
             export_status: String::new(),
             export_settings: ExportSettings::default(),
             export_quality: cx.new(|cx| InputState::new(window, cx).default_value("92")),
-            export_long_edge: cx.new(|cx| InputState::new(window, cx).placeholder("Original")),
+            export_long_edge: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr(locale, "Original"))),
             show_export_settings: false,
             show_shortcuts: false,
             show_advanced: false,
@@ -302,8 +307,10 @@ impl Editor {
         };
         this.rebuild_flow(cx);
         let enabled = this.workspace.viewer_open;
-        this.viewers
-            .update(cx, |viewers, cx| viewers.set_enabled(enabled, window, cx));
+        this.viewers.update(cx, |viewers, cx| {
+            viewers.set_locale(locale, cx);
+            viewers.set_enabled(enabled, window, cx);
+        });
         this.focus.focus(window, cx);
         this
     }
@@ -311,9 +318,47 @@ impl Editor {
         if let Some(path) = &self.preferences_file {
             // ponytail: tiny atomic write on completed gestures; serialize background saves if profiling shows UI delay.
             if let Err(error) = self.workspace.save(path) {
-                self.status = format!("Could not save layout: {error}");
+                self.status = message(
+                    self.workspace.locale,
+                    "Could not save layout: {error}",
+                    &[("error", &error)],
+                );
             }
         }
+    }
+    fn set_locale(&mut self, locale: Locale, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.locale = locale;
+        self.viewers
+            .update(cx, |viewers, cx| viewers.set_locale(locale, cx));
+        self.search.update(cx, |search, cx| {
+            search.set_placeholder(tr(locale, "Search nodes"), window, cx);
+        });
+        self.persist_workspace();
+        self.flow.update(cx, |_, cx| cx.notify());
+        cx.notify();
+    }
+
+    fn language_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
+        let owner = cx.entity().downgrade();
+        Button::new("language-menu")
+            .label(locale.name())
+            .tooltip(tr(locale, "Language"))
+            .dropdown_menu(move |mut menu, _, _| {
+                for language in Locale::ALL {
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(language.name())
+                            .checked(language == locale)
+                            .on_click(move |_, window, cx| {
+                                let _ = owner
+                                    .update(cx, |this, cx| this.set_locale(language, window, cx));
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
     }
     fn toggle_panel(&mut self, panel: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.finish_canvas_move(window, cx);
@@ -362,6 +407,7 @@ impl Editor {
         cx.notify();
     }
     fn canvas_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         let weak = cx.entity().downgrade();
         let minimap = self.minimap.clone();
         let measure = canvas(
@@ -451,7 +497,7 @@ impl Editor {
                                     .font_family(t::Face::Display.family())
                                     .font_weight(t::Face::Display.weight())
                                     .text_size(t::Face::Display.size())
-                                    .child("Workflow"),
+                                    .child(tr(locale, "Workflow")),
                             )
                             .child(
                                 div()
@@ -459,7 +505,7 @@ impl Editor {
                                     .font_weight(t::Face::EdgeCode.weight())
                                     .text_size(t::Face::EdgeCode.size())
                                     .text_color(rgb(t::BENCH_INK_DIM))
-                                    .child(t::code("workflow scope")),
+                                    .child(t::code(tr(locale, "workflow scope"))),
                             ),
                     )
                     .child(
@@ -474,16 +520,16 @@ impl Editor {
                             .child(format!(
                                 "{} {} · {} {}",
                                 nodes,
-                                if nodes == 1 { "node" } else { "nodes" },
+                                if nodes == 1 { tr(locale, "node") } else { tr(locale, "nodes") },
                                 links,
-                                if links == 1 { "link" } else { "links" }
+                                if links == 1 { tr(locale, "link") } else { tr(locale, "links") }
                             ))
                             .child(div().child(format!("{:.0}%", zoom * 100.0))),
                     ),
             )
             .when(connections > 0, |view| view.child(div().h_flex().gap_2().px_2().py_1().flex_shrink_0()
-                .child(format!("{connections} connection{} selected", if connections == 1 { "" } else { "s" }))
-                .child(Button::new("disconnect-selection").small().label("Disconnect").tooltip("Remove selected connections; keep their nodes").on_click(cx.listener(|this, _, window, cx| this.disconnect_selection(window, cx))))))
+                .child(message(locale, "{count} connections selected", &[("count", &connections.to_string())]))
+                .child(Button::new("disconnect-selection").small().label(tr(locale, "Disconnect")).tooltip(tr(locale, "Remove selected connections; keep their nodes")).on_click(cx.listener(move |this, _, window, cx| this.disconnect_selection(window, cx))))))
             .child(
                 div()
                     .id("workflow-canvas")
@@ -493,9 +539,9 @@ impl Editor {
                     .min_h_0()
                     .on_mouse_up_out(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.finish_canvas_move(window, cx)),
+                        cx.listener(move |this, _, window, cx| this.finish_canvas_move(window, cx)),
                     )
-                    .on_drop(cx.listener(|this, drag: &LibraryDrag, window, cx| {
+                    .on_drop(cx.listener(move |this, drag: &LibraryDrag, window, cx| {
                         this.drop_library_node(drag, window, cx)
                     }))
                     .child(self.flow.clone())
@@ -514,11 +560,11 @@ impl Editor {
                             .rounded(t::RADIUS)
                             .border_1()
                             .border_color(rgb(t::BENCH_LINE_STRONG))
-                            .child(self.canvas_control("workflow-zoom-in", IconName::Plus, "Zoom in", 1, cx))
-                            .child(self.canvas_control("workflow-zoom-out", IconName::Minus, "Zoom out", -1, cx))
+                            .child(self.canvas_control("workflow-zoom-in", IconName::Plus, tr(locale, "Zoom in"), 1, cx))
+                            .child(self.canvas_control("workflow-zoom-out", IconName::Minus, tr(locale, "Zoom out"), -1, cx))
                             // `Maximize` is the nearest bundled fit-view mark; the
                             // component icon subset has no four-corner expand.
-                            .child(self.canvas_control("fit-workflow", IconName::Maximize, "Fit the whole workflow", 0, cx)),
+                            .child(self.canvas_control("fit-workflow", IconName::Maximize, tr(locale, "Fit the whole workflow"), 0, cx)),
                     )
                     // Bird's-eye view, as a window cut into the plane's corner.
                     .child(
@@ -568,14 +614,14 @@ impl Editor {
                                             div()
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_size(px(15.0))
-                                                .child("Start weaving"),
+                                                .child(tr(locale, "Start weaving")),
                                         )
                                         .child(
                                             div()
                                                 .mt_1()
                                                 .text_sm()
                                                 .text_color(rgb(t::ROOM_INK_FAINT))
-                                                .child("Drag a node from the library into the workflow, or click one to add it."),
+                                                .child(tr(locale, "Drag a node from the library into the workflow, or click one to add it.")),
                                         ),
                                 ),
                         )
@@ -609,7 +655,7 @@ impl Editor {
                             .font_weight(t::Face::EdgeCode.weight())
                             .text_size(t::Face::EdgeCode.size())
                             .text_color(rgb(t::BENCH_INK_DIM))
-                            .child(t::code("drag output to input")),
+                            .child(t::code(tr(locale, "drag output to input"))),
                     ),
             )
             .into_any_element()
@@ -667,6 +713,7 @@ impl Editor {
         self.flow.update(cx, |_, cx| cx.notify());
     }
     fn rebuild_flow(&mut self, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         self.pending_canvas_focus = None;
         self.move_history.reset();
         let nodes =
@@ -720,7 +767,7 @@ impl Editor {
                             .map(|(index, (id, label))| {
                                 HandleDef::target(HandlePosition::Left)
                                     .id(id)
-                                    .label(label)
+                                    .label(tr(locale, &label).to_owned())
                                     .offset(64.0 + index as f32 * 26.0)
                             })
                             .chain(node.descriptor.outputs.iter().enumerate().map(
@@ -740,7 +787,10 @@ impl Editor {
                             ))
                             .collect();
                     let mut view = FlowNode::new(node.id.as_str().to_owned(), x, y)
-                        .label(self.session.node_label(node.id.as_str()))
+                        .label(
+                            self.session
+                                .localized_node_label(node.id.as_str(), self.workspace.locale),
+                        )
                         .node_type(node.type_id.clone())
                         .handles(handles)
                         .size(332.0, 112.0);
@@ -1384,10 +1434,15 @@ impl Editor {
         });
     }
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         self.viewers.update(cx, |viewers, _| viewers.cancel_all());
         self.source_generation += 1;
         let generation = self.source_generation;
-        self.status = format!("Opening {}…", path.display());
+        self.status = message(
+            locale,
+            "Opening {path}…",
+            &[("path", &path.display().to_string())],
+        );
         let source_path = path.clone();
         let task = cx
             .background_executor()
@@ -1421,7 +1476,7 @@ impl Editor {
                                 cx,
                             );
                         }
-                        this.status = "Source image loaded".into();
+                        this.status = tr(locale, "Source image loaded").into();
                         cx.notify();
                     }
                     Err(error) => {
@@ -1435,15 +1490,16 @@ impl Editor {
         cx.notify();
     }
     fn choose_file(&mut self, kind: FileKind, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some(
                 match kind {
-                    FileKind::Image => "Open image",
-                    FileKind::Workflow => "Load workflow",
-                    FileKind::Blueprint => "Instantiate blueprint (replace workflow)",
+                    FileKind::Image => tr(locale, "Open image"),
+                    FileKind::Workflow => tr(locale, "Load workflow"),
+                    FileKind::Blueprint => tr(locale, "Instantiate blueprint (replace workflow)"),
                 }
                 .into(),
             ),
@@ -1484,9 +1540,12 @@ impl Editor {
                             this.reset_viewers(window, cx);
                             this.rebuild_flow(cx);
                             this.status = if kind == FileKind::Blueprint {
-                                "Blueprint instantiated · select a compatible source"
+                                tr(
+                                    locale,
+                                    "Blueprint instantiated · select a compatible source",
+                                )
                             } else {
-                                "Workflow loaded · select a compatible source"
+                                tr(locale, "Workflow loaded · select a compatible source")
                             }
                             .into();
                         }
@@ -1499,6 +1558,7 @@ impl Editor {
         .detach();
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         let document = match self.document() {
             Ok(d) => d,
             Err(e) => {
@@ -1516,7 +1576,7 @@ impl Editor {
                 let result = task.await;
                 let _ = this.update_in(cx, |this, _, cx| {
                     this.status = match result {
-                        Ok(()) => "Workflow saved".into(),
+                        Ok(()) => tr(locale, "Workflow saved").into(),
                         Err(e) => e,
                     };
                     cx.notify();
@@ -1526,6 +1586,7 @@ impl Editor {
         .detach();
     }
     fn export_selection_blueprint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         self.finish_canvas_move(window, cx);
         let selection: Vec<String> = self
             .flow_state
@@ -1553,7 +1614,8 @@ impl Editor {
                         let text = snapshot.export_blueprint(&ids, name, name)?;
                         save_workflow_atomic(&path, &text)
                     });
-                    task.await.map(|()| "Selection blueprint saved".to_owned())
+                    task.await
+                        .map(|()| tr(locale, "Selection blueprint saved").to_owned())
                 }
                 Ok(Ok(None)) => Ok("Blueprint export cancelled".into()),
                 Ok(Err(error)) => Err(error.to_string()),
@@ -1568,6 +1630,7 @@ impl Editor {
         .detach();
     }
     fn workflow_menus(&self, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        let locale = self.workspace.locale;
         let load = cx.entity().downgrade();
         let save = load.clone();
         let selection = load.clone();
@@ -1579,27 +1642,31 @@ impl Editor {
             .iter()
             .any(|node| node.selected);
         let file = Button::new("workflow-file-menu")
-            .label("Workflow files")
+            .label(tr(locale, "Workflow files"))
             .dropdown_menu(move |menu, _, _| {
                 let load = load.clone();
                 let save = save.clone();
                 let selection = selection.clone();
                 let instantiate = instantiate.clone();
-                menu.item(PopupMenuItem::new("Open Workflow · Ctrl/Cmd+O").on_click(
-                    move |_, window, cx| {
-                        let _ = load.update(cx, |this, cx| {
-                            this.choose_file(FileKind::Workflow, window, cx)
-                        });
-                    },
-                ))
-                .item(PopupMenuItem::new("Save Workflow · Ctrl/Cmd+S").on_click(
-                    move |_, window, cx| {
-                        let _ = save.update(cx, |this, cx| this.save(window, cx));
-                    },
-                ))
+                menu.item(
+                    PopupMenuItem::new(tr(locale, "Open Workflow · Ctrl/Cmd+O")).on_click(
+                        move |_, window, cx| {
+                            let _ = load.update(cx, |this, cx| {
+                                this.choose_file(FileKind::Workflow, window, cx)
+                            });
+                        },
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new(tr(locale, "Save Workflow · Ctrl/Cmd+S")).on_click(
+                        move |_, window, cx| {
+                            let _ = save.update(cx, |this, cx| this.save(window, cx));
+                        },
+                    ),
+                )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Export selection blueprint")
+                    PopupMenuItem::new(tr(locale, "Export selection blueprint"))
                         .disabled(!selected)
                         .on_click(move |_, window, cx| {
                             let _ = selection
@@ -1607,13 +1674,12 @@ impl Editor {
                         }),
                 )
                 .item(
-                    PopupMenuItem::new("Instantiate blueprint (replace workflow)").on_click(
-                        move |_, window, cx| {
+                    PopupMenuItem::new(tr(locale, "Instantiate blueprint (replace workflow)"))
+                        .on_click(move |_, window, cx| {
                             let _ = instantiate.update(cx, |this, cx| {
                                 this.choose_file(FileKind::Blueprint, window, cx)
                             });
-                        },
-                    ),
+                        }),
                 )
             })
             .into_any_element();
@@ -1622,15 +1688,15 @@ impl Editor {
         let export_settings = self.show_export_settings;
         let shortcuts = self.show_shortcuts;
         let view = Button::new("workflow-view-menu")
-            .label("View")
+            .label(tr(locale, "View"))
             .dropdown_menu(move |mut menu, _, _| {
                 for (panel, name, open) in [
-                    (0, "Nodes", prefs.library_open),
-                    (1, "Viewer and scopes", prefs.viewer_open),
-                    (2, "Node help", prefs.inspector_open),
+                    (0, tr(locale, "Nodes"), prefs.library_open),
+                    (1, tr(locale, "Viewer and scopes"), prefs.viewer_open),
+                    (2, tr(locale, "Node help"), prefs.inspector_open),
                 ] {
                     let weak = weak.clone();
-                    menu = menu.item(PopupMenuItem::new(name).checked(open).on_click(
+                    menu = menu.item(PopupMenuItem::new(tr(locale, name)).checked(open).on_click(
                         move |_, window, cx| {
                             let _ =
                                 weak.update(cx, |this, cx| this.toggle_panel(panel, window, cx));
@@ -1639,24 +1705,26 @@ impl Editor {
                 }
                 menu = menu.separator();
                 for (panel, delta, label) in [
-                    (0, -24.0, "Nodes: narrower"),
-                    (0, 24.0, "Nodes: wider"),
-                    (1, -24.0, "Viewer: narrower"),
-                    (1, 24.0, "Viewer: wider"),
+                    (0, -24.0, tr(locale, "Nodes: narrower")),
+                    (0, 24.0, tr(locale, "Nodes: wider")),
+                    (1, -24.0, tr(locale, "Viewer: narrower")),
+                    (1, 24.0, tr(locale, "Viewer: wider")),
                 ] {
                     let weak = weak.clone();
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.resize_workspace(panel, delta, window, cx)
-                        });
-                    }));
+                    menu = menu.item(PopupMenuItem::new(tr(locale, label)).on_click(
+                        move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.resize_workspace(panel, delta, window, cx)
+                            });
+                        },
+                    ));
                 }
                 let settings = weak.clone();
                 let help = weak.clone();
                 let reset = weak.clone();
                 menu.separator()
                     .item(
-                        PopupMenuItem::new("Export settings")
+                        PopupMenuItem::new(tr(locale, "Export settings"))
                             .checked(export_settings)
                             .on_click(move |_, _, cx| {
                                 let _ = settings.update(cx, |this, cx| {
@@ -1666,7 +1734,7 @@ impl Editor {
                             }),
                     )
                     .item(
-                        PopupMenuItem::new("Keyboard shortcuts · ?")
+                        PopupMenuItem::new(tr(locale, "Keyboard shortcuts · ?"))
                             .checked(shortcuts)
                             .on_click(move |_, _, cx| {
                                 let _ = help.update(cx, |this, cx| {
@@ -1676,42 +1744,49 @@ impl Editor {
                             }),
                     )
                     .separator()
-                    .item(PopupMenuItem::new("Reset workspace layout").on_click(
-                        move |_, window, cx| {
-                            let _ = reset.update(cx, |this, cx| {
-                                this.finish_canvas_move(window, cx);
-                                this.workspace = Workspace::default();
-                                this.workspace_epoch = this.workspace_epoch.wrapping_add(1);
-                                this.viewers.update(cx, |viewers, cx| {
-                                    viewers.set_enabled(true, window, cx)
+                    .item(
+                        PopupMenuItem::new(tr(locale, "Reset workspace layout")).on_click(
+                            move |_, window, cx| {
+                                let _ = reset.update(cx, |this, cx| {
+                                    this.finish_canvas_move(window, cx);
+                                    let locale = this.workspace.locale;
+                                    this.workspace = Workspace {
+                                        locale,
+                                        ..Workspace::default()
+                                    };
+                                    this.workspace_epoch = this.workspace_epoch.wrapping_add(1);
+                                    this.viewers.update(cx, |viewers, cx| {
+                                        viewers.set_enabled(true, window, cx)
+                                    });
+                                    this.persist_workspace();
+                                    cx.notify();
                                 });
-                                this.persist_workspace();
-                                cx.notify();
-                            });
-                        },
-                    ))
+                            },
+                        ),
+                    )
             })
             .into_any_element();
         (file, view)
     }
     fn export_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         let compression = self.export_settings.compression;
         let weak = cx.entity().downgrade();
         let compression_menu = Button::new("export-compression")
             .label(match compression {
-                Compression::Fast => "PNG: Fast",
-                Compression::Best => "PNG: Best",
-                _ => "PNG: Default",
+                Compression::Fast => tr(locale, "PNG: Fast"),
+                Compression::Best => tr(locale, "PNG: Best"),
+                _ => tr(locale, "PNG: Default"),
             })
             .dropdown_menu(move |mut menu, _, _| {
                 for (value, label) in [
-                    (Compression::Default, "Default"),
-                    (Compression::Fast, "Fast"),
-                    (Compression::Best, "Best"),
+                    (Compression::Default, tr(locale, "Default")),
+                    (Compression::Fast, tr(locale, "Fast")),
+                    (Compression::Best, tr(locale, "Best")),
                 ] {
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(label)
+                        PopupMenuItem::new(tr(locale, label))
                             .checked(value == compression)
                             .on_click(move |_, _, cx| {
                                 let _ = weak.update(cx, |this, cx| {
@@ -1727,25 +1802,25 @@ impl Editor {
         let weak = cx.entity().downgrade();
         let sharpening_menu = Button::new("export-sharpening")
             .label(if sharpening == OutputSharpening::None {
-                "Sharpening: Off"
+                tr(locale, "Sharpening: Off")
             } else {
-                "Sharpening: Low"
+                tr(locale, "Sharpening: Low")
             })
             .dropdown_menu(move |mut menu, _, _| {
                 for (value, label) in [
-                    (OutputSharpening::None, "Off"),
+                    (OutputSharpening::None, tr(locale, "Off")),
                     (
                         OutputSharpening::UnsharpMask {
                             radius: 1,
                             amount: 0.3,
                             threshold: 0.01,
                         },
-                        "Low — radius 1, amount 0.3, threshold 0.01",
+                        tr(locale, "Low — radius 1, amount 0.3, threshold 0.01"),
                     ),
                 ] {
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(label)
+                        PopupMenuItem::new(tr(locale, label))
                             .checked(value == sharpening)
                             .on_click(move |_, _, cx| {
                                 let _ = weak.update(cx, |this, cx| {
@@ -1759,15 +1834,16 @@ impl Editor {
             });
         div().v_flex().gap_2().p_2().border_b_1().border_color(rgb(t::ROOM_LINE))
             .child(div().h_flex().flex_wrap().gap_2()
-                .child(div().v_flex().gap_1().child("JPEG quality (1–100)").child(Input::new(&self.export_quality).w(px(120.0))))
-                .child(div().v_flex().gap_1().child("Long edge (1–8192 px)").child(Input::new(&self.export_long_edge).w(px(180.0))))
-                .child(Checkbox::new("export-png-depth").label("16-bit PNG").checked(self.export_settings.png_sixteen)
-                    .on_click(cx.listener(|this, checked, _, cx| { this.export_settings.png_sixteen = *checked; cx.notify(); })))
+                .child(div().v_flex().gap_1().child(tr(locale, "JPEG quality (1–100)")).child(Input::new(&self.export_quality).w(px(120.0))))
+                .child(div().v_flex().gap_1().child(tr(locale, "Long edge (1–8192 px)")).child(Input::new(&self.export_long_edge).w(px(180.0))))
+                .child(Checkbox::new("export-png-depth").label(tr(locale, "16-bit PNG")).checked(self.export_settings.png_sixteen)
+                    .on_click(cx.listener(move |this, checked, _, cx| { this.export_settings.png_sixteen = *checked; cx.notify(); })))
                 .child(compression_menu).child(sharpening_menu))
-            .child(div().text_sm().child("Filename selects PNG / JPEG / TIFF / EXR. Blank long edge keeps original dimensions. TIFF: 16-bit sRGB; EXR: float32 linear sRGB; PNG/JPEG: sRGB. Metadata is stripped. Settings are captured when Export Image is clicked."))
+            .child(div().text_sm().child(tr(locale, "Filename selects PNG / JPEG / TIFF / EXR. Blank long edge keeps original dimensions. TIFF: 16-bit sRGB; EXR: float32 linear sRGB; PNG/JPEG: sRGB. Metadata is stripped. Settings are captured when Export Image is clicked.")))
             .into_any_element()
     }
     fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         if self.export_busy || self.session.source.is_none() {
             return;
         }
@@ -1805,16 +1881,17 @@ impl Editor {
                     cx.background_executor()
                         .spawn(async move { snapshot.export_with_settings(&path, &settings) })
                         .await
-                        .map(|()| format!("Exported {label}"))
+                        .map(|()| message(locale, "Exported {path}", &[("path", &label)]))
                 }
-                Ok(Ok(None)) => Ok("Export cancelled".into()),
+                Ok(Ok(None)) => Ok(tr(locale, "Export cancelled").into()),
                 Ok(Err(error)) => Err(error.to_string()),
                 Err(error) => Err(error.to_string()),
             };
             let _ = this.update_in(cx, |this, _, cx| {
                 this.export_busy = false;
-                this.export_status =
-                    result.unwrap_or_else(|error| format!("Export failed: {error}"));
+                this.export_status = result.unwrap_or_else(|error| {
+                    message(locale, "Export failed: {error}", &[("error", &error)])
+                });
                 cx.notify();
             });
         })
@@ -1884,10 +1961,11 @@ impl Editor {
         } else {
             vec![]
         };
-        library_groups(
+        library_groups_localized(
             self.session.editor.node_descriptors(),
             self.search.read(cx).value().as_ref(),
             &compatible,
+            self.workspace.locale,
         )
     }
     fn add_library_node(
@@ -2005,6 +2083,7 @@ impl Editor {
         cx.notify();
     }
     fn mode_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         div()
             .h_flex()
             .gap_1()
@@ -2015,16 +2094,24 @@ impl Editor {
                     .text_size(t::Face::Label.size())
                     .text_color(rgb(t::ROOM_INK_FAINT))
                     .mr_1()
-                    .child(t::code("view")),
+                    .child(t::code(tr(locale, "view"))),
             )
             .children(
                 [
-                    (WorkspaceMode::Browse, "Browse", "Frames in a folder"),
-                    (WorkspaceMode::Workflow, "Workflow", "The node graph"),
+                    (
+                        WorkspaceMode::Browse,
+                        tr(locale, "Browse"),
+                        tr(locale, "Frames in a folder"),
+                    ),
+                    (
+                        WorkspaceMode::Workflow,
+                        tr(locale, "Workflow"),
+                        tr(locale, "The node graph"),
+                    ),
                     (
                         WorkspaceMode::Batch,
-                        "Batch",
-                        "Run this workflow over a queue",
+                        tr(locale, "Batch"),
+                        tr(locale, "Run this workflow over a queue"),
                     ),
                 ]
                 .into_iter()
@@ -2040,10 +2127,10 @@ impl Editor {
                             rgb(t::ROOM_GROUND)
                         })
                         .child(
-                            Button::new(SharedString::from(format!("mode-{label}")))
+                            Button::new(SharedString::from(format!("mode-{}", mode.label())))
                                 .small()
-                                .label(label)
-                                .tooltip(tooltip)
+                                .label(tr(locale, label))
+                                .tooltip(tr(locale, tooltip).to_owned())
                                 .toggled(active)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.set_mode(mode, window, cx)
@@ -2101,6 +2188,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let locale = self.workspace.locale;
         self.browse_generation += 1;
         let generation = self.browse_generation;
         self.browse_dir = Some(dir.clone());
@@ -2108,7 +2196,11 @@ impl Editor {
         self.browse_thumbnails.clear();
         self.browse_missing_thumbnails.clear();
         self.browse_selected = None;
-        self.status = format!("Reading {}…", dir.display());
+        self.status = message(
+            locale,
+            "Reading {path}…",
+            &[("path", &dir.display().to_string())],
+        );
         let scan_dir = dir.clone();
         let task = cx
             .background_executor()
@@ -2134,20 +2226,23 @@ impl Editor {
                                 .or_else(|| {
                                     this.browse_entries.first().map(|entry| entry.path.clone())
                                 });
-                            this.status = format!(
-                                "{} {} in {}{}",
-                                this.browse_entries.len(),
-                                if this.browse_entries.len() == 1 {
-                                    "image"
-                                } else {
-                                    "images"
-                                },
-                                dir.display(),
-                                if scan.truncated {
-                                    format!(" · listing the first {}", browse::MAX_BROWSE_ENTRIES)
-                                } else {
-                                    String::new()
-                                }
+                            let suffix = if scan.truncated {
+                                message(
+                                    locale,
+                                    " · listing the first {count}",
+                                    &[("count", &browse::MAX_BROWSE_ENTRIES.to_string())],
+                                )
+                            } else {
+                                String::new()
+                            };
+                            this.status = message(
+                                locale,
+                                "{count} images in {path}{suffix}",
+                                &[
+                                    ("count", &this.browse_entries.len().to_string()),
+                                    ("path", &dir.display().to_string()),
+                                    ("suffix", &suffix),
+                                ],
                             );
                             this.browse_entries
                                 .iter()
@@ -2199,8 +2294,9 @@ impl Editor {
         cx.notify();
     }
     fn develop_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         let Some(path) = self.browse_selected.clone() else {
-            self.status = "Select a frame to develop".into();
+            self.status = tr(locale, "Select a frame to develop").into();
             cx.notify();
             return;
         };
@@ -2209,12 +2305,17 @@ impl Editor {
     }
     /// Append a folder's images to the queue, once each.
     fn queue_folder(&mut self, dir: PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         match batchqueue::directory_items(self.batch_counter, &dir) {
             Ok((items, truncated)) => {
                 let added = self.extend_queue(items);
                 self.batch_status = format!(
                     "Queued {added} {}{}",
-                    if added == 1 { "image" } else { "images" },
+                    if added == 1 {
+                        tr(locale, "image")
+                    } else {
+                        tr(locale, "images")
+                    },
                     if truncated {
                         " · folder listing was truncated"
                     } else {
@@ -2227,25 +2328,35 @@ impl Editor {
         cx.notify();
     }
     fn queue_browse_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         let Some(dir) = self.browse_dir.clone() else {
-            self.batch_status = "Open a folder before queueing it".into();
+            self.batch_status = tr(locale, "Open a folder before queueing it").into();
             cx.notify();
             return;
         };
         self.queue_folder(dir, window, cx);
     }
     fn queue_selected(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         let Some(path) = self.browse_selected.clone() else {
-            self.batch_status = "Select a frame to queue".into();
+            self.batch_status = tr(locale, "Select a frame to queue").into();
             cx.notify();
             return;
         };
         let item = batchqueue::queued_item(self.batch_counter, &path);
         let added = self.extend_queue(vec![item]);
         self.batch_status = if added == 1 {
-            format!("Queued {}", path.display())
+            message(
+                locale,
+                "Queued {path}",
+                &[("path", &path.display().to_string())],
+            )
         } else {
-            format!("{} is already queued", path.display())
+            message(
+                locale,
+                "{path} is already queued",
+                &[("path", &path.display().to_string())],
+            )
         };
         cx.notify();
     }
@@ -2270,6 +2381,7 @@ impl Editor {
         self.batch_settings.output_dir = dir;
     }
     fn batch_quality_value(&self, cx: &Context<Self>) -> Result<u8, String> {
+        let locale = self.workspace.locale;
         self.batch_quality
             .read(cx)
             .value()
@@ -2277,14 +2389,15 @@ impl Editor {
             .parse::<u8>()
             .ok()
             .filter(|quality| (1..=100).contains(quality))
-            .ok_or_else(|| "Enter a quality between 1 and 100".to_owned())
+            .ok_or_else(|| tr(locale, "Enter a quality between 1 and 100").to_owned())
     }
     fn batch_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let locale = self.workspace.locale;
         if let Some(engine) = self.batch_job.clone()
             && !self.batch_finished()
         {
             self.batch_status = match engine.resume_run() {
-                Ok(()) => "Running…".into(),
+                Ok(()) => tr(locale, "Running…").into(),
                 Err(error) => error.to_string(),
             };
             self.refresh_batch();
@@ -2355,7 +2468,7 @@ impl Editor {
         }
         self.batch_snapshot = engine.snapshot().ok();
         self.batch_job = Some(Arc::new(engine));
-        self.batch_status = "Running…".into();
+        self.batch_status = tr(locale, "Running…").into();
         self.poll_batch(window, cx);
     }
     fn batch_finished(&self) -> bool {
@@ -2434,6 +2547,7 @@ impl Editor {
     /// The contact sheet on the bench: frames butted on the plane, read by the
     /// code printed beneath each one.
     fn browse_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         let Some(dir) = self.browse_dir.clone() else {
             return div()
                 .size_full()
@@ -2452,22 +2566,25 @@ impl Editor {
                                 .font_weight(t::Face::Display.weight())
                                 .text_size(t::Face::Display.size())
                                 .text_color(rgb(t::BENCH_INK))
-                                .child("No folder open"),
+                                .child(tr(locale, "No folder open")),
                         )
                         .child(
                             div()
                                 .font_family(t::Face::Body.family())
                                 .text_size(t::Face::Body.size())
                                 .text_color(rgb(t::BENCH_INK_DIM))
-                                .child("Open a folder to lay its frames out on the bench."),
+                                .child(tr(
+                                    locale,
+                                    "Open a folder to lay its frames out on the bench.",
+                                )),
                         )
                         .child(
                             Button::new("browse-open-empty")
-                                .label("Open folder…")
+                                .label(tr(locale, "Open folder…"))
                                 .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     this.choose_folder(
-                                        "Choose a folder of images",
+                                        tr(locale, "Choose a folder of images"),
                                         Self::open_folder,
                                         window,
                                         cx,
@@ -2534,7 +2651,7 @@ impl Editor {
                                         .text_color(rgb(t::BENCH_INK_DIM))
                                         .text_center()
                                         .child(t::code(if missing {
-                                            "no embedded preview"
+                                            tr(locale, "no embedded preview")
                                         } else {
                                             "reading"
                                         })),
@@ -2573,7 +2690,7 @@ impl Editor {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string())
             })
-            .unwrap_or_else(|| "Select a frame".to_owned());
+            .unwrap_or_else(|| tr(locale, "Select a frame").to_owned());
         div()
             .size_full()
             .v_flex()
@@ -2592,7 +2709,7 @@ impl Editor {
                             .font_weight(t::Face::Heading.weight())
                             .text_size(t::Face::Heading.size())
                             .text_color(rgb(t::BENCH_INK))
-                            .child("Browse"),
+                            .child(tr(locale, "Browse")),
                     )
                     .child(
                         div()
@@ -2607,10 +2724,10 @@ impl Editor {
                     .child(
                         Button::new("browse-open")
                             .small()
-                            .label("Open folder…")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .label(tr(locale, "Open folder…"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.choose_folder(
-                                    "Choose a folder of images",
+                                    tr(locale, "Choose a folder of images"),
                                     Self::open_folder,
                                     window,
                                     cx,
@@ -2620,34 +2737,39 @@ impl Editor {
                     .child(
                         Button::new("browse-queue")
                             .small()
-                            .label("Queue folder")
-                            .tooltip("Add every image in this folder to the batch queue")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .label(tr(locale, "Queue folder"))
+                            .tooltip(tr(
+                                locale,
+                                "Add every image in this folder to the batch queue",
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.queue_browse_folder(window, cx)
                             })),
                     )
                     .child(
                         Button::new("browse-queue-one")
                             .small()
-                            .label("Queue frame")
+                            .label(tr(locale, "Queue frame"))
                             .disabled(self.browse_selected.is_none())
-                            .tooltip("Add the selected frame to the batch queue")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.queue_selected(window, cx)),
-                            ),
+                            .tooltip(tr(locale, "Add the selected frame to the batch queue"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.queue_selected(window, cx)
+                            })),
                     )
                     .child(
                         Button::new("browse-develop")
                             .small()
-                            .label("Develop")
+                            .label(tr(locale, "Develop"))
                             .primary()
                             .disabled(self.browse_selected.is_none())
-                            .tooltip(format!("Open {selected} in the workflow"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.develop_selected(window, cx)
-                                }),
-                            ),
+                            .tooltip(message(
+                                locale,
+                                "Open {selected} in the workflow",
+                                &[("selected", &selected)],
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.develop_selected(window, cx)
+                            })),
                     ),
             )
             .child(
@@ -2664,7 +2786,7 @@ impl Editor {
                                 .font_family(t::Face::Body.family())
                                 .text_size(t::Face::Body.size())
                                 .text_color(rgb(t::BENCH_INK_DIM))
-                                .child("No supported images in this folder."),
+                                .child(tr(locale, "No supported images in this folder.")),
                         )
                     })
                     .child(div().h_flex().flex_wrap().gap_3().children(tiles)),
@@ -2673,6 +2795,7 @@ impl Editor {
     }
     /// The queue is a room surface: no plane, just ruled sections.
     fn batch_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let locale = self.workspace.locale;
         let progress = self.batch_snapshot.as_ref().map(batchqueue::progress);
         let job = self.batch_job.clone();
         let output_dir = self.batch_settings.output_dir.display().to_string();
@@ -2783,7 +2906,7 @@ impl Editor {
                             .font_family(t::Face::Heading.family())
                             .font_weight(t::Face::Heading.weight())
                             .text_size(t::Face::Heading.size())
-                            .child("Batch"),
+                            .child(tr(locale, "Batch")),
                     )
                     .child(
                         div()
@@ -2791,16 +2914,16 @@ impl Editor {
                             .font_weight(t::Face::Label.weight())
                             .text_size(t::Face::Label.size())
                             .text_color(rgb(t::ROOM_INK_FAINT))
-                            .child(t::code("current workflow")),
+                            .child(t::code(tr(locale, "current workflow"))),
                     )
                     .child(div().flex_1())
                     .child(
                         Button::new("batch-queue-folder")
                             .small()
-                            .label("Queue folder…")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .label(tr(locale, "Queue folder…"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.choose_folder(
-                                    "Choose a folder to queue",
+                                    tr(locale, "Choose a folder to queue"),
                                     Self::queue_folder,
                                     window,
                                     cx,
@@ -2810,10 +2933,10 @@ impl Editor {
                     .child(
                         Button::new("batch-output-dir")
                             .small()
-                            .label("Output folder…")
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .label(tr(locale, "Output folder…"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.choose_folder(
-                                    "Choose an output folder",
+                                    tr(locale, "Choose an output folder"),
                                     Self::choose_output_dir,
                                     window,
                                     cx,
@@ -2851,9 +2974,9 @@ impl Editor {
                     .child(
                         Button::new("batch-clear")
                             .small()
-                            .label("Clear")
+                            .label(tr(locale, "Clear"))
                             .disabled(self.batch_items.is_empty() || job.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.clear_queue(cx))),
                     ),
             )
             .child(
@@ -2872,7 +2995,7 @@ impl Editor {
                             .font_weight(t::Face::Label.weight())
                             .text_size(t::Face::Label.size())
                             .text_color(rgb(t::ROOM_INK_FAINT))
-                            .child(t::code("output")),
+                            .child(t::code(tr(locale, "output"))),
                     )
                     .child(
                         div()
@@ -2882,7 +3005,7 @@ impl Editor {
                             .text_size(t::Face::Readout.size())
                             .text_color(rgb(t::ROOM_INK_BODY))
                             .child(if output_dir.is_empty() {
-                                "Choose an output folder".to_owned()
+                                tr(locale, "Choose an output folder").to_owned()
                             } else {
                                 output_dir
                             }),
@@ -2893,31 +3016,31 @@ impl Editor {
                             .font_weight(t::Face::Label.weight())
                             .text_size(t::Face::Label.size())
                             .text_color(rgb(t::ROOM_INK_FAINT))
-                            .child(t::code("quality")),
+                            .child(t::code(tr(locale, "quality"))),
                     )
                     .child(div().w(px(72.0)).child(Input::new(&self.batch_quality)))
                     .child(div().flex_1())
                     .child(
                         Button::new("batch-run")
                             .small()
-                            .label(if self.batch_polling { "Running…" } else { "Run queue" })
+                            .label(if self.batch_polling { tr(locale, "Running…") } else { tr(locale, "Run queue") })
                             .primary()
                             .disabled(self.batch_items.is_empty() || self.batch_polling)
-                            .on_click(cx.listener(|this, _, window, cx| this.batch_run(window, cx))),
+                            .on_click(cx.listener(move |this, _, window, cx| this.batch_run(window, cx))),
                     )
                     .child(
                         Button::new("batch-pause")
                             .small()
-                            .label("Pause")
+                            .label(tr(locale, "Pause"))
                             .disabled(!self.batch_polling)
-                            .on_click(cx.listener(|this, _, _, cx| this.batch_pause(cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.batch_pause(cx))),
                     )
                     .child(
                         Button::new("batch-cancel")
                             .small()
-                            .label("Cancel")
+                            .label(tr(locale, "Cancel"))
                             .disabled(job.is_none() || self.batch_finished())
-                            .on_click(cx.listener(|this, _, _, cx| this.batch_cancel(cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.batch_cancel(cx))),
                     ),
             )
             .when(!self.batch_diagnostics.is_empty(), |view| {
@@ -2935,7 +3058,7 @@ impl Editor {
                                 .font_weight(t::Face::Label.weight())
                                 .text_size(t::Face::Label.size())
                                 .text_color(rgb(t::ROOM_INK_FAINT))
-                                .child(t::code("preflight")),
+                                .child(t::code(tr(locale, "preflight"))),
                         )
                         .child(diagnostics),
                 )
@@ -2953,7 +3076,7 @@ impl Editor {
                                 .font_family(t::Face::Body.family())
                                 .text_size(t::Face::Body.size())
                                 .text_color(rgb(t::ROOM_INK_DIM))
-                                .child("Queue a folder or a single frame. The queue runs the workflow that is open in the Workflow view."),
+                                .child(tr(locale, "Queue a folder or a single frame. The queue runs the workflow that is open in the Workflow view.")),
                         )
                     })
                     .child(list),
@@ -2984,6 +3107,7 @@ impl Editor {
 }
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = self.workspace.locale;
         let export_controls = self.export_controls(cx);
         let (file_menu, view_menu) = self.workflow_menus(cx);
         let has_parameters = false; // Editing is in the node; the optional dock is a short help rail.
@@ -3004,13 +3128,15 @@ impl Render for Editor {
                     .font_weight(t::Face::EdgeCode.weight())
                     .text_size(t::Face::EdgeCode.size())
                     .text_color(rgb(t::ROOM_INK_DIM))
-                    .child(t::code("parameters in frame")),
+                    .child(t::code(tr(locale, "parameters in frame"))),
             )
             .child(
                 Button::new("hide-inspector")
                     .small()
-                    .label("Hide help")
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(2, window, cx))),
+                    .label(tr(locale, "Hide help"))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.toggle_panel(2, window, cx)),
+                    ),
             )
             .into_any_element();
         let canvas_panel = self.canvas_panel(cx);
@@ -3033,7 +3159,7 @@ impl Render for Editor {
                         Button::new(SharedString::from(format!("category-{category}")))
                             .small()
                             .justify_start()
-                            .label(t::code(&category))
+                            .label(t::code(tr(locale, &category)))
                             .icon(if open {
                                 IconName::ChevronDown
                             } else {
@@ -3042,8 +3168,13 @@ impl Render for Editor {
                             .ghost()
                             .toggled(open)
                             .tooltip(format!(
-                                "{} {category}",
-                                if open { "Collapse" } else { "Expand" }
+                                "{} {}",
+                                if open {
+                                    tr(locale, "Collapse")
+                                } else {
+                                    tr(locale, "Expand")
+                                },
+                                tr(locale, &category)
                             ))
                             // Push the count to the trailing edge so category rows
                             // stay scannable next to uneven node names.
@@ -3067,10 +3198,14 @@ impl Render for Editor {
                     .when(open, |view| {
                         view.children(nodes.into_iter().map(|descriptor| {
                             let kind = descriptor.type_id.clone();
-                            let tooltip = format!("{} · {}", descriptor.name, descriptor.type_id);
+                            let tooltip = format!(
+                                "{} · {}",
+                                tr(locale, &descriptor.name),
+                                descriptor.type_id
+                            );
                             let drag = LibraryDrag {
                                 kind: kind.clone(),
-                                label: descriptor.name.clone(),
+                                label: tr(locale, &descriptor.name).to_owned(),
                             };
                             div()
                                 .id(SharedString::from(format!("drag-{kind}")))
@@ -3104,7 +3239,9 @@ impl Render for Editor {
                                                         .font_family(t::Face::Title.family())
                                                         .font_weight(t::Face::Title.weight())
                                                         .text_size(t::Face::Title.size())
-                                                        .child(descriptor.name),
+                                                        .child(
+                                                            tr(locale, &descriptor.name).to_owned(),
+                                                        ),
                                                 )
                                                 .child(
                                                     div()
@@ -3115,7 +3252,7 @@ impl Render for Editor {
                                                         .child(t::code(&descriptor.type_id)),
                                                 ),
                                         )
-                                        .tooltip(tooltip)
+                                        .tooltip(tr(locale, &tooltip).to_owned())
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.add_library_node(&kind, None, window, cx)
                                         })),
@@ -3134,7 +3271,7 @@ impl Render for Editor {
             .text_color(rgb(t::ROOM_INK))
             .font_family(t::Face::Body.family())
             .text_size(t::Face::Body.size())
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let editing = this.fields.iter().any(|f| f.state.focus_handle(cx).is_focused(window))
                     || this.search.read(cx).focus_handle(cx).is_focused(window)
                     || this.export_quality.read(cx).focus_handle(cx).is_focused(window)
@@ -3177,23 +3314,24 @@ impl Render for Editor {
             .child(
                 div().h_flex().flex_wrap().gap_2().p_2().flex_shrink_0().border_b_1().border_color(rgb(t::ROOM_LINE))
                     .child(div().font_weight(FontWeight::BOLD).mr_2().child("RawWeave"))
-                    .child(Button::new("open").label("Open Image").primary().on_click(
-                        cx.listener(|this, _, window, cx| this.choose_file(FileKind::Image, window, cx))))
+                    .child(Button::new("open").label(tr(locale, "Open Image")).primary().on_click(
+                        cx.listener(move |this, _, window, cx| this.choose_file(FileKind::Image, window, cx))))
                     .child(file_menu)
-                    .child(Button::new("export").label(if self.export_busy { "Exporting…" } else { "Export Image" })
+                    .child(Button::new("export").label(if self.export_busy { tr(locale, "Exporting…") } else { tr(locale, "Export Image") })
                         .disabled(self.export_busy || self.session.source.is_none())
-                        .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))))
+                        .on_click(cx.listener(move |this, _, window, cx| this.export(window, cx))))
                     .child(view_menu)
-                    .child(Button::new("undo").label("Undo").tooltip("Ctrl/Cmd+Z").disabled(self.undo.is_empty())
-                        .on_click(cx.listener(|this, _, window, cx| this.history(false, window, cx))))
-                    .child(Button::new("redo").label("Redo").tooltip("Ctrl/Cmd+Shift+Z").disabled(self.redo.is_empty())
-                        .on_click(cx.listener(|this, _, window, cx| this.history(true, window, cx))))
+                    .child(self.language_menu(cx))
+                    .child(Button::new("undo").label(tr(locale, "Undo")).tooltip("Ctrl/Cmd+Z").disabled(self.undo.is_empty())
+                        .on_click(cx.listener(move |this, _, window, cx| this.history(false, window, cx))))
+                    .child(Button::new("redo").label(tr(locale, "Redo")).tooltip("Ctrl/Cmd+Shift+Z").disabled(self.redo.is_empty())
+                        .on_click(cx.listener(move |this, _, window, cx| this.history(true, window, cx))))
                     .child(div().flex_1())
                     .child(self.mode_switch(cx))
             )
             .when(self.show_export_settings, |view| view.child(export_controls))
             .when(self.show_shortcuts, |view| view.child(div().p_2().text_sm()
-                .child("Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · A select all (outside text fields) · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo.")))
+                .child(tr(locale, "Ctrl / Cmd: O load workflow · Shift+O open image · S save · K search · A select all (outside text fields) · Z undo · Shift+Z / Y redo. Delete removes selection; ? toggles this help. Text fields retain native Undo / Redo."))))
             .when(self.mode == WorkspaceMode::Browse, |view| {
                 view.child(div().flex_1().min_h_0().child(self.browse_panel(cx)))
             })
@@ -3225,14 +3363,14 @@ impl Render for Editor {
                             .when(self.workspace.library_open, |group| group.child(
                                 resizable_panel().size(px(self.workspace.library_width)).size_range(px(180.0)..px(400.0)).flex_none().child(
                                     div().id("library").test_support().size_full().overflow_y_scroll().v_flex().p_2().bg(rgb(t::ROOM_PANEL))
-                                        .child(div().h_flex().flex_wrap().gap_1().child(div().font_weight(FontWeight::BOLD).child("Nodes"))
-                                            .child(Button::new("hide-library").small().label("Hide").on_click(cx.listener(|this, _, window, cx| this.toggle_panel(0, window, cx)))))
+                                        .child(div().h_flex().flex_wrap().gap_1().child(div().font_weight(FontWeight::BOLD).child(tr(locale, "Nodes")))
+                                            .child(Button::new("hide-library").small().label(tr(locale, "Hide")).on_click(cx.listener(move |this, _, window, cx| this.toggle_panel(0, window, cx)))))
                                         .child(Input::new(&self.search))
                                         .child(div().h_flex().flex_wrap().gap_1()
-                                            .child(Button::new("collapse-node-groups").small().label("Collapse all").on_click(cx.listener(|this, _, _, cx| {
+                                            .child(Button::new("collapse-node-groups").small().label(tr(locale, "Collapse all")).on_click(cx.listener(move |this, _, _, cx| {
                                                 this.collapsed_categories = this.session.editor.node_descriptors().iter().map(|node| node_category(&node.type_id)).collect(); cx.notify();
                                             })))
-                                            .child(Button::new("expand-node-groups").small().label("Expand all").on_click(cx.listener(|this, _, _, cx| { this.collapsed_categories.clear(); cx.notify(); }))))
+                                            .child(Button::new("expand-node-groups").small().label(tr(locale, "Expand all")).on_click(cx.listener(move |this, _, _, cx| { this.collapsed_categories.clear(); cx.notify(); }))))
                                         .child(
                                             div()
                                                 .py_1()
@@ -3240,9 +3378,9 @@ impl Render for Editor {
                                                 .font_weight(t::Face::EdgeCode.weight())
                                                 .text_size(t::Face::EdgeCode.size())
                                                 .text_color(rgb(t::ROOM_INK_FAINT))
-                                                .child(t::code("drag in · click or enter to add")),
+                                                .child(t::code(tr(locale, "drag in · click or enter to add"))),
                                         )
-                                        .when(!self.selected_output_types().is_empty(), |view| view.child(Checkbox::new("compatible-nodes").label("Compatible inputs only").checked(self.compatible_only).on_click(cx.listener(|this, checked, _, cx| { this.compatible_only = *checked; cx.notify(); }))))
+                                        .when(!self.selected_output_types().is_empty(), |view| view.child(Checkbox::new("compatible-nodes").label(tr(locale, "Compatible inputs only")).checked(self.compatible_only).on_click(cx.listener(move |this, checked, _, cx| { this.compatible_only = *checked; cx.notify(); }))))
                                         .child(
                                             div()
                                                 .pt_2()
@@ -3250,13 +3388,10 @@ impl Render for Editor {
                                                 .font_weight(t::Face::EdgeCode.weight())
                                                 .text_size(t::Face::EdgeCode.size())
                                                 .text_color(rgb(t::ROOM_INK_FAINT))
-                                                .child(t::code(&format!(
-                                                    "{library_count} matching {}",
-                                                    if library_count == 1 { "node" } else { "nodes" }
-                                                ))),
+                                                .child(t::code(&message(locale, "{count} matching nodes", &[("count", &library_count.to_string())]))),
                                         )
                                         .children(library)
-                                        .when(library_count == 0, |view| view.child(div().text_sm().child("No matching nodes. Clear search or turn off compatible filtering.")))
+                                        .when(library_count == 0, |view| view.child(div().text_sm().child(tr(locale, "No matching nodes. Clear search or turn off compatible filtering."))))
                                 )
                             ))
                             .child(resizable_panel().size_range(px(280.0)..px(10000.0)).child(

@@ -3,6 +3,7 @@ pub mod batchqueue;
 pub mod browse;
 pub mod export;
 pub mod geometry;
+pub mod i18n;
 pub mod library;
 pub mod parameters;
 pub mod spatial;

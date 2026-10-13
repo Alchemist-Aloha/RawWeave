@@ -11,6 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use rawweave_gpui::i18n::{Locale, message, tr};
 use rawweave_gpui::viewer::{
     Comparison, SurfaceTransform, Target, ViewerModel, display_difference,
 };
@@ -109,6 +110,7 @@ struct DifferenceKey {
 }
 
 pub struct Viewers {
+    pub locale: Locale,
     session: Session,
     model: ViewerModel,
     panes: [Pane; 2],
@@ -148,6 +150,7 @@ impl Viewers {
             cx.notify();
         });
         Self {
+            locale: Locale::default(),
             session: Session::default(),
             model: ViewerModel::default(),
             panes: [Pane::default(), Pane::default()],
@@ -168,6 +171,14 @@ impl Viewers {
             difference_error: None,
             enabled: true,
         }
+    }
+    pub fn set_locale(&mut self, locale: Locale, cx: &mut Context<Self>) {
+        self.locale = locale;
+        self.scopes.update(cx, |scopes, cx| {
+            scopes.set_locale(locale);
+            cx.notify();
+        });
+        cx.notify();
     }
     pub fn set_session(
         &mut self,
@@ -264,9 +275,14 @@ impl Viewers {
             .get(self.active)
             .and_then(Option::as_ref)
             .map(|(node, port)| {
-                format!(
-                    "Viewer {} · {node} · {port}",
-                    if self.active == 0 { "A" } else { "B" }
+                message(
+                    self.locale,
+                    "Viewer {viewer} · {node} · {port}",
+                    &[
+                        ("viewer", if self.active == 0 { "A" } else { "B" }),
+                        ("node", node),
+                        ("port", port),
+                    ],
                 )
             })
             .unwrap_or_default();
@@ -278,7 +294,7 @@ impl Viewers {
         let Some(target) = self.model.targets.get(index).cloned().flatten() else {
             if let Some(pane) = self.panes.get_mut(index) {
                 pane.clear(window);
-                pane.status = "Select a source image".into();
+                pane.status = tr(self.locale, "Select a source image").into();
             }
             self.clear_difference(window);
             cx.notify();
@@ -308,7 +324,7 @@ impl Viewers {
             };
         pane.loading = true;
         pane.requested_mip = Some(mip);
-        pane.status = "Rendering…".into();
+        pane.status = tr(self.locale, "Rendering…").into();
         let token = pane.token.clone();
         let mut snapshot = self.session.clone();
         snapshot.target = target.clone();
@@ -397,7 +413,7 @@ impl Viewers {
                 true
             }
             Err(error) => {
-                pane.status = format!("Preview failed: {error}");
+                pane.status = message(self.locale, "Preview failed: {error}", &[("error", &error)]);
                 pane.loading = false;
                 pane.requested_mip = None;
                 cx.notify();
@@ -577,7 +593,8 @@ impl Viewers {
                             (node.id.as_str().to_owned(), port.id.clone()),
                             format!(
                                 "{} · {}",
-                                self.session.node_label(node.id.as_str()),
+                                self.session
+                                    .localized_node_label(node.id.as_str(), self.locale),
                                 port.name
                             ),
                         )
@@ -589,7 +606,7 @@ impl Viewers {
             .iter()
             .find(|(target, _)| Some(target) == selected)
             .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| "Select image output".into());
+            .unwrap_or_else(|| tr(self.locale, "Select image output").into());
         let weak = cx.entity().downgrade();
         let menu = Button::new(SharedString::from(format!("viewer-{label}-target")))
             .w_full()
@@ -654,13 +671,21 @@ impl Viewers {
             .flex_shrink_0()
             .child(
                 Button::new(SharedString::from(format!("active-{label}")))
-                    .label(format!(
-                        "Viewer {label}{}",
-                        if self.active == index {
-                            " · active"
-                        } else {
-                            ""
-                        }
+                    .label(message(
+                        self.locale,
+                        "{viewer} {label}{active}",
+                        &[
+                            ("viewer", tr(self.locale, "Viewer")),
+                            ("label", label),
+                            (
+                                "active",
+                                if self.active == index {
+                                    tr(self.locale, " · active")
+                                } else {
+                                    ""
+                                },
+                            ),
+                        ],
                     ))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.active = index;
@@ -670,12 +695,12 @@ impl Viewers {
             )
             .child(menu)
             .when_some(spatial_note, |view, note| {
-                view.child(div().text_sm().child(note))
+                view.child(div().text_sm().child(tr(self.locale, note)))
             })
             .when(mask_target, |view| {
                 view.child(
                     Checkbox::new(SharedString::from(format!("mask-overlay-{label}")))
-                        .label("Colored mask overlay")
+                        .label(tr(self.locale, "Colored mask overlay"))
                         .checked(mask_display == MaskDisplay::Overlay)
                         .on_click(cx.listener(move |this, checked, window, cx| {
                             if let Some(pane) = this.panes.get_mut(index) {
@@ -698,7 +723,7 @@ impl Viewers {
                     .gap_1()
                     .child(
                         Button::new(SharedString::from(format!("fit-{label}")))
-                            .label("Fit")
+                            .label(tr(self.locale, "Fit"))
                             .on_click(
                                 cx.listener(move |this, _, window, cx| this.fit(index, window, cx)),
                             ),
@@ -726,7 +751,11 @@ impl Viewers {
                     )
                     .child(
                         Button::new(SharedString::from(format!("retry-{label}")))
-                            .label(if loading { "Cancel" } else { "Refresh" })
+                            .label(if loading {
+                                tr(self.locale, "Cancel")
+                            } else {
+                                tr(self.locale, "Refresh")
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(pane) = this.panes.get_mut(index)
                                     && pane.loading
@@ -734,7 +763,7 @@ impl Viewers {
                                     pane.token.cancel();
                                     pane.loading = false;
                                     pane.requested_mip = None;
-                                    pane.status = "Cancelled".into();
+                                    pane.status = tr(this.locale, "Cancelled").into();
                                     cx.notify();
                                     return;
                                 }
@@ -1132,7 +1161,7 @@ impl Viewers {
                         div().p_3().child(
                             self.difference_error
                                 .clone()
-                                .unwrap_or_else(|| "Waiting for A and B…".into()),
+                                .unwrap_or_else(|| tr(self.locale, "Waiting for A and B…").into()),
                         ),
                     );
                 }
@@ -1159,7 +1188,7 @@ impl Viewers {
                 .py_1()
                 .text_xs()
                 .bg(rgb(t::JUDGE_GROUND))
-                .child(source_label),
+                .child(tr(self.locale, source_label)),
         );
         div()
             .v_flex()
@@ -1179,18 +1208,22 @@ impl Viewers {
                         .gap_2()
                         .px_2()
                         .py_1()
-                        .child(div().text_xs().child(format!(
-                            "Wipe A {:.0}% / B {:.0}%",
-                            self.wipe * 100.0,
-                            (1.0 - self.wipe) * 100.0
+                        .child(div().text_xs().child(message(
+                            self.locale,
+                            "Wipe A {left}% / B {right}%",
+                            &[
+                                ("left", &format!("{:.0}", self.wipe * 100.0)),
+                                ("right", &format!("{:.0}", (1.0 - self.wipe) * 100.0)),
+                            ],
                         )))
                         .child(Slider::new(&self.wipe_slider).w_full()),
                 )
             })
             .child(div().relative().flex_1().min_h_0().child(surface))
-            .child(div().px_2().py_1().text_xs().child(format!(
-                "A: {} · B: {}",
-                self.panes[0].status, self.panes[1].status
+            .child(div().px_2().py_1().text_xs().child(message(
+                self.locale,
+                "A: {a} · B: {b}",
+                &[("a", &self.panes[0].status), ("b", &self.panes[1].status)],
             )))
             .into_any_element()
     }
@@ -1198,14 +1231,15 @@ impl Viewers {
 impl Render for Viewers {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.model.mode;
+        let locale = self.locale;
         let weak = cx.entity().downgrade();
         let menu = Button::new("comparison-mode")
-            .label(mode.label())
+            .label(tr(locale, mode.label()))
             .dropdown_menu(move |mut menu, _, _| {
                 for comparison in Comparison::ALL {
                     let weak = weak.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(comparison.label())
+                        PopupMenuItem::new(tr(locale, comparison.label()))
                             .checked(mode == comparison)
                             .on_click(move |_, window, cx| {
                                 let _ = weak
@@ -1263,15 +1297,15 @@ impl Render for Viewers {
                                     .font_weight(t::Face::EdgeCode.weight())
                                     .text_size(t::Face::EdgeCode.size())
                                     .text_color(rgb(t::JUDGE_INK_DIM))
-                                    .child(t::code("comparison")),
+                                    .child(t::code(tr(self.locale, "comparison"))),
                             )
                             .child(menu)
                             .child(
                                 Button::new("scopes-visible")
                                     .label(if self.scopes_visible {
-                                        "Hide Scopes"
+                                        tr(self.locale, "Hide Scopes")
                                     } else {
-                                        "Show Scopes"
+                                        tr(self.locale, "Show Scopes")
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.scopes_visible = !this.scopes_visible;
@@ -1283,7 +1317,7 @@ impl Render for Viewers {
                             )
                             .child(
                                 Checkbox::new("clipping")
-                                    .label("Clipping")
+                                    .label(tr(self.locale, "Clipping"))
                                     .checked(self.clipping)
                                     .on_click(cx.listener(|this, enabled, window, cx| {
                                         this.clipping = *enabled;

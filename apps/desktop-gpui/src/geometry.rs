@@ -105,8 +105,12 @@ pub struct InputPreview {
 impl crate::Session {
     /// A name for people, not the persisted graph identifier. Duplicate names get a local ordinal.
     pub fn node_label(&self, id: &str) -> String {
+        self.localized_node_label(id, crate::i18n::Locale::English)
+    }
+    /// Translate the registered display name without touching the document or node ID.
+    pub fn localized_node_label(&self, id: &str, locale: crate::i18n::Locale) -> String {
         let Some(node) = self.editor.graph().node(&rawweave_core::NodeId::from(id)) else {
-            return "Unavailable node".into();
+            return crate::i18n::tr(locale, "Unavailable node").into();
         };
         let peers: Vec<_> = self
             .editor
@@ -116,14 +120,17 @@ impl crate::Session {
             .filter(|peer| peer.descriptor.name == node.descriptor.name)
             .collect();
         if peers.len() < 2 {
-            return node.descriptor.name.clone();
+            return crate::i18n::tr(locale, &node.descriptor.name).to_owned();
         }
         let ordinal = peers
             .iter()
             .position(|peer| peer.id == node.id)
             .unwrap_or(0)
             + 1;
-        format!("{} ({ordinal})", node.descriptor.name)
+        format!(
+            "{} ({ordinal})",
+            crate::i18n::tr(locale, &node.descriptor.name)
+        )
     }
     pub fn readable_error(&self, error: &str) -> String {
         let mut readable = error.to_owned();

@@ -54,11 +54,24 @@ pub fn library_groups(
     query: &str,
     compatible: &[String],
 ) -> Vec<(String, Vec<NodeDescriptor>)> {
+    library_groups_localized(nodes, query, compatible, crate::i18n::Locale::English)
+}
+pub fn library_groups_localized(
+    nodes: Vec<NodeDescriptor>,
+    query: &str,
+    compatible: &[String],
+    locale: crate::i18n::Locale,
+) -> Vec<(String, Vec<NodeDescriptor>)> {
     let query = query.trim().to_lowercase();
     let matches_name = |node: &NodeDescriptor| {
-        format!("{} {}", node.name, node.type_id)
-            .to_lowercase()
-            .contains(&query)
+        format!(
+            "{} {} {}",
+            node.name,
+            crate::i18n::tr(locale, &node.name),
+            node.type_id
+        )
+        .to_lowercase()
+        .contains(&query)
     };
     let has_name_matches = !query.is_empty() && nodes.iter().any(matches_name);
     let mut groups = BTreeMap::<String, Vec<NodeDescriptor>>::new();
@@ -66,7 +79,10 @@ pub fn library_groups(
         let category = node_category(&node.type_id);
         if !query.is_empty()
             && !(matches_name(&node)
-                || !has_name_matches && category.to_lowercase().contains(&query))
+                || !has_name_matches
+                    && format!("{} {}", category, crate::i18n::tr(locale, &category))
+                        .to_lowercase()
+                        .contains(&query))
         {
             continue;
         }
@@ -126,6 +142,21 @@ pub fn drop_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn localized_search_matches_display_names_and_keeps_english_ids() {
+        let nodes = vec![NodeDescriptor::new("core.exposure", "Exposure")];
+        for query in ["曝光", "Exposure", "core.exposure"] {
+            let groups = library_groups_localized(
+                nodes.clone(),
+                query,
+                &[],
+                crate::i18n::Locale::SimplifiedChinese,
+            );
+            assert_eq!(groups.len(), 1, "query: {query}");
+            assert_eq!(groups[0].1[0].type_id, "core.exposure");
+            assert_eq!(groups[0].1[0].name, "Exposure");
+        }
+    }
     use rawweave_node_api::{NodeDescriptor, PortDescriptor};
     #[test]
     fn task_order_search_priority_and_unknown_families_match_tauri() {

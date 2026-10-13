@@ -7,6 +7,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use rawweave_gpui::i18n::{Locale, message, tr};
 use rawweave_gpui::{PreviewFrame, Session};
 use rawweave_image::Dimensions;
 use rawweave_rendering::{
@@ -98,6 +99,7 @@ struct RasterKey {
     dimensions: Dimensions,
 }
 pub struct Scopes {
+    pub locale: Locale,
     analysis: Option<Arc<ScopeAnalysis>>,
     label: String,
     kind: ScopeKind,
@@ -112,6 +114,7 @@ pub struct Scopes {
 impl Scopes {
     pub fn new() -> Self {
         Self {
+            locale: Locale::default(),
             analysis: None,
             label: String::new(),
             kind: ScopeKind::Histogram,
@@ -123,6 +126,9 @@ impl Scopes {
             enabled: true,
             error: None,
         }
+    }
+    pub fn set_locale(&mut self, locale: Locale) {
+        self.locale = locale;
     }
     fn clear(&mut self, window: &mut Window) {
         if let Some(image) = self.image.take() {
@@ -240,25 +246,25 @@ impl Render for Scopes {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
         let kind = self.kind;
-        let menu =
-            Button::new("scope-view")
-                .label(kind.label())
-                .dropdown_menu(move |mut menu, _, _| {
-                    for kind in ScopeKind::ALL {
-                        let weak = weak.clone();
-                        menu = menu.item(PopupMenuItem::new(kind.label()).on_click(
-                            move |_, window, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.kind = kind;
-                                    this.clear(window);
-                                    this.refresh(window, cx);
-                                    cx.notify();
-                                });
-                            },
-                        ));
-                    }
-                    menu
-                });
+        let locale = self.locale;
+        let menu = Button::new("scope-view")
+            .label(tr(locale, kind.label()))
+            .dropdown_menu(move |mut menu, _, _| {
+                for kind in ScopeKind::ALL {
+                    let weak = weak.clone();
+                    menu = menu.item(PopupMenuItem::new(tr(locale, kind.label())).on_click(
+                        move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.kind = kind;
+                                this.clear(window);
+                                this.refresh(window, cx);
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                menu
+            });
         let weak = cx.entity().downgrade();
         let measure = canvas(
             move |bounds, window, cx| {
@@ -291,20 +297,28 @@ impl Render for Scopes {
             body = body.child(div().v_flex().gap_1().p_2().text_sm().when_some(
                 sample,
                 |view, sample| {
-                    view.child(format!(
-                        "RGB {}, {}, {} · {}",
-                        sample.rgba[0],
-                        sample.rgba[1],
-                        sample.rgba[2],
-                        sample.hex()
+                    view.child(message(
+                        self.locale,
+                        "RGB {r}, {g}, {b} · {hex}",
+                        &[
+                            ("r", &sample.rgba[0].to_string()),
+                            ("g", &sample.rgba[1].to_string()),
+                            ("b", &sample.rgba[2].to_string()),
+                            ("hex", &sample.hex()),
+                        ],
                     ))
-                    .child(format!(
-                        "Alpha {} · display luma {:.2}",
-                        sample.rgba[3], sample.luma
+                    .child(message(
+                        self.locale,
+                        "Alpha {alpha} · display luma {luma}",
+                        &[
+                            ("alpha", &sample.rgba[3].to_string()),
+                            ("luma", &format!("{:.2}", sample.luma)),
+                        ],
                     ))
-                    .child(format!(
-                        "Preview pixel {}, {} (center; sampled inspector)",
-                        sample.x, sample.y
+                    .child(message(
+                        self.locale,
+                        "Preview pixel {x}, {y} (center; sampled inspector)",
+                        &[("x", &sample.x.to_string()), ("y", &sample.y.to_string())],
                     ))
                 },
             ));
@@ -317,9 +331,9 @@ impl Render for Scopes {
                     .text_sm()
                     .child(self.error.clone().unwrap_or_else(|| {
                         if self.analysis.is_some() {
-                            "Drawing scope…".into()
+                            tr(self.locale, "Drawing scope…").into()
                         } else {
-                            "No preview to analyze".into()
+                            tr(self.locale, "No preview to analyze").into()
                         }
                     })),
             );
@@ -354,7 +368,7 @@ impl Render for Scopes {
                             .font_weight(t::Face::EdgeCode.weight())
                             .text_size(t::Face::EdgeCode.size())
                             .text_color(rgb(t::JUDGE_INK_DIM))
-                            .child(t::code("scopes")),
+                            .child(t::code(tr(self.locale, "scopes"))),
                     )
                     .child(menu),
             )
@@ -372,9 +386,14 @@ impl Render for Scopes {
                         .font_family(t::Face::Readout.family())
                         .text_size(t::Face::Readout.size())
                         .text_color(rgb(t::JUDGE_INK_DIM))
-                        .child(format!(
-                            "{} samples · {} highlights · {} shadows",
-                            analysis.sample_count, analysis.highlight_count, analysis.shadow_count
+                        .child(message(
+                            self.locale,
+                            "{samples} samples · {highlights} highlights · {shadows} shadows",
+                            &[
+                                ("samples", &analysis.sample_count.to_string()),
+                                ("highlights", &analysis.highlight_count.to_string()),
+                                ("shadows", &analysis.shadow_count.to_string()),
+                            ],
                         )),
                 )
             })
@@ -384,7 +403,7 @@ impl Render for Scopes {
                     .font_weight(t::Face::Label.weight())
                     .text_size(t::Face::Label.size())
                     .text_color(rgb(t::JUDGE_INK_DIM))
-                    .child(note),
+                    .child(tr(self.locale, note)),
             )
     }
 }
